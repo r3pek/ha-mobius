@@ -1,0 +1,4 @@
+pytest-homeassistant-custom-component
+pytest-asyncio
+bleak-retry-connector>=3.0
+pyudev

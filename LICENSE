@@ -1,0 +1,7 @@
+This project is licensed under the GNU General Public License v2.0 (GPLv2),
+matching python-mobius, the library it's built on.
+
+TODO: replace this file with the full GPLv2 license text before publishing.
+Canonical source: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+SPDX-License-Identifier: GPL-2.0-only

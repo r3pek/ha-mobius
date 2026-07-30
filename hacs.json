@@ -1,0 +1,6 @@
+{
+  "name": "Mobius (VorTech / Radion / etc.)",
+  "render_readme": true,
+  "zip_release": false,
+  "homeassistant": "2024.1.0"
+}

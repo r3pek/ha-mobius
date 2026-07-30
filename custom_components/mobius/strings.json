@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Do you want to set up {name}?"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        }
+      }
+    },
+    "abort": {
+      "no_devices_found": "No unconfigured Mobius devices found.",
+      "already_configured": "Device is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "support": {
+        "name": "Support tier"
+      },
+      "error_state": {
+        "name": "Error state"
+      },
+      "operation_state": {
+        "name": "Operation state"
+      },
+      "motor_speed": {
+        "name": "Motor speed"
+      },
+      "flow_rate": {
+        "name": "Estimated flow"
+      },
+      "schedule_point_count": {
+        "name": "Schedule points"
+      },
+      "current_pump_mode": {
+        "name": "Current mode"
+      },
+      "channel_intensity": {
+        "name": "{channel} intensity"
+      }
+    }
+  }
+}
