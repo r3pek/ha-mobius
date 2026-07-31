@@ -36,7 +36,7 @@ def _make_fake_pump_device():
         "error_state": "NoError",
         "mac_address": None,
     })
-    device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "gph": 2272})
+    device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
 
@@ -76,7 +76,7 @@ async def test_status_coordinator_fetches_pump_telemetry(hass, fake_ble_device):
     assert coordinator.data["support"] == "pump"
     assert coordinator.data["model"] == "VorTechMP40wG3QD"
     assert coordinator.data["manufacturer"] == "EcoTech Marine"
-    assert coordinator.data["telemetry"] == {"speed": 447, "gph": 2272}
+    assert coordinator.data["telemetry"] == {"speed": 447, "speed_percent": 44.7, "gph": 2272}
     assert coordinator.data["operation_state"] == "Schedule"
 
 

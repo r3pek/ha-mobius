@@ -46,7 +46,7 @@ def _fake_pump_device():
         "name": "MP40QD Right", "serial": "76517731952041",
         "primitive_type": "VorTechV1", "error_state": "NoError", "mac_address": None,
     })
-    device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "gph": 2272})
+    device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
@@ -103,7 +103,10 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
 
     speed = hass.states.get("sensor.mp40qd_right_motor_speed")
     assert speed is not None
-    assert speed.state == "447"
+    assert speed.state == "44.7"
+    assert speed.attributes["unit_of_measurement"] == "%"
+    assert speed.attributes["raw_signed_value"] == 447
+    assert speed.attributes["reverse_rotation"] is False
 
     flow = hass.states.get("sensor.mp40qd_right_estimated_flow")
     assert flow is not None

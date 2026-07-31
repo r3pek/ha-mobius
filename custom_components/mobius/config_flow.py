@@ -16,6 +16,7 @@ from homeassistant import config_entries
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
+    async_last_service_info,
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.data_entry_flow import FlowResult
@@ -29,9 +30,21 @@ _LOGGER = logging.getLogger(__name__)
 
 def _title_for(discovery: BluetoothServiceInfoBleak) -> str:
     payload = discovery.manufacturer_data.get(MOBIUS_COMPANY_ID)
-    info = parse_manufacturer_data(payload) if payload else None
+    if not payload:
+        _LOGGER.debug(
+            "No manufacturer data (company id %#06x) in advertisement for %s; "
+            "keys present: %s",
+            MOBIUS_COMPANY_ID, discovery.address, list(discovery.manufacturer_data.keys()),
+        )
+        return f"Mobius device ({discovery.address})"
+    info = parse_manufacturer_data(payload)
     if info and info.model:
         return f"{info.model.name} ({discovery.address})"
+    _LOGGER.debug(
+        "Manufacturer data present for %s but didn't parse into a known model "
+        "(payload length %d, expected 23): %s",
+        discovery.address, len(payload), payload.hex(),
+    )
     return f"Mobius device ({discovery.address})"
 
 
@@ -54,11 +67,37 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.context["title_placeholders"] = {"name": _title_for(discovery_info)}
         return await self.async_step_bluetooth_confirm()
 
+    def _refresh_discovery_info(self) -> None:
+        """
+        The BluetoothServiceInfoBleak snapshot from the initial discovery
+        trigger can have incomplete manufacturer data -- e.g. if HA matched
+        on the local_name matcher before a scan-response merge completed.
+        Re-fetch whatever HA's Bluetooth manager currently has cached for
+        this address, which by the time the confirm screen renders is
+        usually more complete, and use it if it's actually better.
+        """
+        assert self._discovery_info is not None
+        latest = async_last_service_info(self.hass, self._discovery_info.address, connectable=True)
+        if latest is None:
+            return
+        old_has_data = bool(self._discovery_info.manufacturer_data.get(MOBIUS_COMPANY_ID))
+        new_has_data = bool(latest.manufacturer_data.get(MOBIUS_COMPANY_ID))
+        if new_has_data and not old_has_data:
+            _LOGGER.debug(
+                "Refreshed discovery info for %s: initial snapshot had no "
+                "manufacturer data, cached snapshot does",
+                self._discovery_info.address,
+            )
+        self._discovery_info = latest
+
     async def async_step_bluetooth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Confirm a Bluetooth-discovered device before creating the entry."""
         assert self._discovery_info is not None
+        self._refresh_discovery_info()
+        self.context["title_placeholders"] = {"name": _title_for(self._discovery_info)}
+
         if user_input is not None:
             return self._async_create_entry(self._discovery_info)
 

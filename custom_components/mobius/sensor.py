@@ -151,36 +151,59 @@ class OperationStateSensor(MobiusStatusEntity):
 
 
 class MotorSpeedSensor(MobiusStatusEntity):
-    """Pump devices only. Raw MotorSpeed value -- unit/scale not confirmed against
-    real firmware documentation, reported as-is (see documentation/03 in python-mobius)."""
+    """Pump devices only. Confirmed (via the decompiled app's own display
+    code -- see python-mobius documentation/03) to be a percentage of max
+    pump power, not RPM. Uses speed_percent (always non-negative); the raw
+    signed value (sign encodes reverse-rotation direction) is exposed as an
+    attribute rather than the primary state."""
 
     def __init__(self, coordinator, address):
         super().__init__(
             coordinator, address, "motor_speed",
-            SensorEntityDescription(key="motor_speed", translation_key="motor_speed",
-                                     state_class=SensorStateClass.MEASUREMENT),
+            SensorEntityDescription(
+                key="motor_speed", translation_key="motor_speed",
+                native_unit_of_measurement="%", state_class=SensorStateClass.MEASUREMENT,
+            ),
         )
 
     @property
     def native_value(self):
         telemetry = (self.coordinator.data or {}).get("telemetry") or {}
-        return telemetry.get("speed")
+        return telemetry.get("speed_percent")
+
+    @property
+    def extra_state_attributes(self):
+        telemetry = (self.coordinator.data or {}).get("telemetry") or {}
+        raw = telemetry.get("speed")
+        if raw is None:
+            return {}
+        return {"raw_signed_value": raw, "reverse_rotation": raw < 0}
 
 
 class FlowRateSensor(MobiusStatusEntity):
     """Pump devices only. Estimated flow (GPH), confirmed live-queried by the app.
 
     native_unit_of_measurement stays "gal/h" -- that's the actual native
-    value the protocol reports, not a display preference. With device_class
-    set, Home Assistant automatically converts the *displayed* value to
-    whatever unit system the instance is configured for (Settings -> General
-    -> Unit System) -- e.g. shows L/h automatically for Metric instances --
-    without us hardcoding a "default" unit or doing manual conversion math
-    that could itself introduce an error. Confirmed 'gal/h' is a valid
-    VOLUME_FLOW_RATE unit on HA 2026.06 (current docs list it); it was NOT
-    valid on HA 2025.1.4 (the version pinned by this repo's test harness) --
-    exact cutoff version between those two isn't pinned down, so if you're
-    running something older than ~2026, double check this still validates.
+    value the protocol reports, not a display preference.
+
+    CORRECTION (verified against real HA source, homeassistant/components/
+    sensor/__init__.py and homeassistant/util/unit_system.py): unlike
+    temperature/length/pressure, `volume_flow_rate` is NOT one of the
+    device classes tied to HA's system-wide Metric/US Customary toggle
+    (Settings -> General -> Unit System) -- that toggle has no effect on
+    this sensor at all. device_class=VOLUME_FLOW_RATE does register real
+    conversion machinery (VolumeFlowRateConverter, confirmed present), but
+    it's only invoked via a PER-ENTITY manual override stored in the entity
+    registry (Settings -> Devices & Services -> Entities -> this entity ->
+    gear icon -> "Unit of measurement"), not automatically from any
+    system-wide preference. If you want L/h (or any other unit) displayed,
+    set it there -- there's no code-level "default" to change.
+
+    Confirmed 'gal/h' is a valid VOLUME_FLOW_RATE unit on HA 2026.06
+    (current docs list it); it was NOT valid on HA 2025.1.4 (the version
+    pinned by this repo's test harness) -- exact cutoff version between
+    those two isn't pinned down, so if you're running something older than
+    ~2026, double check this still validates.
     """
 
     def __init__(self, coordinator, address):

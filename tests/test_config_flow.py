@@ -89,3 +89,32 @@ async def test_user_step_no_devices_found(hass):
     )
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "no_devices_found"
+
+
+async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
+    """Reproduces a real reported bug: the initial BluetoothServiceInfoBleak
+    passed to async_step_bluetooth can have empty/incomplete manufacturer
+    data (e.g. matched via the local_name matcher before a scan-response
+    merge completed), showing a generic "Mobius device (address)" title
+    instead of the real model. Confirms the confirm-step refresh picks up
+    fuller data once it's available in HA's Bluetooth manager cache."""
+    from unittest.mock import patch
+
+    incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")  # no usable payload yet
+    # Real captured payload becomes available by the time we check again.
+    complete_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with patch(
+        "custom_components.mobius.config_flow.async_last_service_info",
+        return_value=complete_info,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=incomplete_info
+        )
+        # The initial title (before refresh) would have been generic --
+        # what matters is the confirm step's placeholders after refresh.
+        assert "VorTechMP40wG3QD" in result["description_placeholders"]["name"]
+
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+        assert result2["type"] == FlowResultType.CREATE_ENTRY
+        assert "VorTechMP40wG3QD" in result2["title"]
