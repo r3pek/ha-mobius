@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+- **Major architecture change: persistent connections, not connect-per-poll.**
+  Each device now gets exactly one shared BLE connection
+  (`MobiusConnectionManager`), used by both polling tiers -- connected
+  once, read many times, not reconnected on every single poll like before.
+  This was flagged as the "proper fix" for BLE connection overhead back
+  when the fast-poll interval was lowered to 10s; now implemented.
+  - Reconnection (first connect, or after a detected drop) always
+    resolves the device's CURRENT address by serial number, matching how
+    the official app itself identifies devices -- confirmed via real
+    hardware and via `python-mobius`'s `documentation/
+    12-device-identity-and-address-stability.md`. Deliberately reads Home
+    Assistant's own already-running Bluetooth cache
+    (`bluetooth.async_discovered_service_info()`) to do this, NOT
+    `python-mobius`'s own `find_device_by_serial()` -- that function runs
+    an independent `BleakScanner`, which would conflict with Home
+    Assistant's shared one (the exact anti-pattern this integration has
+    avoided from the start).
+  - New `CONF_SERIAL` stored in config entry data (alongside the existing
+    `CONF_ADDRESS`, kept for display/debugging) -- the config flow now
+    aborts cleanly if a device's serial can't be determined, since it's
+    required for reliable connections.
+  - Failure detection is reactive (a dropped connection is only noticed
+    when a scheduled read actually fails, then reconnected once and
+    retried within the same poll cycle), not via a bleak disconnect
+    callback -- simpler, and at most ~10s of staleness given the fast
+    tier's polling interval.
+  - `async_unload_entry` now properly closes the persistent connection,
+    which didn't exist to close under the old per-poll-connect design.
+  - **Requires `python-mobius>=0.1.4`** (needs the new `is_connected`
+    property, not yet in the released `0.1.3`).
+  - Rewrote `tests/test_coordinator.py` (12 tests covering the connection
+    manager directly: serial resolution against HA's cache, connect-once-
+    and-reuse, reconnect-after-failure, concurrent-connect-only-happens-
+    once via the internal lock, and the retry-within-one-cycle behavior)
+    and updated `tests/test_sensor.py` for the new architecture. 23 tests
+    total, all passing.
+
 ## 0.1.1
 
 - Bluetooth autodiscovery via manifest.json matchers (local_name="MOBIUS",

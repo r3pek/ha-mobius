@@ -23,9 +23,14 @@ from homeassistant.data_entry_flow import FlowResult
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_SERIAL
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _parsed_info_for(discovery: BluetoothServiceInfoBleak):
+    payload = discovery.manufacturer_data.get(MOBIUS_COMPANY_ID)
+    return parse_manufacturer_data(payload) if payload else None
 
 
 def _title_for(discovery: BluetoothServiceInfoBleak) -> str:
@@ -144,7 +149,17 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     def _async_create_entry(self, discovery: BluetoothServiceInfoBleak) -> FlowResult:
+        info = _parsed_info_for(discovery)
+        if info is None:
+            # Shouldn't normally happen -- _refresh_discovery_info() already
+            # tries to get a fuller snapshot before this point -- but the
+            # serial is now required (the connection/coordinator layer
+            # resolves and reconnects to devices by serial, not address --
+            # see python-mobius's documentation/
+            # 12-device-identity-and-address-stability.md), so abort
+            # cleanly rather than create an entry that could never connect.
+            return self.async_abort(reason="no_manufacturer_data")
         return self.async_create_entry(
             title=_title_for(discovery),
-            data={CONF_ADDRESS: discovery.address},
+            data={CONF_ADDRESS: discovery.address, CONF_SERIAL: info.serial},
         )

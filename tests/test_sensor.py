@@ -13,10 +13,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType
 
-from custom_components.mobius.const import DOMAIN
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL
 
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
+PUMP_SERIAL = "76517731952041"
 LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
+LIGHT_SERIAL = "7V4Z00F143RBED"
 
 # Real 13-channel set and a subset of real interpolated intensities,
 # captured live from an actual Radion XR15 G6 Pro during development.
@@ -30,13 +32,6 @@ REAL_LIGHT_INTENSITIES = {
     "Green": 240.0, "Red": 240.0, "UV": 1000.0, "WarmWhite": 240.0, "Violet": 1000.0,
     "MoonlightWhite": 0.0, "MoonlightBlue": 0.0, "StormProbability": 0.0, "CloudProbability": 0.0,
 }
-
-
-def _fake_ctx(device):
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=device)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    return ctx
 
 
 def _fake_pump_device():
@@ -86,15 +81,16 @@ def _fake_light_device():
 
 
 async def test_pump_entry_setup_creates_expected_sensors(hass):
-    entry = MockConfigEntry(domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS}, unique_id=PUMP_ADDRESS)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_ADDRESS,
+    )
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
-        return_value=MagicMock(),
-    ), patch(
-        "custom_components.mobius.coordinator.MobiusDevice",
-        return_value=_fake_ctx(_fake_pump_device()),
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -127,15 +123,16 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
-    entry = MockConfigEntry(domain=DOMAIN, data={CONF_ADDRESS: LIGHT_ADDRESS}, unique_id=LIGHT_ADDRESS)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: LIGHT_ADDRESS, CONF_SERIAL: LIGHT_SERIAL},
+        unique_id=LIGHT_ADDRESS,
+    )
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
-        return_value=MagicMock(),
-    ), patch(
-        "custom_components.mobius.coordinator.MobiusDevice",
-        return_value=_fake_ctx(_fake_light_device()),
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_light_device()),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -155,26 +152,35 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     assert support.state == "light"
 
 
-async def test_entry_unload_removes_entities(hass):
-    entry = MockConfigEntry(domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS}, unique_id=PUMP_ADDRESS)
+async def test_entry_unload_removes_entities_and_disconnects(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_ADDRESS,
+    )
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
-        return_value=MagicMock(),
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
     ), patch(
-        "custom_components.mobius.coordinator.MobiusDevice",
-        return_value=_fake_ctx(_fake_pump_device()),
-    ):
+        "custom_components.mobius.coordinator.MobiusConnectionManager.disconnect",
+        AsyncMock(),
+    ) as mock_disconnect:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
+        assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
 
-    assert await hass.config_entries.async_unload(entry.entry_id)
-    await hass.async_block_till_done()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
     assert entry.state.value == "not_loaded"
+    # The actual new behavior: unload must close the persistent connection,
+    # not just unload the sensor platform (which the old architecture
+    # didn't need to do at all, since there was never anything persistent
+    # to close).
+    mock_disconnect.assert_awaited_once()
 
 
 def test_identical_model_devices_get_distinct_names_via_serial():

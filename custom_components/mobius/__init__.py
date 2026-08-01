@@ -8,15 +8,17 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryError
 
-from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS
-from .coordinator import MobiusScheduleCoordinator, MobiusStatusCoordinator
+from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL
+from .coordinator import MobiusConnectionManager, MobiusScheduleCoordinator, MobiusStatusCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
 @dataclass
 class MobiusRuntimeData:
+    connection: MobiusConnectionManager
     status: MobiusStatusCoordinator
     schedule: MobiusScheduleCoordinator
 
@@ -36,20 +38,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     semaphore = hass.data[DOMAIN].setdefault(
         "connection_semaphore", asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
     )
-    address = entry.data[CONF_ADDRESS]
 
-    status_coordinator = MobiusStatusCoordinator(hass, entry, address, semaphore)
-    schedule_coordinator = MobiusScheduleCoordinator(hass, entry, address, semaphore)
+    serial = entry.data.get(CONF_SERIAL)
+    if serial is None:
+        # Entries created before serial-based identity was added won't
+        # have this. There's no safe way to connect without it (address
+        # alone isn't reliable -- see documentation/
+        # 12-device-identity-and-address-stability.md), so ask for a clean
+        # re-setup rather than falling back to the old address-only path.
+        raise ConfigEntryError(
+            f"This Mobius device (address {entry.data.get(CONF_ADDRESS)}) was set up "
+            "before serial-based device identity was added and is missing its serial "
+            "number. Please remove and re-add it."
+        )
+
+    connection = MobiusConnectionManager(hass, serial, semaphore)
+    status_coordinator = MobiusStatusCoordinator(hass, entry, connection)
+    schedule_coordinator = MobiusScheduleCoordinator(hass, entry, connection)
 
     await status_coordinator.async_config_entry_first_refresh()
     await schedule_coordinator.async_config_entry_first_refresh()
 
-    entry.runtime_data = MobiusRuntimeData(status=status_coordinator, schedule=schedule_coordinator)
+    entry.runtime_data = MobiusRuntimeData(
+        connection=connection, status=status_coordinator, schedule=schedule_coordinator
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    """Unload a config entry, closing its persistent connection."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime is not None:
+        await runtime.connection.disconnect()
+    return unload_ok

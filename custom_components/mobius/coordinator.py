@@ -1,30 +1,43 @@
 """
-Data update coordinators for a single Mobius device.
+Data update coordinators for a single Mobius device, sharing ONE
+persistent BLE connection (see MobiusConnectionManager) rather than each
+tier connecting/disconnecting independently on every poll.
 
-Two tiers, per documentation/ discussion of BLE connection cost:
-  - MobiusStatusCoordinator: fast (~60s), cheap reads -- identity + live
+Two tiers, per the design discussion in documentation/: telemetry is
+cheap (a couple of small GATT reads), schedule fetches are expensive
+(multiple round trips for potentially many points), and schedules don't
+change minute-to-minute anyway.
+  - MobiusStatusCoordinator: fast (~10s), cheap reads -- identity + live
     pump telemetry (speed/GPH/operation state). No schedule fetch.
   - MobiusScheduleCoordinator: slow (~10min), expensive reads -- the full
-    programmed schedule, which doesn't change minute-to-minute anyway.
+    programmed schedule.
 
-Both share a single connection-count-limiting semaphore across the whole
-integration (not just per-device) -- even 4 devices showed real BLE
-connection instability during development of the underlying python-mobius
-library, so this deliberately throttles how many simultaneous connection
-attempts the integration makes.
+Reconnection (the first connect, or after a detected drop) always
+resolves the device's CURRENT address by serial number -- these devices'
+BLE addresses are not guaranteed stable over time, confirmed via real
+hardware and via the official app's own Peripheral class (identity is
+serial-number-based, never address-based). See python-mobius's
+documentation/12-device-identity-and-address-stability.md.
 
-NOTE: written against Home Assistant's current documented Bluetooth APIs
-(bluetooth.async_ble_device_from_address, DataUpdateCoordinator) as of
-mid-2026 developer docs, but not yet exercised against a running Home
-Assistant instance -- please report back anything that doesn't work as
-described so this can be corrected.
+Deliberately does NOT use mobius.find_device_by_serial() for this --
+that function runs its own independent BleakScanner, which conflicts
+with Home Assistant's own shared Bluetooth manager (the exact
+connection-instability-inducing anti-pattern this integration has avoided
+from the start). Instead, MobiusConnectionManager reads Home Assistant's
+own already-running Bluetooth cache (bluetooth.async_discovered_service_info()),
+the same approach config_flow.py's manual-setup step already uses.
+
+Failure detection is REACTIVE, not proactive: a dropped connection is
+only discovered when a scheduled read actually fails, not via a bleak
+disconnect callback. Given the fast tier already polls every ~10s, this
+is at most ~10s of staleness in exchange for meaningfully simpler code.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -33,7 +46,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    MobiusDevice, PrimitiveType,
+    MobiusDevice, PrimitiveType, MOBIUS_COMPANY_ID, parse_manufacturer_data,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
     PRIMITIVE_SIZE,
 )
@@ -43,44 +56,137 @@ from .const import CONNECT_TIMEOUT, FAST_POLL_INTERVAL, SLOW_POLL_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 
+class MobiusConnectionManager:
+    """
+    Owns a single persistent MobiusDevice connection for one physical
+    device, shared by both coordinator tiers for that device -- the
+    actual point of this class existing is that there's exactly one BLE
+    connection per device, not one per poll per tier.
+    """
+
+    def __init__(self, hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore):
+        self.hass = hass
+        self.serial = serial
+        self._semaphore = semaphore
+        self._device: Optional[MobiusDevice] = None
+        # Prevents two coordinators (status + schedule) from both trying
+        # to reconnect the same device at the same time.
+        self._lock = asyncio.Lock()
+
+    async def _resolve_current_ble_device(self):
+        """
+        Finds the BLEDevice currently advertising self.serial, by reading
+        Home Assistant's own Bluetooth cache -- NOT by scanning
+        independently. See this module's docstring for why.
+        """
+        for info in bluetooth.async_discovered_service_info(self.hass, connectable=True):
+            payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+            if not payload:
+                continue
+            parsed = parse_manufacturer_data(payload)
+            if parsed and parsed.serial == self.serial:
+                return bluetooth.async_ble_device_from_address(
+                    self.hass, info.address, connectable=True
+                )
+        return None
+
+    def mark_disconnected(self) -> None:
+        """
+        Forces the next ensure_connected() to reconnect from scratch, even
+        if the underlying client's own is_connected might still say True
+        momentarily -- used when a read fails unexpectedly, since that's a
+        reliable sign something's wrong even if the client object hasn't
+        fully updated its own state yet.
+        """
+        self._device = None
+
+    async def ensure_connected(self) -> MobiusDevice:
+        """Returns an already-connected MobiusDevice, reconnecting first
+        (via serial, resolved from Home Assistant's own Bluetooth cache)
+        if necessary."""
+        if self._device is not None and self._device.is_connected:
+            return self._device
+
+        async with self._lock:
+            # Re-check after acquiring the lock -- the other coordinator
+            # may have already reconnected while we were waiting on it.
+            if self._device is not None and self._device.is_connected:
+                return self._device
+
+            ble_device = await self._resolve_current_ble_device()
+            if ble_device is None:
+                raise UpdateFailed(
+                    f"No device currently advertising serial {self.serial!r} was "
+                    "found in Home Assistant's Bluetooth cache"
+                )
+
+            async with self._semaphore:
+                new_device = MobiusDevice(
+                    ble_device, serial=self.serial, connect_timeout=CONNECT_TIMEOUT
+                )
+                try:
+                    await new_device.connect()
+                except Exception as err:
+                    raise UpdateFailed(
+                        f"Error connecting to {self.serial}: {err}"
+                    ) from err
+
+            self._device = new_device
+            return self._device
+
+    async def disconnect(self) -> None:
+        if self._device is not None:
+            try:
+                await self._device.disconnect()
+            except Exception:
+                pass  # best-effort; we're tearing down anyway
+            self._device = None
+
+
 class MobiusCoordinatorBase(DataUpdateCoordinator[dict[str, Any]]):
-    """Shared connect/semaphore/error-handling plumbing for both tiers."""
+    """Shared read/error-handling plumbing for both tiers, on top of a
+    shared MobiusConnectionManager."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         entry: ConfigEntry,
-        address: str,
-        semaphore: asyncio.Semaphore,
+        connection_manager: MobiusConnectionManager,
         update_interval,
         name_suffix: str,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
-            name=f"mobius_{address}_{name_suffix}",
+            name=f"mobius_{connection_manager.serial}_{name_suffix}",
             update_interval=update_interval,
         )
-        self.address = address
         self.config_entry = entry
-        self._semaphore = semaphore
+        self._connection_manager = connection_manager
 
     async def _async_update_data(self) -> dict[str, Any]:
-        ble_device = bluetooth.async_ble_device_from_address(
-            self.hass, self.address, connectable=True
-        )
-        if ble_device is None:
-            raise UpdateFailed(
-                f"Device {self.address} is not currently visible to Home Assistant's Bluetooth stack"
+        try:
+            device = await self._connection_manager.ensure_connected()
+            return await self._async_fetch(device)
+        except UpdateFailed:
+            raise
+        except Exception as err:
+            # A read failed even though we thought we were connected -- the
+            # connection may have dropped since ensure_connected() last
+            # checked. Reactive detection: try ONE reconnect + retry within
+            # this same poll cycle before giving up for this cycle.
+            _LOGGER.debug(
+                "Read failed for %s (%s), attempting one reconnect",
+                self._connection_manager.serial, err,
             )
-
-        async with self._semaphore:
+            self._connection_manager.mark_disconnected()
             try:
-                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as device:
-                    return await self._async_fetch(device)
-            except Exception as err:  # noqa: BLE001 -- deliberately broad: any
-                # failure here should degrade to "unavailable", not crash HA
-                raise UpdateFailed(f"Error communicating with {self.address}: {err}") from err
+                device = await self._connection_manager.ensure_connected()
+                return await self._async_fetch(device)
+            except Exception as err2:
+                raise UpdateFailed(
+                    f"Error communicating with {self._connection_manager.serial}: {err2}"
+                ) from err2
 
     async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
         raise NotImplementedError
@@ -89,8 +195,8 @@ class MobiusCoordinatorBase(DataUpdateCoordinator[dict[str, Any]]):
 class MobiusStatusCoordinator(MobiusCoordinatorBase):
     """Fast tier: identity + live telemetry. No schedule fetch."""
 
-    def __init__(self, hass, entry, address, semaphore):
-        super().__init__(hass, entry, address, semaphore, FAST_POLL_INTERVAL, "status")
+    def __init__(self, hass, entry, connection_manager):
+        super().__init__(hass, entry, connection_manager, FAST_POLL_INTERVAL, "status")
 
     async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
         info = await device.get_device_info()
@@ -120,8 +226,8 @@ class MobiusStatusCoordinator(MobiusCoordinatorBase):
 class MobiusScheduleCoordinator(MobiusCoordinatorBase):
     """Slow tier: schedule fetch + interpolation/block-lookup."""
 
-    def __init__(self, hass, entry, address, semaphore):
-        super().__init__(hass, entry, address, semaphore, SLOW_POLL_INTERVAL, "schedule")
+    def __init__(self, hass, entry, connection_manager):
+        super().__init__(hass, entry, connection_manager, SLOW_POLL_INTERVAL, "schedule")
 
     async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
         primitive = await device.identify_device_type()

@@ -57,19 +57,50 @@ pytest tests/
     official app — not a live device read (there isn't one; see
     `python-mobius`'s docs on why).
 
+## Connection architecture
+
+**Persistent connections, not connect-per-poll.** Each physical device
+gets exactly one shared BLE connection (`MobiusConnectionManager`), used
+by both polling tiers below — connected once, read many times, not
+reconnected on every poll. Earlier versions of this integration
+connected/disconnected on every single poll, which meant real BLE
+handshake overhead every ~10 seconds; this was the "proper fix" flagged
+as a known gap back then, now implemented.
+
+**Reconnection is always by serial number, never a cached BLE address.**
+These devices' addresses aren't guaranteed stable over time (confirmed via
+real hardware and via the official app's own device-identity model — see
+`python-mobius`'s `documentation/12-device-identity-and-address-stability.md`).
+When a reconnect is needed (the first connect, or after a detected drop),
+this integration resolves the device's *current* address by reading Home
+Assistant's own already-running Bluetooth cache
+(`bluetooth.async_discovered_service_info()`) and matching on serial number
+— deliberately not via `python-mobius`'s own `find_device_by_serial()`,
+since that runs an independent `BleakScanner`, which would conflict with
+Home Assistant's shared one.
+
+**Failure detection is reactive**, not via a bleak disconnect callback: a
+dropped connection is only discovered when a scheduled read actually
+fails, then reconnected once and retried within that same poll cycle.
+Given the fast tier polls every ~10s, this is at most ~10s of staleness
+in exchange for meaningfully simpler code.
+
 ## Polling design
 
 Two tiers per device, to avoid hammering BLE more than necessary:
 
-- **Status** (~60s): cheap reads — identity + live pump telemetry.
+- **Status** (~10s): cheap reads — identity + live pump telemetry. Now
+  just a read over an already-open connection in the common case, not a
+  full connect/disconnect cycle.
 - **Schedule** (~10min): expensive reads — the full programmed schedule,
   which doesn't change minute-to-minute anyway.
 
-Connection attempts across the whole integration are also limited via a
-shared semaphore (default: 2 concurrent) — even a handful of these devices
+Connection *attempts* (the first connect for each device, or a reconnect
+after a detected drop) are limited via a shared semaphore across the whole
+integration (default: 2 concurrent) — even a handful of these devices
 showed real BLE connection instability during `python-mobius`'s own
-development, so this deliberately throttles rather than firing off N
-simultaneous connections.
+development. With persistent connections this matters far less often than
+it used to, since normal polling no longer connects at all.
 
 ## Install
 

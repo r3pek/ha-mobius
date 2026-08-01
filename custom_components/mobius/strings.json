@@ -12,7 +12,8 @@
     },
     "abort": {
       "no_devices_found": "No unconfigured Mobius devices found.",
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "no_manufacturer_data": "Could not read this device's serial number from its Bluetooth advertisement (required to connect reliably) -- try again when it's advertising normally."
     }
   },
   "entity": {
