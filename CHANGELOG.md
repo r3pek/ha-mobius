@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
 - **Simplified the integration's display name.** `manifest.json`/`hacs.json`
   `"name"` changed from `"Mobius (VorTech / Radion / etc.)"` to just
