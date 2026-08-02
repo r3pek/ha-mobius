@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Config entry title no longer includes the MAC address.** `_title_for()`
+  (the discovery card / integrations-list title) used
+  `f"{model} ({discovery.address})"` -- still address-based, missed in the
+  earlier serial-based-identity work. Now uses serial for the same
+  disambiguation purpose (`_device_info()` in `sensor.py` already did this
+  correctly; this brings the title in line with it), which also means the
+  title won't go stale if the device's address changes later, since a
+  config entry's title is set once at creation and never auto-updated.
+  New assertion in `test_bluetooth_discovery_creates_entry` confirms the
+  exact title format and that the address is absent from it.
+
 ## 0.1.2
 
 - **Clarified the `no_manufacturer_data` abort message.** Now explains

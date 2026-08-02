@@ -34,23 +34,36 @@ def _parsed_info_for(discovery: BluetoothServiceInfoBleak):
 
 
 def _title_for(discovery: BluetoothServiceInfoBleak) -> str:
-    payload = discovery.manufacturer_data.get(MOBIUS_COMPANY_ID)
-    if not payload:
+    """
+    The config entry's title (shown in the discovery card and the
+    integrations list). Uses serial, not MAC address, for the same reason
+    _device_info() in sensor.py already does: identical-model devices
+    (e.g. two XR15 lights) need a real disambiguator, and unlike MAC
+    address, serial won't go stale if the device's address later changes
+    (this title is set once at entry creation and never auto-updated --
+    see python-mobius's documentation/12-device-identity-and-address-
+    stability.md).
+
+    All real call sites now guarantee parseable manufacturer data by the
+    time this is called (the fail-fast fixes elsewhere in this file abort
+    before ever reaching a title-display point without it) -- the
+    fallback below is just defensive, not something expected to trigger
+    in practice.
+    """
+    info = _parsed_info_for(discovery)
+    if info is None:
         _LOGGER.debug(
-            "No manufacturer data (company id %#06x) in advertisement for %s; "
-            "keys present: %s",
-            MOBIUS_COMPANY_ID, discovery.address, list(discovery.manufacturer_data.keys()),
+            "_title_for() called without parseable manufacturer data for %s "
+            "-- shouldn't normally happen, all call sites should already "
+            "guarantee this",
+            discovery.address,
         )
-        return f"Mobius device ({discovery.address})"
-    info = parse_manufacturer_data(payload)
-    if info and info.model:
-        return f"{info.model.name} ({discovery.address})"
-    _LOGGER.debug(
-        "Manufacturer data present for %s but didn't parse into a known model "
-        "(payload length %d, expected 23): %s",
-        discovery.address, len(payload), payload.hex(),
-    )
-    return f"Mobius device ({discovery.address})"
+        return "Mobius device"
+    if info.model and info.serial:
+        return f"{info.model.name} ({info.serial})"
+    if info.model:
+        return info.model.name
+    return "Mobius device"
 
 
 class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

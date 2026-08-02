@@ -60,6 +60,11 @@ async def test_bluetooth_discovery_creates_entry(hass):
     # Real model decoded from the real captured payload -- confirms the
     # config flow's use of mobius.parse_manufacturer_data() actually works.
     assert "VorTechMP40wG3QD" in result2["title"]
+    # The actual point of this test: title uses serial for disambiguation,
+    # not the (potentially unstable, see documentation/12-device-identity-
+    # and-address-stability.md) MAC address.
+    assert result2["title"] == f"VorTechMP40wG3QD ({PUMP_SERIAL})"
+    assert PUMP_ADDRESS not in result2["title"]
 
 
 async def test_bluetooth_discovery_light_title(hass):
