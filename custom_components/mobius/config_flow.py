@@ -171,18 +171,25 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             return self._async_create_entry(discovery)
 
-        current_addresses = self._async_current_ids()
+        # BUG FIX: this used to compare discovery.address against
+        # self._async_current_ids() -- but since unique_id is now
+        # serial-based (not address-based, see async_step_bluetooth()),
+        # that set contains SERIAL numbers, not addresses. Comparing a MAC
+        # address against a set of serials never matches anything, so
+        # already-configured devices were never actually being excluded
+        # here. Compare serial against serial instead.
+        current_serials = self._async_current_ids()
         self._discovered_devices = {
             discovery.address: discovery
             for discovery in async_discovered_service_info(self.hass)
-            if discovery.address not in current_addresses
-            and discovery.name
+            if discovery.name
             and "mobius" in discovery.name.lower()
             # Only offer devices we can actually identify a serial for --
             # matches the same fail-fast preference as the automatic
             # discovery flow, applied here by simply not listing them
             # rather than letting you pick one that would then abort.
-            and _parsed_info_for(discovery) is not None
+            and (info := _parsed_info_for(discovery)) is not None
+            and info.serial not in current_serials
         }
 
         if not self._discovered_devices:

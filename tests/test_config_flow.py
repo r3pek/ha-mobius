@@ -9,8 +9,9 @@ from homeassistant import config_entries
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL
 
 # Real captured payload for a VorTech MP40QD pump (see python-mobius tests).
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736343935323231303539303139")
@@ -188,6 +189,41 @@ async def test_manual_setup_excludes_unidentifiable_devices(hass):
     offered_addresses = list(result["data_schema"].schema[CONF_ADDRESS].container)
     assert PUMP_ADDRESS in offered_addresses
     assert "FF:FF:FF:FF:FF:FF" not in offered_addresses
+
+
+async def test_manual_setup_excludes_already_configured_devices(hass):
+    """
+    The actual regression this fix is for: after switching unique_id to
+    serial-based, the manual-setup filter was still comparing
+    discovery.address against a set of unique_ids -- which now holds
+    SERIAL numbers, not addresses. Comparing a MAC against a set of
+    serials never matches, so an already-configured device kept showing
+    up in the dropdown as if it were new. Confirm it's actually excluded
+    now.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    from unittest.mock import patch
+
+    already_configured = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+    new_device = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)
+
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        return_value=[already_configured, new_device],
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    offered_addresses = list(result["data_schema"].schema[CONF_ADDRESS].container)
+    assert PUMP_ADDRESS not in offered_addresses  # already configured -- must not appear
+    assert LIGHT_ADDRESS in offered_addresses  # genuinely new -- must appear
 
 
 async def test_user_step_no_devices_found(hass):

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed a real bug: the manual-setup device list wasn't actually
+  excluding already-configured devices.** After switching `unique_id` to
+  serial-based, the filter was still comparing `discovery.address` against
+  `self._async_current_ids()` -- which now holds serial numbers, not
+  addresses. Comparing a MAC address against a set of serials never
+  matches anything, so an already-configured device kept showing up in
+  the manual "Add Integration" dropdown as if it were new. Fixed to
+  compare serial against serial instead. New regression test
+  (`test_manual_setup_excludes_already_configured_devices`) reproduces
+  the exact scenario and was confirmed to fail without the fix.
+
 ## 0.1.3
 
 - **Simplified the integration's display name.** `manifest.json`/`hacs.json`
