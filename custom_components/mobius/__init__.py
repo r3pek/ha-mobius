@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
-
-from mobius import Model
 
 from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL
 from .coordinator import MobiusConnectionManager, MobiusScheduleCoordinator, MobiusStatusCoordinator
@@ -23,12 +21,6 @@ class MobiusRuntimeData:
     connection: MobiusConnectionManager
     status: MobiusStatusCoordinator
     schedule: MobiusScheduleCoordinator
-    # Fetched once at setup, not re-polled -- firmware essentially never
-    # changes during normal operation, unlike everything the coordinators
-    # track. {label: version_string}, using the confirmed EcoTech display
-    # labels where the model is recognized (see python-mobius's
-    # get_firmware_versions()).
-    firmware_versions: dict = field(default_factory=dict)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -67,22 +59,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await status_coordinator.async_config_entry_first_refresh()
     await schedule_coordinator.async_config_entry_first_refresh()
 
-    firmware_versions: dict = {}
-    try:
-        device = await connection.ensure_connected()
-        model_raw = (status_coordinator.data or {}).get("model_raw")
-        try:
-            model = Model(model_raw) if model_raw is not None else None
-        except ValueError:
-            model = None
-        firmware_versions = await device.get_firmware_versions(model=model)
-    except Exception:  # noqa: BLE001 -- best-effort; missing firmware info
-        # shouldn't block setup of everything else.
-        pass
-
     entry.runtime_data = MobiusRuntimeData(
-        connection=connection, status=status_coordinator, schedule=schedule_coordinator,
-        firmware_versions=firmware_versions,
+        connection=connection, status=status_coordinator, schedule=schedule_coordinator
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

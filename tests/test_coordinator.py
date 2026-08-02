@@ -7,8 +7,12 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.const import CONF_ADDRESS
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager,
     MobiusScheduleCoordinator,
@@ -52,6 +56,10 @@ def _make_fake_pump_device():
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
+    device.get_firmware_versions = AsyncMock(return_value={
+        "Radio": "4.0.21", "Radio Bootloader": "1.2",
+        "Product OS": "2.1.5", "Product Bootloader": "1.0",
+    })
     return device
 
 
@@ -289,3 +297,74 @@ async def test_coordinator_fails_after_reconnect_also_fails(hass):
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success is False
+
+
+# --------------------------------------------------------------------------
+# Firmware version: re-fetched on the slow tier (not just once at setup --
+# real devices got an OTA update mid-development of this integration) and
+# synced to the device registry when it changes.
+# --------------------------------------------------------------------------
+
+async def test_schedule_coordinator_syncs_device_registry_sw_version_on_change(hass):
+    """The actual point of this fix: a firmware version that changes
+    between polls must propagate to the device registry, not just be
+    captured once and left stale."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, PUMP_ADDRESS)},
+        sw_version="2.1.5",  # the OLD version
+    )
+    assert device_entry.sw_version == "2.1.5"
+
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+    coordinator = MobiusScheduleCoordinator(hass, entry, manager)
+
+    fake_device = _make_fake_pump_device()
+    fake_device.get_firmware_versions = AsyncMock(return_value={
+        "Radio": "4.0.22", "Radio Bootloader": "1.2",
+        "Product OS": "2.2.0",  # the NEW version, after the OTA update
+        "Product Bootloader": "1.0",
+    })
+
+    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    updated_device = device_registry.async_get(device_entry.id)
+    assert updated_device.sw_version == "2.2.0"
+
+
+async def test_schedule_coordinator_does_not_touch_registry_when_unchanged(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, PUMP_ADDRESS)},
+        sw_version="2.1.5",
+    )
+
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+    coordinator = MobiusScheduleCoordinator(hass, entry, manager)
+
+    fake_device = _make_fake_pump_device()  # same "2.1.5" as already registered
+
+    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    updated_device = device_registry.async_get(device_entry.id)
+    assert updated_device.sw_version == "2.1.5"  # unchanged, as expected

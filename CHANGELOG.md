@@ -32,6 +32,17 @@
   different address but the same serial, and correctly aborts instead of
   duplicating.
 
+- **Firmware version now re-fetched periodically, not just once at setup.**
+  Corrects the entry below: firmware was assumed to essentially never
+  change, so it was fetched once at setup and never checked again -- wrong,
+  confirmed by a real OTA update to real pump hardware mid-development of
+  this integration. Moved the fetch into the schedule (slow, ~10min) tier
+  instead of a one-time setup-only fetch, and added an explicit sync step
+  so the device registry's `sw_version` actually updates when it changes,
+  rather than silently going stale. New tests
+  (`test_schedule_coordinator_syncs_device_registry_sw_version_on_change`,
+  `test_schedule_coordinator_does_not_touch_registry_when_unchanged`).
+
 - **Added firmware version and calibration status.** Device registry
   `sw_version` is now populated from the confirmed "Product OS" firmware
   label (`python-mobius`'s `get_firmware_versions()`). New calibration

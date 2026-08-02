@@ -41,17 +41,19 @@ from typing import Any, Optional
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    MobiusDevice, PrimitiveType, MOBIUS_COMPANY_ID, parse_manufacturer_data,
+    MobiusDevice, PrimitiveType, Model, MOBIUS_COMPANY_ID, parse_manufacturer_data,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
     PRIMITIVE_SIZE,
 )
 
-from .const import CONNECT_TIMEOUT, FAST_POLL_INTERVAL, SLOW_POLL_INTERVAL
+from .const import CONNECT_TIMEOUT, FAST_POLL_INTERVAL, SLOW_POLL_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -224,7 +226,8 @@ class MobiusStatusCoordinator(MobiusCoordinatorBase):
 
 
 class MobiusScheduleCoordinator(MobiusCoordinatorBase):
-    """Slow tier: schedule fetch + interpolation/block-lookup."""
+    """Slow tier: schedule fetch + interpolation/block-lookup, plus
+    firmware version (see _async_update_data() override below for why)."""
 
     def __init__(self, hass, entry, connection_manager):
         super().__init__(hass, entry, connection_manager, SLOW_POLL_INTERVAL, "schedule")
@@ -238,6 +241,19 @@ class MobiusScheduleCoordinator(MobiusCoordinatorBase):
         # lookup is meaningless if "now" is wrong.
         now = dt_util.now()
         minute_of_day = now.hour * 60 + now.minute
+
+        # Firmware version -- re-fetched here on the slow tier (not once
+        # at setup and never again) because firmware DOES change: real
+        # devices got an OTA update mid-development of this integration.
+        # The fast tier would be excessive for something that changes this
+        # infrequently, but "once and never checked again" was wrong.
+        info = await device.get_device_info()
+        model_raw = info.get("model_raw")
+        try:
+            model = Model(model_raw) if model_raw is not None else None
+        except ValueError:
+            model = None
+        data["firmware_versions"] = await device.get_firmware_versions(model=model)
 
         if primitive in LIGHT_PRIMITIVES:
             data["channels"] = [c.name for c in await device.get_supported_channels()]
@@ -264,4 +280,20 @@ class MobiusScheduleCoordinator(MobiusCoordinatorBase):
                     for p, v in block.pump.params.items()
                 }
 
+        return data
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        data = await super()._async_update_data()
+        # Keep the device registry's sw_version in sync with reality --
+        # firmware changes are infrequent but real (see _async_fetch()
+        # above), so this needs to actually propagate, not just be
+        # captured once at setup and left stale forever after.
+        sw_version = (data.get("firmware_versions") or {}).get("Product OS")
+        if sw_version:
+            device_registry = dr.async_get(self.hass)
+            device_entry = device_registry.async_get_device(
+                identifiers={(DOMAIN, self.config_entry.data[CONF_ADDRESS])}
+            )
+            if device_entry is not None and device_entry.sw_version != sw_version:
+                device_registry.async_update_device(device_entry.id, sw_version=sw_version)
         return data

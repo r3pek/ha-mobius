@@ -361,8 +361,13 @@ async def async_setup_entry(
     # firmware components as separate sensors -- that would be sensor
     # sprawl for something that's fundamentally device info, not a
     # changing value; the full breakdown is available via python-mobius
-    # directly for anyone who wants it.
-    sw_version = runtime.firmware_versions.get("Product OS")
+    # directly for anyone who wants it. Comes from the schedule
+    # coordinator (which re-fetches it periodically, not just once at
+    # setup -- firmware does change, confirmed via a real OTA update
+    # during this project's development) rather than a separate one-time
+    # fetch; that coordinator's own _async_update_data() override also
+    # keeps the device registry in sync if it changes after setup.
+    sw_version = (schedule.data or {}).get("firmware_versions", {}).get("Product OS")
     device_info = _device_info(address, status.data or {}, sw_version=sw_version)
     entities.append(SchedulePointCountSensor(schedule, address, device_info))
 
