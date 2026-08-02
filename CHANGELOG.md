@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Clarified the `no_manufacturer_data` abort message.** Now explains
+  that it's normal/temporary and self-resolves automatically within
+  seconds (Home Assistant re-triggers discovery on the next fuller
+  advertisement, no user action needed), rather than reading like
+  something failed. Worth noting where this can actually surface: for
+  automatic discovery this abort happens silently, before the confirm
+  card ever renders, so most people won't see this message at all; manual
+  setup already excludes unidentifiable devices from its dropdown, so this
+  now only realistically shows up in the narrow case where a device's
+  advertisement data changes between rendering that dropdown and
+  submitting it.
+
 - **Config flow: fail fast rather than fall back to an address-based
   identity.** Corrects the previous entry below (already amended here
   rather than left describing since-changed behavior) -- discovery

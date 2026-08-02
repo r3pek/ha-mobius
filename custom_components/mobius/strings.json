@@ -13,7 +13,7 @@
     "abort": {
       "no_devices_found": "No unconfigured Mobius devices found.",
       "already_configured": "Device is already configured",
-      "no_manufacturer_data": "Could not read this device's serial number from its Bluetooth advertisement (required to connect reliably) -- try again when it's advertising normally."
+      "no_manufacturer_data": "This device's Bluetooth advertisement didn't include its serial number yet, which is needed to set it up reliably. This is normal and temporary -- Home Assistant will detect it again automatically within a few seconds once a fuller advertisement comes in, with no action needed from you. If it keeps happening, try moving the device closer or power-cycling it."
     }
   },
   "entity": {
