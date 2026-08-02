@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
 - **Clarified the `no_manufacturer_data` abort message.** Now explains
   that it's normal/temporary and self-resolves automatically within
