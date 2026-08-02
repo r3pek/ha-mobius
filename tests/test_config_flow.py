@@ -136,6 +136,55 @@ async def test_manual_setup_also_uses_serial_for_unique_id(hass):
     assert result2["result"].unique_id == PUMP_SERIAL
 
 
+async def test_bluetooth_discovery_aborts_without_manufacturer_data(hass):
+    """
+    The actual point of the fail-fast fix: if manufacturer data genuinely
+    isn't available (neither the initial snapshot nor Home Assistant's own
+    cache has it), the flow must abort rather than proceed with an
+    address-based identity that could break later if the address changes
+    before a serial is ever learned.
+    """
+    from unittest.mock import patch
+
+    incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")
+
+    with patch(
+        "custom_components.mobius.config_flow.async_last_service_info",
+        return_value=None,  # HA's cache doesn't have anything better either
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=incomplete_info
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "no_manufacturer_data"
+    # No entry should exist at all -- not even an address-only one.
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 0
+
+
+async def test_manual_setup_excludes_unidentifiable_devices(hass):
+    """A device whose manufacturer data can't be parsed shouldn't even be
+    offered in the manual-setup dropdown, rather than being offered and
+    then failing on selection."""
+    from unittest.mock import patch
+
+    good_discovery = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+    unidentifiable_discovery = _make_discovery_info("FF:FF:FF:FF:FF:FF", b"")
+
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        return_value=[good_discovery, unidentifiable_discovery],
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    offered_addresses = list(result["data_schema"].schema[CONF_ADDRESS].container)
+    assert PUMP_ADDRESS in offered_addresses
+    assert "FF:FF:FF:FF:FF:FF" not in offered_addresses
+
+
 async def test_user_step_no_devices_found(hass):
     """Manual setup with nothing discovered yet should abort cleanly."""
     result = await hass.config_entries.flow.async_init(

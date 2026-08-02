@@ -66,23 +66,28 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> FlowResult:
         """Handle a device discovered by Home Assistant's Bluetooth integration."""
-        # Prefer a serial-based unique_id over address-based -- these
-        # devices' BLE addresses are not guaranteed stable over time (see
-        # python-mobius's documentation/12-device-identity-and-address-
-        # stability.md), and an address-based unique_id means a device
-        # whose address changes gets treated as an entirely new device,
-        # producing a duplicate "discovered" prompt for something already
-        # configured. The initial discovery_info snapshot passed in here
-        # can have incomplete manufacturer data (see
-        # _refresh_discovery_info()'s docstring) -- check whether Home
-        # Assistant's own cache already has a fuller one before falling
-        # back to address.
+        # Check whether Home Assistant's own cache already has a fuller
+        # snapshot than what was passed in (the initial discovery_info can
+        # have incomplete manufacturer data -- e.g. matched via the
+        # local_name matcher before a scan-response merge completed).
         latest = async_last_service_info(self.hass, discovery_info.address, connectable=True)
         if latest is not None and latest.manufacturer_data.get(MOBIUS_COMPANY_ID):
             discovery_info = latest
 
         info = _parsed_info_for(discovery_info)
-        await self.async_set_unique_id(info.serial if info else discovery_info.address)
+        if info is None:
+            # Fail rather than proceed with an address-based identity that
+            # could break later if this device's address changes before
+            # we ever learn its serial (see python-mobius's documentation/
+            # 12-device-identity-and-address-stability.md) -- serial is
+            # required for reliable identity/reconnection, not optional.
+            # No special retry logic needed here: Home Assistant's own
+            # Bluetooth integration will naturally re-trigger this step on
+            # a later, more complete advertisement (typically within
+            # seconds, given how often these devices advertise).
+            return self.async_abort(reason="no_manufacturer_data")
+
+        await self.async_set_unique_id(info.serial)
         self._abort_if_unique_id_configured()
         self._discovery_info = discovery_info
         self.context["title_placeholders"] = {"name": _title_for(discovery_info)}
@@ -116,19 +121,13 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Confirm a Bluetooth-discovered device before creating the entry."""
         assert self._discovery_info is not None
+        # Only refreshes for a nicer title (e.g. showing the real model
+        # instead of a generic "Mobius device (address)") -- unique_id is
+        # already guaranteed serial-based by async_step_bluetooth(), which
+        # now aborts rather than proceeding without one, so there's
+        # nothing to re-check here.
         self._refresh_discovery_info()
         self.context["title_placeholders"] = {"name": _title_for(self._discovery_info)}
-
-        # If async_step_bluetooth() had to fall back to an address-based
-        # unique_id (no manufacturer data yet at that point) and the
-        # refresh above now has a serial, switch to it -- and re-check for
-        # an existing entry, since this may reveal that what looked like a
-        # new device is actually an already-configured one whose address
-        # changed.
-        info = _parsed_info_for(self._discovery_info)
-        if info is not None and self.unique_id != info.serial:
-            await self.async_set_unique_id(info.serial, raise_on_progress=False)
-            self._abort_if_unique_id_configured()
 
         if user_input is not None:
             return self._async_create_entry(self._discovery_info)
@@ -147,20 +146,18 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             address = user_input[CONF_ADDRESS]
             discovery = self._discovered_devices[address]
             info = _parsed_info_for(discovery)
-            await self.async_set_unique_id(
-                info.serial if info else address, raise_on_progress=False
-            )
+            if info is None:
+                # Shouldn't normally happen -- the dropdown below already
+                # only offers devices we could identify -- but the
+                # underlying advertisement data is a live cache that could
+                # theoretically have changed between showing the form and
+                # submitting it. Same "fail rather than proceed with an
+                # unreliable identity" preference as async_step_bluetooth().
+                return self.async_abort(reason="no_manufacturer_data")
+            await self.async_set_unique_id(info.serial, raise_on_progress=False)
             self._abort_if_unique_id_configured()
             return self._async_create_entry(discovery)
 
-        # NOTE: this filter is still address-based (checking discovery.address
-        # against self._async_current_ids(), which now holds a mix of
-        # serial-based unique_ids for newer entries and any leftover
-        # address-based ones) -- a device already configured under its
-        # OLD address whose address has since changed could still show up
-        # here as if unconfigured. async_set_unique_id() above still
-        # correctly catches and aborts on an actual duplicate if you pick
-        # it, so this is a display-only imperfection, not a correctness one.
         current_addresses = self._async_current_ids()
         self._discovered_devices = {
             discovery.address: discovery
@@ -168,6 +165,11 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if discovery.address not in current_addresses
             and discovery.name
             and "mobius" in discovery.name.lower()
+            # Only offer devices we can actually identify a serial for --
+            # matches the same fail-fast preference as the automatic
+            # discovery flow, applied here by simply not listing them
+            # rather than letting you pick one that would then abort.
+            and _parsed_info_for(discovery) is not None
         }
 
         if not self._discovered_devices:

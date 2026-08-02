@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Config flow: fail fast rather than fall back to an address-based
+  identity.** Corrects the previous entry below (already amended here
+  rather than left describing since-changed behavior) -- discovery
+  originally fell back to an address-based `unique_id` when manufacturer
+  data wasn't immediately available, upgrading to serial-based later if
+  possible. Per explicit preference (better to wait and retry than risk
+  adding a device whose identity could break later), both the automatic
+  and manual setup flows now abort immediately (`no_manufacturer_data`) if
+  a serial can't be determined, rather than proceeding with anything
+  address-based. No special in-flow retry loop needed: Home Assistant's
+  own Bluetooth integration naturally re-triggers discovery on a later,
+  more complete advertisement (typically within seconds). The manual setup
+  dropdown also now excludes any device it can't identify a serial for,
+  rather than offering it and failing on selection. New tests
+  (`test_bluetooth_discovery_aborts_without_manufacturer_data`,
+  `test_manual_setup_excludes_unidentifiable_devices`).
+
 - **Fixed a real gap alongside the persistent-connection work: discovery
   was still address-based.** Config entry `unique_id` was
   `discovery_info.address`/the raw address in both the automatic
@@ -9,10 +26,7 @@
   address changed (see the persistent-connection entry below) would
   trigger a fresh "Mobius device discovered" notification for something
   already configured, and could create a duplicate entry if clicked
-  through. Now uses the device's serial number instead (falling back to
-  address only if manufacturer data genuinely isn't available yet at
-  discovery time, with a re-check once the confirm-step refresh has fuller
-  data). New regression test
+  through. Now uses the device's serial number instead. New regression test
   (`test_address_change_is_recognized_as_the_same_device`) reproduces the
   exact scenario: a device already configured gets rediscovered under a
   different address but the same serial, and correctly aborts instead of
@@ -20,14 +34,13 @@
 
 - **Added firmware version and calibration status.** Device registry
   `sw_version` is now populated from the confirmed "Product OS" firmware
-  label (`python-mobius`'s `get_firmware_versions()`) -- fetched once at
-  setup, not re-polled, since firmware essentially never changes during
-  normal operation. New calibration sensor for lights (completed
-  True/False, last-calibration-date as an attribute) -- confirmed via real
-  hardware and the app's own UI gating to be a light-only feature; not
-  added for pumps, and not added at all if a light doesn't report
-  calibration data. Fetched on the slow (schedule) tier, not the fast one,
-  for the same "doesn't change often" reasoning as firmware.
+  label (`python-mobius`'s `get_firmware_versions()`). New calibration
+  sensor for lights (completed True/False, last-calibration-date as an
+  attribute) -- confirmed via real hardware and the app's own UI gating to
+  be a light-only feature; not added for pumps, and not added at all if a
+  light doesn't report calibration data. Fetched on the slow (schedule)
+  tier, not the fast one, since calibration status essentially never
+  changes during normal operation (unlike firmware -- see the entry above).
 
 - **Major architecture change: persistent connections, not connect-per-poll.**
   Each device now gets exactly one shared BLE connection
