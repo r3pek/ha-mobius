@@ -18,6 +18,10 @@ REAL_LIGHT_PAYLOAD = bytes.fromhex("b30001000000000f3d3756345a303046313433524245
 MOBIUS_COMPANY_ID = 0x0202
 PUMP_ADDRESS = "E4:89:1D:3C:C5:F1"
 LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
+# Serials decoded from the payloads above -- confirms unique_id ends up
+# serial-based, not address-based.
+PUMP_SERIAL = "76495221059019"
+LIGHT_SERIAL = "7V4Z00F143RBED"
 
 
 def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBleak:
@@ -50,6 +54,9 @@ async def test_bluetooth_discovery_creates_entry(hass):
     result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["data"][CONF_ADDRESS] == PUMP_ADDRESS
+    # The actual point of the serial-based identity fix: unique_id is the
+    # serial, not the address.
+    assert result2["result"].unique_id == PUMP_SERIAL
     # Real model decoded from the real captured payload -- confirms the
     # config flow's use of mobius.parse_manufacturer_data() actually works.
     assert "VorTechMP40wG3QD" in result2["title"]
@@ -80,6 +87,53 @@ async def test_duplicate_bluetooth_discovery_aborts(hass):
     )
     assert result2["type"] == FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
+
+
+async def test_address_change_is_recognized_as_the_same_device(hass):
+    """
+    The actual regression this fix is for: a device already configured
+    gets rediscovered under a DIFFERENT BLE address (simulating a real
+    address change/rotation, confirmed to happen on real hardware during
+    this project's development) but the SAME serial. Before this fix,
+    unique_id was address-based, so this would have created a duplicate
+    entry for what's actually the same physical device. Must abort
+    instead.
+    """
+    original = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=original
+    )
+    await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+    new_address = "F0:0D:BE:EF:CA:FE"  # a different address entirely
+    rediscovered = _make_discovery_info(new_address, REAL_PUMP_PAYLOAD)  # same serial
+    result2 = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=rediscovered
+    )
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "already_configured"
+
+
+async def test_manual_setup_also_uses_serial_for_unique_id(hass):
+    from unittest.mock import patch
+
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        return_value=[discovery_info],
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        assert result["type"] == FlowResultType.FORM
+
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_ADDRESS: PUMP_ADDRESS}
+        )
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["result"].unique_id == PUMP_SERIAL
 
 
 async def test_user_step_no_devices_found(hass):

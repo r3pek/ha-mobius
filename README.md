@@ -47,7 +47,15 @@ pytest tests/
   needed. Manual setup (picking from already-seen-but-unconfigured devices)
   is also available via *Settings → Devices & Services → Add Integration*.
 - **One Home Assistant device per physical device**, with model,
-  manufacturer, and serial number populated in the device registry.
+  manufacturer, serial number, and firmware version ("Product OS" —
+  confirmed via real hardware to be the most meaningful single "what
+  firmware is this" answer, ported from the app's own display labels;
+  see `python-mobius`'s `get_firmware_versions()`) populated in the
+  device registry. Full per-component firmware breakdown (Radio, Radio
+  Bootloader, WLAN, etc.) is available via `python-mobius` directly if you
+  need it — not surfaced as individual sensors here, to avoid sensor
+  sprawl for something that's fundamentally device info, not a changing
+  value.
 - **Sensors** (all read-only):
   - Every device: support tier (light/pump/pump-experimental/unsupported),
     error state, schedule point count.
@@ -55,7 +63,10 @@ pytest tests/
   - Lights: one intensity sensor per channel (`%`), reflecting the same
     client-side schedule interpolation `python-mobius` replicates from the
     official app — not a live device read (there isn't one; see
-    `python-mobius`'s docs on why).
+    `python-mobius`'s docs on why). Also a calibration sensor (completed
+    True/False, plus last-calibration-date as an attribute) — confirmed
+    via real hardware and via the app's own UI gating to be a light
+    feature specifically; not added for pumps, which don't support it.
 
 ## Connection architecture
 
@@ -84,6 +95,14 @@ dropped connection is only discovered when a scheduled read actually
 fails, then reconnected once and retried within that same poll cycle.
 Given the fast tier polls every ~10s, this is at most ~10s of staleness
 in exchange for meaningfully simpler code.
+
+**Discovery is also serial-based**, not just the runtime connection.
+Config entry `unique_id` is the device's serial number (falling back to
+address only in the rare case manufacturer data genuinely isn't available
+yet at discovery time, with a re-check once fuller data arrives). Without
+this, a device whose address changed would trigger a fresh "Mobius device
+discovered" notification for something you already have configured,
+potentially creating a duplicate entry for the same physical device.
 
 ## Polling design
 

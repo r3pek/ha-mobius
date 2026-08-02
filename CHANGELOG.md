@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Fixed a real gap alongside the persistent-connection work: discovery
+  was still address-based.** Config entry `unique_id` was
+  `discovery_info.address`/the raw address in both the automatic
+  (Bluetooth-triggered) and manual setup flows -- meaning a device whose
+  address changed (see the persistent-connection entry below) would
+  trigger a fresh "Mobius device discovered" notification for something
+  already configured, and could create a duplicate entry if clicked
+  through. Now uses the device's serial number instead (falling back to
+  address only if manufacturer data genuinely isn't available yet at
+  discovery time, with a re-check once the confirm-step refresh has fuller
+  data). New regression test
+  (`test_address_change_is_recognized_as_the_same_device`) reproduces the
+  exact scenario: a device already configured gets rediscovered under a
+  different address but the same serial, and correctly aborts instead of
+  duplicating.
+
+- **Added firmware version and calibration status.** Device registry
+  `sw_version` is now populated from the confirmed "Product OS" firmware
+  label (`python-mobius`'s `get_firmware_versions()`) -- fetched once at
+  setup, not re-polled, since firmware essentially never changes during
+  normal operation. New calibration sensor for lights (completed
+  True/False, last-calibration-date as an attribute) -- confirmed via real
+  hardware and the app's own UI gating to be a light-only feature; not
+  added for pumps, and not added at all if a light doesn't report
+  calibration data. Fetched on the slow (schedule) tier, not the fast one,
+  for the same "doesn't change often" reasoning as firmware.
+
 - **Major architecture change: persistent connections, not connect-per-poll.**
   Each device now gets exactly one shared BLE connection
   (`MobiusConnectionManager`), used by both polling tiers -- connected
@@ -36,7 +63,7 @@
     manager directly: serial resolution against HA's cache, connect-once-
     and-reuse, reconnect-after-failure, concurrent-connect-only-happens-
     once via the internal lock, and the retry-within-one-cycle behavior)
-    and updated `tests/test_sensor.py` for the new architecture. 23 tests
+    and updated `tests/test_sensor.py` for the new architecture. 25 tests
     total, all passing.
 
 ## 0.1.1

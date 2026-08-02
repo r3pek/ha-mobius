@@ -41,6 +41,9 @@
       },
       "channel_intensity": {
         "name": "{channel} intensity"
+      },
+      "calibration": {
+        "name": "Calibration"
       }
     }
   }

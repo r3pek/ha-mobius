@@ -245,6 +245,13 @@ class MobiusScheduleCoordinator(MobiusCoordinatorBase):
             data["schedule_point_count"] = len(points)
             current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
             data["current_intensities"] = {ch.name: v for ch, v in current.items()}
+            # Confirmed via real device testing AND via the app's own UI
+            # gating (DeviceSettingsFragment.java) to be a light feature --
+            # returns None for pumps, which is fine (the sensor built on
+            # this is only added for light devices anyway). Belongs here
+            # (slow tier) rather than the fast tier since calibration
+            # status essentially never changes during normal operation.
+            data["calibration"] = await device.get_calibration_info()
 
         elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
             points = await device.get_pump_schedule(which=1)

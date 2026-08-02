@@ -66,7 +66,23 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> FlowResult:
         """Handle a device discovered by Home Assistant's Bluetooth integration."""
-        await self.async_set_unique_id(discovery_info.address)
+        # Prefer a serial-based unique_id over address-based -- these
+        # devices' BLE addresses are not guaranteed stable over time (see
+        # python-mobius's documentation/12-device-identity-and-address-
+        # stability.md), and an address-based unique_id means a device
+        # whose address changes gets treated as an entirely new device,
+        # producing a duplicate "discovered" prompt for something already
+        # configured. The initial discovery_info snapshot passed in here
+        # can have incomplete manufacturer data (see
+        # _refresh_discovery_info()'s docstring) -- check whether Home
+        # Assistant's own cache already has a fuller one before falling
+        # back to address.
+        latest = async_last_service_info(self.hass, discovery_info.address, connectable=True)
+        if latest is not None and latest.manufacturer_data.get(MOBIUS_COMPANY_ID):
+            discovery_info = latest
+
+        info = _parsed_info_for(discovery_info)
+        await self.async_set_unique_id(info.serial if info else discovery_info.address)
         self._abort_if_unique_id_configured()
         self._discovery_info = discovery_info
         self.context["title_placeholders"] = {"name": _title_for(discovery_info)}
@@ -103,6 +119,17 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._refresh_discovery_info()
         self.context["title_placeholders"] = {"name": _title_for(self._discovery_info)}
 
+        # If async_step_bluetooth() had to fall back to an address-based
+        # unique_id (no manufacturer data yet at that point) and the
+        # refresh above now has a serial, switch to it -- and re-check for
+        # an existing entry, since this may reveal that what looked like a
+        # new device is actually an already-configured one whose address
+        # changed.
+        info = _parsed_info_for(self._discovery_info)
+        if info is not None and self.unique_id != info.serial:
+            await self.async_set_unique_id(info.serial, raise_on_progress=False)
+            self._abort_if_unique_id_configured()
+
         if user_input is not None:
             return self._async_create_entry(self._discovery_info)
 
@@ -118,10 +145,22 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Manual setup: offer any discovered-but-unconfigured Mobius devices."""
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
-            await self.async_set_unique_id(address, raise_on_progress=False)
+            discovery = self._discovered_devices[address]
+            info = _parsed_info_for(discovery)
+            await self.async_set_unique_id(
+                info.serial if info else address, raise_on_progress=False
+            )
             self._abort_if_unique_id_configured()
-            return self._async_create_entry(self._discovered_devices[address])
+            return self._async_create_entry(discovery)
 
+        # NOTE: this filter is still address-based (checking discovery.address
+        # against self._async_current_ids(), which now holds a mix of
+        # serial-based unique_ids for newer entries and any leftover
+        # address-based ones) -- a device already configured under its
+        # OLD address whose address has since changed could still show up
+        # here as if unconfigured. async_set_unique_id() above still
+        # correctly catches and aborts on an actual duplicate if you pick
+        # it, so this is a display-only imperfection, not a correctness one.
         current_addresses = self._async_current_ids()
         self._discovered_devices = {
             discovery.address: discovery

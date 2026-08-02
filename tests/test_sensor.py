@@ -9,6 +9,7 @@ project's development, for both a pump and a light.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType
@@ -51,6 +52,10 @@ def _fake_pump_device():
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
+    device.get_firmware_versions = AsyncMock(return_value={
+        "Radio": "4.0.21", "Radio Bootloader": "1.2",
+        "Product OS": "2.1.5", "Product Bootloader": "1.0",
+    })
     return device
 
 
@@ -77,6 +82,18 @@ def _fake_light_device():
         key.name = name
         intensity_map[key] = value
     device.get_current_light_intensities = AsyncMock(return_value=intensity_map)
+
+    device.get_firmware_versions = AsyncMock(return_value={
+        "Product OS": "1.0", "Product Bootloader": "1.0", "Radio Firmware": "3.1.0",
+        "Filesystem": "1", "Radio OS": "2.0", "Radio": "2.0", "WLAN": "1.1",
+    })
+
+    calibration = MagicMock()
+    calibration.completed = True
+    calibration.date_of_last = 1756561525
+    calibration.lower_bound = None
+    calibration.upper_bound = None
+    device.get_calibration_info = AsyncMock(return_value=calibration)
     return device
 
 
@@ -121,6 +138,16 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert point_count is not None
     assert point_count.state == "11"
 
+    # The actual new behavior: sw_version comes from the confirmed "Product
+    # OS" label, and pumps don't support calibration (get_calibration_info()
+    # returns None in the app's own confirmed real-hardware behavior), so
+    # no calibration sensor should be created.
+    device_registry = dr.async_get(hass)
+    device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_ADDRESS)})
+    assert device is not None
+    assert device.sw_version == "2.1.5"
+    assert hass.states.get("sensor.mp40qd_right_calibration") is None
+
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
     entry = MockConfigEntry(
@@ -150,6 +177,19 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_support_tier")
     assert support is not None
     assert support.state == "light"
+
+    # The actual new behavior: sw_version + a calibration sensor, since
+    # calibration is confirmed real/populated for lights (unlike pumps).
+    device_registry = dr.async_get(hass)
+    device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_ADDRESS)})
+    assert device is not None
+    assert device.sw_version == "1.0"
+
+    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_calibration")
+    assert calibration is not None
+    assert calibration.state == "True"
+    assert "lower_bound" not in calibration.attributes  # fixture sets it to None -> omitted
+    assert "last_calibration_time" in calibration.attributes
 
 
 async def test_entry_unload_removes_entities_and_disconnects(hass):

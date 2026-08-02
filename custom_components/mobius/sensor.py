@@ -20,13 +20,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData
 from .const import DOMAIN
 from .coordinator import MobiusScheduleCoordinator, MobiusStatusCoordinator
 
 
-def _device_info(address: str, status_data: dict) -> DeviceInfo:
+def _device_info(address: str, status_data: dict, sw_version: str | None = None) -> DeviceInfo:
     custom_name = status_data.get("name")
     model = status_data.get("model")
     serial = status_data.get("serial")
@@ -55,6 +56,7 @@ def _device_info(address: str, status_data: dict) -> DeviceInfo:
         manufacturer=status_data.get("manufacturer"),
         model=model,
         serial_number=serial,
+        sw_version=sw_version,
     )
 
 
@@ -283,6 +285,52 @@ class LightChannelIntensitySensor(MobiusScheduleEntity):
         return round(raw / 10, 1) if raw is not None else None
 
 
+class CalibrationSensor(MobiusScheduleEntity):
+    """
+    Light devices only -- confirmed via real device testing AND the app's
+    own UI gating (device.primitive.category() == M.DeviceCategory.Lighting
+    in DeviceSettingsFragment.java) to be a light feature; pumps don't
+    expose this (get_calibration_info() returns None for them, confirmed
+    against real VorTech hardware). Only added to a config entry if
+    calibration data was actually present at setup -- see
+    async_setup_entry() below.
+
+    State is whether calibration has completed (True/False); the last
+    calibration date and calibrated speed bounds (if available) are
+    exposed as attributes rather than separate entities, since they're
+    supplementary detail to the main completed/not-completed status.
+    """
+
+    def __init__(self, coordinator, address, device_info):
+        super().__init__(
+            coordinator, address, "calibration",
+            SensorEntityDescription(key="calibration", translation_key="calibration"),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        return super().available and (self.coordinator.data or {}).get("calibration") is not None
+
+    @property
+    def native_value(self):
+        calibration = (self.coordinator.data or {}).get("calibration")
+        return calibration.completed if calibration else None
+
+    @property
+    def extra_state_attributes(self):
+        calibration = (self.coordinator.data or {}).get("calibration")
+        if calibration is None:
+            return {}
+        attrs = {"last_calibration_time": dt_util.utc_from_timestamp(calibration.date_of_last)}
+        if calibration.lower_bound is not None:
+            attrs["lower_bound"] = calibration.lower_bound
+        if calibration.upper_bound is not None:
+            attrs["upper_bound"] = calibration.upper_bound
+        return attrs
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -306,7 +354,16 @@ async def async_setup_entry(
             FlowRateSensor(status, address),
         ]
 
-    device_info = _device_info(address, status.data or {})
+    # "Product OS" is the confirmed real display label for the main
+    # firmware version across both pumps and lights (see python-mobius's
+    # get_firmware_versions() -- MainMicroOS for EcoTech devices), the
+    # most meaningful single "what firmware is this" answer. Not all
+    # firmware components as separate sensors -- that would be sensor
+    # sprawl for something that's fundamentally device info, not a
+    # changing value; the full breakdown is available via python-mobius
+    # directly for anyone who wants it.
+    sw_version = runtime.firmware_versions.get("Product OS")
+    device_info = _device_info(address, status.data or {}, sw_version=sw_version)
     entities.append(SchedulePointCountSensor(schedule, address, device_info))
 
     if support.startswith("pump"):
@@ -315,5 +372,11 @@ async def async_setup_entry(
         channel_names = (schedule.data or {}).get("channels") or []
         for name in channel_names:
             entities.append(LightChannelIntensitySensor(schedule, address, device_info, name))
+        # Only added if calibration data was actually present at setup --
+        # confirmed via real hardware that not all lights necessarily
+        # support this, and there's no point creating a permanently
+        # unavailable entity for one that doesn't.
+        if (schedule.data or {}).get("calibration") is not None:
+            entities.append(CalibrationSensor(schedule, address, device_info))
 
     async_add_entities(entities)
