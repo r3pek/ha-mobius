@@ -1,6 +1,6 @@
 {
   "domain": "mobius",
-  "name": "Mobius (VorTech / Radion / etc.)",
+  "name": "Mobius",
   "codeowners": ["@r3pek"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters"],

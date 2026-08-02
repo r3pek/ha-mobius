@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Simplified the integration's display name.** `manifest.json`/`hacs.json`
+  `"name"` changed from `"Mobius (VorTech / Radion / etc.)"` to just
+  `"Mobius"`.
+
 - **Config entry title no longer includes the MAC address.** `_title_for()`
   (the discovery card / integrations-list title) used
   `f"{model} ({discovery.address})"` -- still address-based, missed in the
