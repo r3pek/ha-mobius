@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Reduced `MAX_CONCURRENT_CONNECTIONS` from 2 to 1**, after the
+  previous fix (sharing the connection semaphore between gateway
+  connections and mesh address discovery) turned out not to be enough on
+  its own. The semaphore only throttles the brief window a connection
+  attempt is actually connecting -- once a gateway's connection succeeds,
+  it's held open persistently and doesn't occupy a permit anymore,
+  invisible to this limit entirely. Confirmed via real-world testing
+  against an ESPHome Bluetooth proxy with a hardware ceiling of 3
+  simultaneous connections: a value of 2 meant an already-open gateway
+  connection (1, invisible to the semaphore) plus 2 more concurrent
+  discovery attempts (allowed by the semaphore) could reach exactly the
+  proxy's ceiling with zero headroom -- both the gateway flapping and a
+  device failing to connect at all during that window are consistent
+  with this same exhaustion. Serializing to 1 keeps at most one NEW
+  connection attempt in flight on top of any already-open connections,
+  rather than trying to guess a value that happens to leave enough
+  headroom for a specific proxy's real limit. Doesn't fully solve a
+  multi-tank setup (more pan_id groups means more persistent gateway
+  connections, each similarly invisible to this semaphore) -- documented
+  as a known constraint in `const.py` rather than solved for hardware
+  limits this integration has no way to know about.
+
 - **Fixed a real bug found via production logs: gateway connections were
   flapping continuously, promoting back and forth between the same two
   devices every ~70 seconds.** `discover_mesh_address()` (used both for
