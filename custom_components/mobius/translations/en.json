@@ -44,6 +44,12 @@
       },
       "calibration": {
         "name": "Calibration"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "hardware_revision": {
+        "name": "Hardware revision"
       }
     }
   }

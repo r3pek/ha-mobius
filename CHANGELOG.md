@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Added `Firmware version` and `Hardware revision` diagnostic
+  sensors**, each with the full per-component breakdown as attributes
+  (e.g. `Radio Firmware`/`Filesystem`/`Radio OS`/`Radio`/`WLAN`/
+  `Product OS`/`Product Bootloader` for a light's firmware; `Color`/
+  `Revision`/`ProductType`/`RadioType`/`MotorType` for hardware).
+  Home Assistant's own built-in device info card already shows the same
+  headline values as `sw_version`/`hw_version` (labeled "Firmware"/
+  "Hardware" -- fixed labels, not customizable per-integration), but
+  only ever the single derived value, never the full breakdown; these
+  sensors are the practical way to get the rest of it onto the same
+  device page. Applies to both pumps and lights, not gated behind
+  device type.
+
 - **Reduced `MAX_CONCURRENT_CONNECTIONS` from 2 to 1**, after the
   previous fix (sharing the connection semaphore between gateway
   connections and mesh address discovery) turned out not to be enough on

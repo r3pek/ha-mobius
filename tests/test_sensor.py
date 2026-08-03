@@ -149,6 +149,21 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert point_count is not None
     assert point_count.state == "11"
 
+    # The actual point of these two: full breakdown available as
+    # attributes, not just the single headline value already shown on
+    # the device card.
+    firmware = hass.states.get("sensor.mp40qd_right_tank_3d0f_firmware_version")
+    assert firmware is not None
+    assert firmware.state == "2.1.5"  # Product OS -- no "Firmware" label in this pump's fixture
+    assert firmware.attributes["Radio"] == "4.0.21"
+    assert firmware.attributes["Radio Bootloader"] == "1.2"
+    assert firmware.attributes["Product Bootloader"] == "1.0"
+
+    hardware = hass.states.get("sensor.mp40qd_right_tank_3d0f_hardware_revision")
+    assert hardware is not None
+    assert hardware.state == "2"
+    assert hardware.attributes["Revision"] == 2
+
     # The actual new behavior: sw_version comes from the confirmed "Product
     # OS" label, and pumps don't support calibration (get_calibration_info()
     # returns None in the app's own confirmed real-hardware behavior), so
@@ -206,6 +221,20 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     assert calibration.state == "True"
     assert "lower_bound" not in calibration.attributes  # fixture sets it to None -> omitted
     assert "last_calibration_time" in calibration.attributes
+
+    # Same real-world scenario as above (no "Firmware"/"Product OS" label
+    # at all) -- confirms the full breakdown sensor surfaces the
+    # fallback-derived value too, plus every other reported component as
+    # an attribute.
+    firmware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_firmware_version")
+    assert firmware is not None
+    assert firmware.state == "1.5.103"
+    assert firmware.attributes["Filesystem"] == "1.1.0"
+    assert firmware.attributes["WLAN"] == "3.1.0"
+
+    hardware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_hardware_revision")
+    assert hardware is not None
+    assert hardware.state == "1"
 
 
 async def test_entry_unload_removes_entities_and_disconnects(hass):

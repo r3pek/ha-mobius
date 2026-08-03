@@ -324,6 +324,68 @@ class CalibrationSensor(MobiusEntity):
         return attrs
 
 
+class FirmwareVersionSensor(MobiusEntity):
+    """
+    Diagnostic: the same headline value already shown as sw_version on
+    Home Assistant's own built-in device info card (that label -- always
+    "Firmware", not customizable per-integration -- comes from Home
+    Assistant itself, not this entity), but as a first-class entity with
+    the full per-component breakdown available as attributes -- e.g.
+    "Radio Firmware"/"Filesystem"/"Radio OS"/"Radio"/"WLAN"/"Product OS"/
+    "Product Bootloader" for a light, not just the single "Firmware"
+    value derive_sw_version() picks as most representative. See
+    coordinator.py's derive_sw_version() for the confirmed label priority.
+    """
+
+    def __init__(self, coordinator, address, device_info):
+        super().__init__(
+            coordinator, address, "firmware_version",
+            SensorEntityDescription(key="firmware_version", translation_key="firmware_version"),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self):
+        return derive_sw_version((self.coordinator.data or {}).get("firmware_versions") or {})
+
+    @property
+    def extra_state_attributes(self):
+        return (self.coordinator.data or {}).get("firmware_versions") or {}
+
+
+class HardwareRevisionSensor(MobiusEntity):
+    """
+    Diagnostic: the same headline value already shown as hw_version on
+    Home Assistant's own built-in device info card (labeled "Hardware" --
+    not customizable per-integration), but as a first-class entity with
+    the full per-field breakdown available as attributes (Color/
+    ProductType/RadioType/MotorType, alongside Revision itself). No
+    display-formatting convention is confirmed for any of these fields
+    (see python-mobius's get_hardware_info() docstring) -- each decoded
+    the same way derive_hw_version() decodes "Revision" (a plain
+    little-endian unsigned integer) for consistency, not because that's
+    a confirmed correct interpretation for the other fields specifically.
+    """
+
+    def __init__(self, coordinator, address, device_info):
+        super().__init__(
+            coordinator, address, "hardware_revision",
+            SensorEntityDescription(key="hardware_revision", translation_key="hardware_revision"),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self):
+        return derive_hw_version((self.coordinator.data or {}).get("hardware_info") or {})
+
+    @property
+    def extra_state_attributes(self):
+        raw = (self.coordinator.data or {}).get("hardware_info") or {}
+        return {k: int.from_bytes(v, byteorder="little", signed=False) for k, v in raw.items() if v}
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -356,6 +418,8 @@ async def async_setup_entry(
         SupportTierSensor(coordinator, address, device_info),
         ErrorStateSensor(coordinator, address, device_info),
         SchedulePointCountSensor(coordinator, address, device_info),
+        FirmwareVersionSensor(coordinator, address, device_info),
+        HardwareRevisionSensor(coordinator, address, device_info),
     ]
 
     if support.startswith("pump"):
