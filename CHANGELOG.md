@@ -35,6 +35,13 @@
   - `sensor.py`: device names now include which tank (pan_id) a device
     belongs to, since names otherwise give no indication once more than
     one tank is in play.
+  - Relayed devices' mesh addresses are now discovered proactively at
+    setup time (before the first poll cycle), rather than relying solely
+    on the on-demand fallback baked into the first read. Runs on every
+    entry setup -- both a brand-new device and every existing device on
+    every Home Assistant restart, not just first-ever setup. A failure
+    here isn't fatal; the coordinator's on-demand fallback still covers
+    it on a later poll.
   - Requires `python-mobius>=0.2.0` (for `RelayedMobiusDevice`).
 
 - **Fixed a real bug: the manual-setup device list wasn't actually

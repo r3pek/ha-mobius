@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from homeassistant.components import bluetooth
@@ -14,8 +15,10 @@ from homeassistant.exceptions import ConfigEntryError
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
 from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID
-from .coordinator import MobiusDeviceCoordinator
+from .coordinator import MobiusDeviceCoordinator, discover_mesh_address
 from .gateway_registry import GatewayRegistry
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -87,7 +90,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     rssi = _current_rssi(hass, serial)
-    await registry.join(pan_id, serial, rssi)
+    group = await registry.join(pan_id, serial, rssi)
+
+    # Proactively discover and cache this device's own mesh address
+    # BEFORE the coordinator's first refresh, if it's going to need one
+    # (relayed, not this group's gateway) -- runs every time this entry
+    # is set up, which covers both a brand-new device AND every existing
+    # device on every Home Assistant restart, not just first-ever setup.
+    # Avoids the first poll cycle having to pay for both address
+    # discovery and the actual relay read together. A failure here isn't
+    # fatal: it's just treated as "will retry via the coordinator's own
+    # on-demand fallback," not raised.
+    if group.gateway_serial != serial and group.members[serial].mesh_address is None:
+        address = await discover_mesh_address(hass, serial)
+        if address is not None:
+            registry.update_mesh_address(pan_id, serial, address)
+        else:
+            _LOGGER.debug(
+                "Could not proactively discover mesh address for %s at setup -- "
+                "will retry on the next poll cycle", serial,
+            )
 
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
     await coordinator.async_config_entry_first_refresh()

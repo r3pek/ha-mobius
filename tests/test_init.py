@@ -6,6 +6,7 @@ full happy-path setup/unload coverage, plus that async_setup() creates
 the shared gateway registry.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -111,3 +112,196 @@ async def test_setup_entry_joins_registry_with_current_rssi(hass):
     group = registry.group(PAN_ID)
     assert group is not None
     assert group.members[PUMP_SERIAL].rssi == -42
+
+
+# --------------------------------------------------------------------------
+# Proactive mesh address discovery at setup (relayed devices only) -- runs
+# on every entry setup, which covers both a brand-new device AND every
+# existing device on every Home Assistant restart.
+# --------------------------------------------------------------------------
+
+def _fake_pump_device():
+    from unittest.mock import MagicMock
+
+    fake_device = MagicMock()
+    fake_device.get_device_info = AsyncMock(return_value={
+        "model_raw": 42, "model": "VorTechMP40wG3QD", "manufacturer": "EcoTech Marine",
+        "name": "Pump", "serial": PUMP_SERIAL, "primitive_type": "VorTechV1",
+        "error_state": "NoError", "mac_address": None,
+    })
+    fake_device.get_pump_telemetry = AsyncMock(return_value={"speed": 100, "speed_percent": 10.0, "gph": 500})
+    fake_device.get_operation_state = AsyncMock()
+    fake_device.get_operation_state.return_value.name = "Schedule"
+    fake_point = MagicMock()
+    fake_point.pump.mode.name = "TidalSwell"
+    fake_point.pump.params = {}
+    fake_device.get_pump_schedule = AsyncMock(return_value=[fake_point])
+    fake_device.get_current_pump_block = AsyncMock(return_value=fake_point)
+    fake_device.get_firmware_versions = AsyncMock(return_value={"Product OS": "1.0"})
+    return fake_device
+
+
+async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
+    """The actual point of this feature: a device that ISN'T going to be
+    gateway should have its mesh address discovered and cached before the
+    first poll cycle, not left entirely to the coordinator's on-demand
+    fallback."""
+    from custom_components.mobius.gateway_registry import GatewayRegistry
+
+    # Pre-populate the registry with an existing gateway for this pan_id,
+    # so the entry being set up here joins as a relayed member instead.
+    hass.data.setdefault(DOMAIN, {})
+    semaphore = hass.data[DOMAIN].setdefault("connection_semaphore", asyncio.Semaphore(2))
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    await registry.join(PAN_ID, "existing-gateway-serial", rssi=-30)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    address = bytes.fromhex("fd11223344556677000000fffe001234")
+    fake_relayed_device = _fake_pump_device()
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+    ) as mock_discover, patch(
+        "custom_components.mobius._current_rssi", return_value=-80,
+    ), patch.object(
+        registry.group(PAN_ID).gateway_connection, "ensure_connected", AsyncMock(return_value=object()),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await async_setup_entry(hass, entry)
+
+    mock_discover.assert_called_once_with(hass, PUMP_SERIAL)
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == address
+
+
+async def test_gateway_device_skips_proactive_discovery(hass):
+    """A gateway device connects directly -- it never needs its own mesh
+    address, so discovery must not even be attempted for it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(),
+    ) as mock_discover, patch(
+        "custom_components.mobius._current_rssi", return_value=-40,
+    ), patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await async_setup_entry(hass, entry)
+
+    mock_discover.assert_not_called()
+
+
+async def test_proactive_discovery_failure_does_not_break_setup_flow(hass):
+    """A None result (device not currently reachable) from the proactive
+    discovery step itself must not raise or otherwise derail setup --
+    the coordinator's own on-demand fallback covers it on a later poll.
+    Setup DOES still fail overall here (ConfigEntryNotReady), but for the
+    ordinary reason (the coordinator's own first read also has nothing to
+    connect to in this scenario) -- not because of anything specific to
+    the discovery step failing."""
+    from homeassistant.exceptions import ConfigEntryNotReady
+    from custom_components.mobius.gateway_registry import GatewayRegistry
+
+    hass.data.setdefault(DOMAIN, {})
+    semaphore = hass.data[DOMAIN].setdefault("connection_semaphore", asyncio.Semaphore(2))
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    await registry.join(PAN_ID, "existing-gateway-serial", rssi=-30)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+    entry.mock_state(hass, entry.state.SETUP_IN_PROGRESS)
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ) as mock_discover, patch(
+        "custom_components.mobius._current_rssi", return_value=-80,
+    ), patch.object(
+        registry.group(PAN_ID).gateway_connection, "ensure_connected", AsyncMock(side_effect=Exception("boom")),
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        with pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry)
+
+    # The discovery step itself ran and returned None cleanly -- the
+    # failure came from the coordinator's own first read, not from
+    # mishandling a None discovery result.
+    mock_discover.assert_called_once_with(hass, PUMP_SERIAL)
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address is None
+
+
+async def test_proactive_discovery_skipped_when_already_cached(hass):
+    """Avoids redundant work -- if a mesh address is already cached by
+    the time join() returns, don't re-discover it. Mocks join() directly
+    (rather than pre-populating through a real join() call first) since a
+    second join() for the same serial would legitimately overwrite
+    whatever was there before -- this is testing __init__.py's own check
+    of the returned group's state, not the registry's join() semantics
+    themselves (covered separately in test_gateway_registry.py)."""
+    from custom_components.mobius.gateway_registry import GatewayRegistry, PanGroup, MemberState
+
+    hass.data.setdefault(DOMAIN, {})
+    semaphore = hass.data[DOMAIN].setdefault("connection_semaphore", asyncio.Semaphore(2))
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data[DOMAIN]["gateway_registry"] = registry
+
+    cached_address = bytes.fromhex("fd11223344556677000000fffe005678")
+    from custom_components.mobius.coordinator import MobiusConnectionManager
+    prebuilt_group = PanGroup(
+        pan_id=PAN_ID, gateway_serial="existing-gateway-serial",
+        gateway_connection=MobiusConnectionManager(hass, "existing-gateway-serial", semaphore),
+    )
+    prebuilt_group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL, mesh_address=cached_address)
+    registry._groups[PAN_ID] = prebuilt_group
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_gateway_device = object()
+    fake_relayed_device = _fake_pump_device()
+
+    with patch.object(
+        registry, "join", AsyncMock(return_value=prebuilt_group),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(),
+    ) as mock_discover, patch(
+        "custom_components.mobius._current_rssi", return_value=-80,
+    ), patch.object(
+        prebuilt_group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await async_setup_entry(hass, entry)
+
+    mock_discover.assert_not_called()
+    assert prebuilt_group.members[PUMP_SERIAL].mesh_address == cached_address

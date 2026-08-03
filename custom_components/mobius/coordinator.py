@@ -338,9 +338,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
         """Returns a MeshPeer for THIS coordinator's own device, using a
-        cached mesh address if available (see the background prefetch
-        task in __init__.py), or discovering it on demand via a brief
-        direct connection if not."""
+        cached mesh address if available (usually already populated by
+        __init__.py's proactive discovery-at-setup step, which runs
+        before the first refresh for any relayed device), or discovering
+        it on demand via a brief direct connection if not."""
         member = group.members.get(self.serial)
         address = member.mesh_address if member else None
 
@@ -359,26 +360,40 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _discover_own_mesh_address(self) -> Optional[bytes]:
-        """On-demand fallback for _resolve_own_mesh_peer() -- connects
-        directly and briefly to THIS device (not the gateway) to read its
-        own mesh address, matching the same Bluetooth-cache-based address
-        resolution MobiusConnectionManager uses."""
-        for info in bluetooth.async_discovered_service_info(self.hass, connectable=True):
-            payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-            if not payload:
-                continue
-            parsed = parse_manufacturer_data(payload)
-            if not parsed or parsed.serial != self.serial:
-                continue
-            ble_device = bluetooth.async_ble_device_from_address(
-                self.hass, info.address, connectable=True
-            )
-            if ble_device is None:
-                return None
-            try:
-                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
-                    return await mdevice.get_own_mesh_address()
-            except Exception as err:
-                _LOGGER.debug("On-demand mesh address discovery failed for %s: %s", self.serial, err)
-                return None
-        return None
+        """On-demand fallback for _resolve_own_mesh_peer() -- see
+        discover_mesh_address() below for the actual logic, shared with
+        __init__.py's proactive discovery-at-setup path."""
+        return await discover_mesh_address(self.hass, self.serial)
+
+
+async def discover_mesh_address(hass: HomeAssistant, serial: str) -> Optional[bytes]:
+    """
+    Connects directly and briefly to whichever device is currently
+    advertising `serial` (resolved via Home Assistant's own Bluetooth
+    cache, matching MobiusConnectionManager's own resolution) to read its
+    own Thread mesh-local address. Returns None (not an exception) if the
+    device can't currently be found/reached -- callers that need to
+    surface this as a real failure (e.g. MobiusDeviceCoordinator's
+    on-demand fallback, when relay genuinely can't proceed without an
+    address) do so themselves; __init__.py's proactive call at setup time
+    treats a None here as "will retry later" rather than fatal, since the
+    coordinator's own on-demand fallback covers it if this attempt
+    doesn't pan out.
+    """
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+        if not payload:
+            continue
+        parsed = parse_manufacturer_data(payload)
+        if not parsed or parsed.serial != serial:
+            continue
+        ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
+        if ble_device is None:
+            return None
+        try:
+            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                return await mdevice.get_own_mesh_address()
+        except Exception as err:
+            _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
+            return None
+    return None
