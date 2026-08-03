@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Added `gateway_registry.py`**: the shared per-pan_id gateway registry
+  for multi-device relay support -- devices sharing a pan_id (Thread
+  mesh/"tank", confirmed via `Tank`/`CommGroup` in the decompiled app)
+  will share one physical BLE connection instead of each holding their
+  own. This patch is infrastructure only -- the registry itself, fully
+  unit-tested (25 tests: RSSI-based election among concurrent joiners,
+  gateway failover/promotion, cross-pan_id isolation, moving a device
+  between tanks) -- not yet wired into actual device setup/polling.
+
 - **Fixed a real bug: the manual-setup device list wasn't actually
   excluding already-configured devices.** After switching `unique_id` to
   serial-based, the filter was still comparing `discovery.address` against
