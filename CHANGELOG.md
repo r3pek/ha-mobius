@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Added hardware revision display.** `get_hardware_info()` (already
+  present in `python-mobius`, just not wired in here) is now fetched
+  every poll cycle and shown as `hw_version` on the device card,
+  alongside `sw_version` -- `derive_hw_version()` picks the `"Revision"`
+  field (the only one of `Color`/`Revision`/`ProductType`/`RadioType`/
+  `MotorType`/`Segments` that actually corresponds to "hardware
+  revision"), shown as a plain integer since no display-formatting
+  convention is confirmed for this field. Kept in sync on every poll if
+  it changes, same as `sw_version`.
+
+- **Corrected `sw_version`'s label priority: `"Firmware"` now comes
+  before `"Product OS"`.** Requires `python-mobius>=0.2.1` (its
+  multi-block response fix -- see that project's changelog) to actually
+  see the full picture here: once a light's previously-truncated
+  firmware response came back complete, direct comparison against what
+  the official app displays confirmed it treats `"Firmware"`
+  (`FirmwareType.LEDClusterMicro`/`Esp32*Firmware` -- the light's actual
+  LED-driver microcontroller) as primary, not `"Product OS"`
+  (`FirmwareType.MainMicroOS`) as originally assumed. `sw_version`s that
+  were previously showing a `Product OS` value despite a `Firmware` value
+  also being present will change on next update.
+
 - **Fixed a real bug: lights' device card showed no firmware version at
   all.** `sw_version` was derived from a single hardcoded lookup of
   `"Product OS"` (`FirmwareType.MainMicroOS`) in the firmware versions

@@ -95,6 +95,7 @@ async def test_setup_entry_joins_registry_with_current_rssi(hass):
     fake_device.get_pump_schedule = AsyncMock(return_value=[fake_point])
     fake_device.get_current_pump_block = AsyncMock(return_value=fake_point)
     fake_device.get_firmware_versions = AsyncMock(return_value={"Product OS": "1.0"})
+    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
 
     with patch(
         "custom_components.mobius._current_rssi", return_value=-42,
@@ -138,6 +139,7 @@ def _fake_pump_device():
     fake_device.get_pump_schedule = AsyncMock(return_value=[fake_point])
     fake_device.get_current_pump_block = AsyncMock(return_value=fake_point)
     fake_device.get_firmware_versions = AsyncMock(return_value={"Product OS": "1.0"})
+    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
     return fake_device
 
 

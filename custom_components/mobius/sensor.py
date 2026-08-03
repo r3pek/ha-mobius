@@ -24,11 +24,11 @@ from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData
 from .const import DOMAIN, CONF_PAN_ID
-from .coordinator import MobiusDeviceCoordinator, derive_sw_version
+from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
 
 
 def _device_info(address: str, data: dict, pan_id: int | None = None,
-                  sw_version: str | None = None) -> DeviceInfo:
+                  sw_version: str | None = None, hw_version: str | None = None) -> DeviceInfo:
     custom_name = data.get("name")
     model = data.get("model")
     serial = data.get("serial")
@@ -64,6 +64,7 @@ def _device_info(address: str, data: dict, pan_id: int | None = None,
         model=model,
         serial_number=serial,
         sw_version=sw_version,
+        hw_version=hw_version,
     )
 
 
@@ -334,21 +335,22 @@ async def async_setup_entry(
     data = coordinator.data or {}
     support = data.get("support", "")
 
-    # "Product OS" is the confirmed real display label for the main
-    # firmware version (see python-mobius's get_firmware_versions() --
-    # MainMicroOS for EcoTech devices) -- but real hardware testing found
-    # at least some lights don't report that specific FirmwareType at
-    # all, so derive_sw_version() falls through a priority list of other
-    # labels rather than assuming "Product OS" is always present (see its
-    # own comment for the fallback order and why). Not all firmware
+    # See derive_sw_version()/_SW_VERSION_LABEL_PRIORITY in coordinator.py
+    # for the confirmed label priority (device-reported "Firmware" first,
+    # not "Product OS" -- confirmed by direct comparison against what the
+    # official app itself displays) and why it's a fallback list rather
+    # than a single hardcoded lookup. Not all firmware/hardware
     # components as separate sensors -- that would be sensor sprawl for
     # something that's fundamentally device info, not a changing value;
     # the full breakdown is available via python-mobius directly for
-    # anyone who wants it. coordinator._sync_sw_version() also keeps the
-    # device registry in sync if it changes after setup, using the same
-    # fallback logic.
+    # anyone who wants it. coordinator._sync_device_registry_versions()
+    # also keeps the device registry in sync if either changes after
+    # setup, using the same derivation logic.
     sw_version = derive_sw_version(data.get("firmware_versions", {}))
-    device_info = _device_info(address, data, pan_id=pan_id, sw_version=sw_version)
+    hw_version = derive_hw_version(data.get("hardware_info", {}))
+    device_info = _device_info(
+        address, data, pan_id=pan_id, sw_version=sw_version, hw_version=hw_version,
+    )
 
     entities: list[SensorEntity] = [
         SupportTierSensor(coordinator, address, device_info),

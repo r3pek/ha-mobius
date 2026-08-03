@@ -57,6 +57,7 @@ def _fake_pump_device():
         "Radio": "4.0.21", "Radio Bootloader": "1.2",
         "Product OS": "2.1.5", "Product Bootloader": "1.0",
     })
+    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
     return device
 
 
@@ -96,6 +97,7 @@ def _fake_light_device():
         "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
         "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
     })
+    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([1])})
 
     calibration = MagicMock()
     calibration.completed = True

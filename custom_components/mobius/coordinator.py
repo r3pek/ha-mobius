@@ -182,17 +182,28 @@ class MobiusConnectionManager:
 
 
 # Priority order for picking a single "main" firmware version to display
-# as a device's sw_version. "Product OS" (FirmwareType.MainMicroOS) is
-# the confirmed real display label the app itself treats as primary --
-# but real hardware testing found at least some Radion lights don't
-# report that FirmwareType at all (lights are QCA4020-based, and appear
-# to not always have a distinct "main micro" component the way pumps
-# do), which left sw_version silently empty for those devices with a
-# single hardcoded lookup. Falls through this list rather than assuming
-# any one label is always present; the first one found wins, matching
-# "the most main-firmware-like thing this device actually reported"
-# rather than picking arbitrarily among what's left.
-_SW_VERSION_LABEL_PRIORITY = ["Product OS", "Radio Firmware", "Radio OS", "Radio"]
+# as a device's sw_version.
+#
+# "Firmware" first, not "Product OS" -- confirmed by directly comparing
+# against what the official app itself displays for a real Radion light:
+# once python-mobius 0.2.1 fixed a multi-block response truncation bug
+# (see its CHANGELOG -- a single get_firmware_versions() response can
+# legitimately split across multiple blocks, and earlier versions of
+# that library silently returned only the first), the FULL firmware
+# dict became visible, including a "Firmware" label (FirmwareType.
+# LEDClusterMicro/Esp32*Firmware -- the light's actual LED-driver
+# microcontroller) that hadn't been visible before, and it -- not
+# "Product OS" (FirmwareType.MainMicroOS) -- is what the app treats as
+# primary. An earlier version of this comment assumed "Product OS" was
+# always the right first choice; that assumption predated having the
+# full picture and turned out to be backwards for at least this device.
+#
+# Falls through this list rather than assuming any one label is always
+# present (some devices, or some firmware versions, may not report
+# every component) -- the first one found wins, matching "the most
+# main-firmware-like thing this device actually reported" rather than
+# picking arbitrarily among what's left.
+_SW_VERSION_LABEL_PRIORITY = ["Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio"]
 
 
 def derive_sw_version(firmware_versions: dict) -> Optional[str]:
@@ -205,6 +216,29 @@ def derive_sw_version(firmware_versions: dict) -> Optional[str]:
         if version:
             return version
     return None
+
+
+def derive_hw_version(hardware_info: dict) -> Optional[str]:
+    """
+    Picks a single string to show as a device's hw_version, from
+    get_hardware_info()'s raw {HardwareInfo_name: raw_bytes} dict.
+    "Revision" (HardwareInfo.Revision) is the field name most directly
+    matching "hardware revision" as a concept -- there's no other
+    reasonable candidate among Color/ProductType/RadioType/MotorType/
+    Segments, which describe entirely different things.
+
+    No display-formatting convention is confirmed for this field in
+    python-mobius (see get_hardware_info()'s own docstring: these read
+    more like small integer/enum codes than version numbers, unlike
+    firmware versions' confirmed dot-joined format) -- shown as a plain
+    unsigned integer from the raw bytes, the most honest representation
+    available without inventing a format that hasn't actually been
+    confirmed against real hardware.
+    """
+    raw = hardware_info.get("Revision")
+    if not raw:
+        return None
+    return str(int.from_bytes(raw, byteorder="little", signed=False))
 
 
 async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
@@ -249,6 +283,7 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     except ValueError:
         model = None
     info["firmware_versions"] = await device.get_firmware_versions(model=model)
+    info["hardware_info"] = await device.get_hardware_info()
 
     if primitive in LIGHT_PRIMITIVES:
         info["channels"] = [c.name for c in await device.get_supported_channels()]
@@ -294,7 +329,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self._fetch()
             self._last_success = dt_util.utcnow()
-            self._sync_sw_version(data)
+            self._sync_device_registry_versions(data)
             return data
         except Exception as err:
             now = dt_util.utcnow()
@@ -307,21 +342,29 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return self.data
             raise UpdateFailed(f"Error communicating with {self.serial}: {err}") from err
 
-    def _sync_sw_version(self, data: dict[str, Any]) -> None:
-        """Keeps the device registry's sw_version in sync with reality --
-        firmware changes are infrequent but real (a real device got an OTA
-        update mid-development of this integration), so this needs to
-        actually propagate, not just be captured once at setup and left
-        stale forever after."""
+    def _sync_device_registry_versions(self, data: dict[str, Any]) -> None:
+        """Keeps the device registry's sw_version/hw_version in sync with
+        reality -- firmware changes are infrequent but real (a real
+        device got an OTA update mid-development of this integration), so
+        this needs to actually propagate, not just be captured once at
+        setup and left stale forever after."""
         sw_version = derive_sw_version(data.get("firmware_versions") or {})
-        if not sw_version:
+        hw_version = derive_hw_version(data.get("hardware_info") or {})
+        if not sw_version and not hw_version:
             return
         device_registry = dr.async_get(self.hass)
         device_entry = device_registry.async_get_device(
             identifiers={(DOMAIN, self.config_entry.data[CONF_ADDRESS])}
         )
-        if device_entry is not None and device_entry.sw_version != sw_version:
-            device_registry.async_update_device(device_entry.id, sw_version=sw_version)
+        if device_entry is None:
+            return
+        updates = {}
+        if sw_version and device_entry.sw_version != sw_version:
+            updates["sw_version"] = sw_version
+        if hw_version and device_entry.hw_version != hw_version:
+            updates["hw_version"] = hw_version
+        if updates:
+            device_registry.async_update_device(device_entry.id, **updates)
 
     async def _fetch(self) -> dict[str, Any]:
         group = self.registry.group(self.pan_id)

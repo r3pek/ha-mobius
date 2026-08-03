@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
-from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version
+from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from mobius import PrimitiveType
 
@@ -64,6 +64,7 @@ def _make_fake_pump_device():
         "Radio": "4.0.21", "Radio Bootloader": "1.2",
         "Product OS": "2.1.5", "Product Bootloader": "1.0",
     })
+    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
     return device
 
 
@@ -505,10 +506,10 @@ async def test_first_ever_failure_with_no_prior_success_raises_immediately(hass)
 # synced to the device registry when it changes.
 # --------------------------------------------------------------------------
 
-async def test_coordinator_syncs_device_registry_sw_version_on_change(hass):
-    """The actual point of this fix: a firmware version that changes
-    between polls must propagate to the device registry, not just be
-    captured once and left stale."""
+async def test_coordinator_syncs_device_registry_sw_and_hw_version_on_change(hass):
+    """The actual point of this fix: a firmware/hardware version that
+    changes between polls must propagate to the device registry, not
+    just be captured once and left stale."""
     entry = MockConfigEntry(
         domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
         unique_id=PUMP_SERIAL,
@@ -519,9 +520,11 @@ async def test_coordinator_syncs_device_registry_sw_version_on_change(hass):
     device_entry = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, PUMP_ADDRESS)},
-        sw_version="2.1.5",  # the OLD version
+        sw_version="2.1.5",  # the OLD versions
+        hw_version="1",
     )
     assert device_entry.sw_version == "2.1.5"
+    assert device_entry.hw_version == "1"
 
     registry = _make_registry(hass)
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
@@ -533,6 +536,7 @@ async def test_coordinator_syncs_device_registry_sw_version_on_change(hass):
         "Product OS": "2.2.0",  # the NEW version, after the OTA update
         "Product Bootloader": "1.0",
     })
+    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})  # a board revision
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
@@ -541,9 +545,10 @@ async def test_coordinator_syncs_device_registry_sw_version_on_change(hass):
     assert coordinator.last_update_success
     updated_device = device_registry.async_get(device_entry.id)
     assert updated_device.sw_version == "2.2.0"
+    assert updated_device.hw_version == "2"
 
 
-async def test_coordinator_does_not_touch_registry_when_sw_version_unchanged(hass):
+async def test_coordinator_does_not_touch_registry_when_versions_unchanged(hass):
     entry = MockConfigEntry(
         domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
         unique_id=PUMP_SERIAL,
@@ -555,13 +560,16 @@ async def test_coordinator_does_not_touch_registry_when_sw_version_unchanged(has
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, PUMP_ADDRESS)},
         sw_version="2.1.5",
+        hw_version="2",
     )
 
     registry = _make_registry(hass)
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
-    fake_device = _make_fake_pump_device()  # same "2.1.5" as already registered
+    # _make_fake_pump_device() reports "2.1.5"/Revision=2 -- same as
+    # already registered above.
+    fake_device = _make_fake_pump_device()
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
@@ -583,7 +591,21 @@ async def test_coordinator_does_not_touch_registry_when_sw_version_unchanged(has
 # --------------------------------------------------------------------------
 
 class TestDeriveSwVersion:
-    def test_prefers_product_os_when_present(self):
+    def test_prefers_firmware_over_product_os_when_both_present(self):
+        """The actual current behavior: "Firmware" (the light's real LED-
+        driver microcontroller, FirmwareType.LEDClusterMicro/
+        Esp32*Firmware) is confirmed via direct comparison against the
+        official app's own display to be what it treats as primary --
+        not "Product OS" (FirmwareType.MainMicroOS), even when both are
+        present. See _SW_VERSION_LABEL_PRIORITY's comment for why an
+        earlier version of this logic had these the other way around."""
+        versions = {
+            "Firmware": "1.0.2", "Product OS": "0.0.12", "Product Bootloader": "3.3.0",
+            "Radio Firmware": "1.5.103", "Radio OS": "1.5.103", "Radio": "3.1.0",
+        }
+        assert derive_sw_version(versions) == "1.0.2"
+
+    def test_prefers_product_os_when_no_firmware_label(self):
         versions = {
             "Product OS": "2.1.5", "Radio Firmware": "1.5.103", "Radio OS": "1.5.103",
         }
@@ -619,3 +641,25 @@ class TestDeriveSwVersion:
         must fall through to the next candidate."""
         versions = {"Product OS": "", "Radio Firmware": "1.5.103"}
         assert derive_sw_version(versions) == "1.5.103"
+
+
+class TestDeriveHwVersion:
+    def test_returns_revision_as_a_plain_integer_string(self):
+        assert derive_hw_version({"Revision": bytes([2])}) == "2"
+
+    def test_multi_byte_revision_decoded_little_endian(self):
+        # 0x0102 little-endian -> 258
+        assert derive_hw_version({"Revision": bytes([2, 1])}) == "258"
+
+    def test_ignores_other_hardware_info_fields(self):
+        info = {"Color": bytes([1]), "Revision": bytes([3]), "ProductType": bytes([5])}
+        assert derive_hw_version(info) == "3"
+
+    def test_returns_none_when_no_revision_field(self):
+        assert derive_hw_version({"Color": bytes([1])}) is None
+
+    def test_returns_none_for_empty_dict(self):
+        assert derive_hw_version({}) is None
+
+    def test_returns_none_for_empty_bytes(self):
+        assert derive_hw_version({"Revision": b""}) is None
