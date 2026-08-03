@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - **Added `Firmware version` and `Hardware revision` diagnostic
   sensors**, each with the full per-component breakdown as attributes
