@@ -102,7 +102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # fatal: it's just treated as "will retry via the coordinator's own
     # on-demand fallback," not raised.
     if group.gateway_serial != serial and group.members[serial].mesh_address is None:
-        address = await discover_mesh_address(hass, serial)
+        address = await discover_mesh_address(hass, serial, semaphore)
         if address is not None:
             registry.update_mesh_address(pan_id, serial, address)
         else:

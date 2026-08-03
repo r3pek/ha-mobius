@@ -19,7 +19,10 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
-from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
+from custom_components.mobius.coordinator import (
+    MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
+    discover_mesh_address,
+)
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from mobius import PrimitiveType
 
@@ -663,3 +666,117 @@ class TestDeriveHwVersion:
 
     def test_returns_none_for_empty_bytes(self):
         assert derive_hw_version({"Revision": b""}) is None
+
+
+# --------------------------------------------------------------------------
+# discover_mesh_address() -- confirmed via real-world testing to be a real
+# bug when it didn't share MobiusConnectionManager's connection semaphore:
+# on-demand/proactive mesh discovery connects independently of any gateway
+# connection, and without throttling through the same semaphore, a burst
+# of discovery calls could exceed the real BLE adapter's actual
+# concurrent-connection capacity even while MAX_CONCURRENT_CONNECTIONS
+# appeared respected elsewhere -- manifesting as the gateway's own
+# otherwise-healthy connection failing, triggering unnecessary failover
+# (observed in production as repeated "Gateway ... failed 3 consecutive
+# times" flapping between the same two devices).
+# --------------------------------------------------------------------------
+
+class TestDiscoverMeshAddressSemaphore:
+    async def test_concurrent_calls_are_throttled_by_the_shared_semaphore(self, hass):
+        """The actual point of the fix: concurrent discover_mesh_address()
+        calls must never exceed the semaphore's permit count, confirmed
+        by tracking the actual number running at once rather than just
+        checking the semaphore object was touched."""
+        semaphore = asyncio.Semaphore(1)  # only one connection attempt at a time
+        concurrent_count = {"current": 0, "max_seen": 0}
+
+        class FakeMobiusDevice:
+            def __init__(self, ble_device, connect_timeout=None):
+                pass
+
+            async def __aenter__(self):
+                concurrent_count["current"] += 1
+                concurrent_count["max_seen"] = max(concurrent_count["max_seen"], concurrent_count["current"])
+                await asyncio.sleep(0.05)  # simulate a real connection attempt taking time
+                return self
+
+            async def __aexit__(self, *args):
+                concurrent_count["current"] -= 1
+
+            async def get_own_mesh_address(self):
+                return bytes.fromhex("fd11223344556677000000fffe001234")
+
+        discovered = [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=discovered,
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.MobiusDevice", FakeMobiusDevice,
+        ):
+            await asyncio.gather(*[
+                discover_mesh_address(hass, PUMP_SERIAL, semaphore) for _ in range(4)
+            ])
+
+        # With a 1-permit semaphore, at most 1 connection attempt should
+        # ever have been in flight at once, regardless of 4 concurrent callers.
+        assert concurrent_count["max_seen"] == 1
+
+    async def test_does_not_serialize_beyond_the_semaphores_actual_limit(self, hass):
+        """Confirms the fix isn't over-throttling either -- a 2-permit
+        semaphore should allow up to 2 concurrent connection attempts,
+        not force full serialization down to 1."""
+        semaphore = asyncio.Semaphore(2)
+        concurrent_count = {"current": 0, "max_seen": 0}
+
+        class FakeMobiusDevice:
+            def __init__(self, ble_device, connect_timeout=None):
+                pass
+
+            async def __aenter__(self):
+                concurrent_count["current"] += 1
+                concurrent_count["max_seen"] = max(concurrent_count["max_seen"], concurrent_count["current"])
+                await asyncio.sleep(0.05)
+                return self
+
+            async def __aexit__(self, *args):
+                concurrent_count["current"] -= 1
+
+            async def get_own_mesh_address(self):
+                return bytes.fromhex("fd11223344556677000000fffe001234")
+
+        discovered = [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=discovered,
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.MobiusDevice", FakeMobiusDevice,
+        ):
+            await asyncio.gather(*[
+                discover_mesh_address(hass, PUMP_SERIAL, semaphore) for _ in range(4)
+            ])
+
+        assert concurrent_count["max_seen"] == 2
+
+    async def test_shares_the_same_semaphore_object_as_the_gateway_connection(self, hass):
+        """Confirms GatewayRegistry.semaphore is the actual attribute
+        callers should use -- a plain attribute access, not a private one
+        that discovery calls would have no legitimate way to reach."""
+        from custom_components.mobius.gateway_registry import GatewayRegistry
+
+        semaphore = asyncio.Semaphore(2)
+        registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+        assert registry.semaphore is semaphore
+
+        group = await registry.join(0x3D0F, PUMP_SERIAL, rssi=-50)
+        # The gateway's own MobiusConnectionManager was constructed with
+        # this exact semaphore object -- confirms it's genuinely shared,
+        # not a separate equally-sized-but-different instance.
+        assert group.gateway_connection._semaphore is semaphore

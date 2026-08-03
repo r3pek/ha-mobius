@@ -432,10 +432,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """On-demand fallback for _resolve_own_mesh_peer() -- see
         discover_mesh_address() below for the actual logic, shared with
         __init__.py's proactive discovery-at-setup path."""
-        return await discover_mesh_address(self.hass, self.serial)
+        return await discover_mesh_address(self.hass, self.serial, self.registry.semaphore)
 
 
-async def discover_mesh_address(hass: HomeAssistant, serial: str) -> Optional[bytes]:
+async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore) -> Optional[bytes]:
     """
     Connects directly and briefly to whichever device is currently
     advertising `serial` (resolved via Home Assistant's own Bluetooth
@@ -448,6 +448,20 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str) -> Optional[by
     treats a None here as "will retry later" rather than fatal, since the
     coordinator's own on-demand fallback covers it if this attempt
     doesn't pan out.
+
+    `semaphore` MUST be the same shared connection semaphore
+    MobiusConnectionManager uses (MAX_CONCURRENT_CONNECTIONS, const.py)
+    -- confirmed via real-world testing to be a real bug when this was
+    missing: this connects independently of any gateway connection, and
+    without sharing the same semaphore, a burst of on-demand discovery
+    calls (e.g. several devices needing discovery around the same time,
+    such as right after a gateway promotion, when the demoted former
+    gateway needs its own mesh address for the first time) could exceed
+    the real BLE adapter's actual concurrent-connection capacity even
+    while appearing to respect MAX_CONCURRENT_CONNECTIONS, since this
+    path wasn't throttled by it at all -- manifesting as the CURRENT
+    gateway's own otherwise-healthy connection failing for reasons
+    unrelated to the gateway itself, triggering unnecessary failover.
     """
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
         payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
@@ -460,8 +474,9 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str) -> Optional[by
         if ble_device is None:
             return None
         try:
-            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
-                return await mdevice.get_own_mesh_address()
+            async with semaphore:
+                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                    return await mdevice.get_own_mesh_address()
         except Exception as err:
             _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
             return None

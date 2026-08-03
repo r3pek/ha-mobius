@@ -114,7 +114,7 @@ class GatewayRegistry:
         election_settle_seconds: float = GATEWAY_ELECTION_SETTLE_SECONDS,
     ):
         self.hass = hass
-        self._semaphore = semaphore
+        self.semaphore = semaphore
         self._election_settle_seconds = election_settle_seconds
         self._groups: dict[int, PanGroup] = {}
 
@@ -178,7 +178,7 @@ class GatewayRegistry:
         group.gateway_serial = serial
         group.consecutive_gateway_failures = 0
         group.gateway_connection = (
-            MobiusConnectionManager(self.hass, serial, self._semaphore)
+            MobiusConnectionManager(self.hass, serial, self.semaphore)
             if serial is not None else None
         )
 

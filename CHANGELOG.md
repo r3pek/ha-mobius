@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Fixed a real bug found via production logs: gateway connections were
+  flapping continuously, promoting back and forth between the same two
+  devices every ~70 seconds.** `discover_mesh_address()` (used both for
+  proactive discovery at setup and the coordinator's on-demand fallback)
+  connected directly to a device without acquiring the shared connection
+  semaphore (`MAX_CONCURRENT_CONNECTIONS`) at all -- it's a separate
+  connection from any gateway's, but wasn't throttled alongside it. A
+  burst of discovery calls (e.g. right after a promotion, when the
+  demoted former gateway needs its own mesh address for the first time,
+  since it never needed one while it was directly connected) could
+  exceed the real BLE adapter's actual concurrent-connection capacity
+  even while `MAX_CONCURRENT_CONNECTIONS` appeared respected everywhere
+  else, causing the *gateway's own otherwise-healthy connection* to fail
+  for reasons unrelated to the gateway itself -- triggering unnecessary
+  failover, which needed its own discovery call, which contended for
+  the same unthrottled resource, repeating the cycle indefinitely.
+  `GatewayRegistry.semaphore` is now a public attribute so
+  `discover_mesh_address()` can share the exact same semaphore object
+  `MobiusConnectionManager` uses. 3 new tests, including one that
+  directly measures concurrent in-flight connection attempts under load
+  to confirm the throttling actually holds, not just that the semaphore
+  object gets touched.
+
 - **Added hardware revision display.** `get_hardware_info()` (already
   present in `python-mobius`, just not wired in here) is now fetched
   every poll cycle and shown as `hw_version` on the device card,

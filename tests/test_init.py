@@ -181,7 +181,9 @@ async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
     ):
         await async_setup_entry(hass, entry)
 
-    mock_discover.assert_called_once_with(hass, PUMP_SERIAL)
+    mock_discover.assert_called_once()
+    assert mock_discover.call_args[0][0] is hass
+    assert mock_discover.call_args[0][1] == PUMP_SERIAL
     assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == address
 
 
@@ -252,7 +254,9 @@ async def test_proactive_discovery_failure_does_not_break_setup_flow(hass):
     # The discovery step itself ran and returned None cleanly -- the
     # failure came from the coordinator's own first read, not from
     # mishandling a None discovery result.
-    mock_discover.assert_called_once_with(hass, PUMP_SERIAL)
+    mock_discover.assert_called_once()
+    assert mock_discover.call_args[0][0] is hass
+    assert mock_discover.call_args[0][1] == PUMP_SERIAL
     assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address is None
 
 
