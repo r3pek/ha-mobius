@@ -11,7 +11,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID
 
 # Real captured payload for a VorTech MP40QD pump (see python-mobius tests).
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736343935323231303539303139")
@@ -23,6 +23,9 @@ LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
 # serial-based, not address-based.
 PUMP_SERIAL = "76495221059019"
 LIGHT_SERIAL = "7V4Z00F143RBED"
+# Decoded pan_id from REAL_PUMP_PAYLOAD/REAL_LIGHT_PAYLOAD above -- both
+# real captures share the same pan_id (same physical tank).
+PAN_ID = 0x3D0F
 
 
 def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBleak:
@@ -55,6 +58,10 @@ async def test_bluetooth_discovery_creates_entry(hass):
     result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["data"][CONF_ADDRESS] == PUMP_ADDRESS
+    # The actual point of adding multi-device/multi-tank gateway grouping:
+    # pan_id must actually be stored in the entry's data, decoded from the
+    # same real captured advertisement, not just serial/address.
+    assert result2["data"][CONF_PAN_ID] == PAN_ID
     # The actual point of the serial-based identity fix: unique_id is the
     # serial, not the address.
     assert result2["result"].unique_id == PUMP_SERIAL
@@ -140,6 +147,7 @@ async def test_manual_setup_also_uses_serial_for_unique_id(hass):
 
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["result"].unique_id == PUMP_SERIAL
+    assert result2["data"][CONF_PAN_ID] == PAN_ID
 
 
 async def test_bluetooth_discovery_aborts_without_manufacturer_data(hass):

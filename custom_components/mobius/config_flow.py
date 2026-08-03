@@ -23,7 +23,7 @@ from homeassistant.data_entry_flow import FlowResult
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
-from .const import DOMAIN, CONF_SERIAL
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -222,5 +222,5 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="no_manufacturer_data")
         return self.async_create_entry(
             title=_title_for(discovery),
-            data={CONF_ADDRESS: discovery.address, CONF_SERIAL: info.serial},
+            data={CONF_ADDRESS: discovery.address, CONF_SERIAL: info.serial, CONF_PAN_ID: info.pan_id},
         )

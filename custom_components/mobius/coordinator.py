@@ -1,36 +1,67 @@
 """
-Data update coordinators for a single Mobius device, sharing ONE
-persistent BLE connection (see MobiusConnectionManager) rather than each
-tier connecting/disconnecting independently on every poll.
+Single unified data update coordinator per Mobius device, sharing BLE
+connections across devices on the same pan_id (Thread mesh/"tank") via
+gateway_registry.GatewayRegistry rather than each device holding its own
+direct connection.
 
-Two tiers, per the design discussion in documentation/: telemetry is
-cheap (a couple of small GATT reads), schedule fetches are expensive
-(multiple round trips for potentially many points), and schedules don't
-change minute-to-minute anyway.
-  - MobiusStatusCoordinator: fast (~10s), cheap reads -- identity + live
-    pump telemetry (speed/GPH/operation state). No schedule fetch.
-  - MobiusScheduleCoordinator: slow (~10min), expensive reads -- the full
-    programmed schedule.
+One coordinator per device, one ~30s poll cycle, fetching both status
+and schedule data together -- see const.py's POLL_INTERVAL for why this
+replaced the previous fast/slow two-tier split.
 
-Reconnection (the first connect, or after a detected drop) always
-resolves the device's CURRENT address by serial number -- these devices'
-BLE addresses are not guaranteed stable over time, confirmed via real
+## Gateway vs. relayed reads
+
+Each poll cycle, the coordinator checks whether ITS OWN serial is
+currently the gateway for its pan_id group (gateway_registry.PanGroup.
+gateway_serial). If so, it reads directly over that group's shared
+MobiusConnectionManager. If not, it reads through a RelayedMobiusDevice
+wrapping that same connection, addressed to its own cached Thread
+mesh-local IPv6 (see _resolve_own_mesh_peer() for the on-demand discovery
+fallback if that isn't cached yet).
+
+This check happens fresh on every poll cycle, not once at setup -- if
+this device's group promotes a different gateway (see
+gateway_registry.py's failover logic) between one cycle and the next,
+the very next read from this coordinator automatically switches from
+direct to relayed (or vice versa, if THIS device gets promoted TO
+gateway), with no separate code path needed to handle the transition.
+
+## Failure handling: graceful, not immediate
+
+A single failed read doesn't immediately mark a device unavailable --
+the coordinator keeps returning its last-known-good data for up to
+MARK_UNAVAILABLE_AFTER (const.py) of consecutive failures before actually
+raising UpdateFailed. Only a genuinely sustained outage results in
+entities going unavailable. Reconnection itself isn't retried within the
+same poll cycle (unlike an earlier version of this module) -- a failed
+read marks the connection disconnected so the NEXT ~30s cycle reconnects
+fresh, and the grace period covers the gap in between; this is simpler
+than an immediate in-cycle retry and, given the poll interval is already
+short, doesn't meaningfully change how quickly a transient drop recovers.
+
+Separately, when THIS device is the group's gateway, a failed read is
+also reported to the registry (record_gateway_failure()) -- after
+GATEWAY_FAILURE_THRESHOLD consecutive gateway-read failures (much sooner
+than the 5-minute mark-unavailable grace period), the registry promotes
+a different member to gateway, since a bad gateway takes its whole group
+down with it. Relayed devices' own read failures are NOT reported to the
+registry this way -- a single relayed device failing to read through an
+otherwise-healthy gateway is much more likely to be specific to that
+device/target than to the gateway itself, so only the gateway's own
+direct connection health drives promotion.
+
+Reconnection (the gateway's first connect, or after a detected drop)
+always resolves the device's CURRENT address by serial number -- BLE
+addresses are not guaranteed stable over time, confirmed via real
 hardware and via the official app's own Peripheral class (identity is
 serial-number-based, never address-based). See python-mobius's
 documentation/12-device-identity-and-address-stability.md.
 
 Deliberately does NOT use mobius.find_device_by_serial() for this --
 that function runs its own independent BleakScanner, which conflicts
-with Home Assistant's own shared Bluetooth manager (the exact
-connection-instability-inducing anti-pattern this integration has avoided
-from the start). Instead, MobiusConnectionManager reads Home Assistant's
-own already-running Bluetooth cache (bluetooth.async_discovered_service_info()),
-the same approach config_flow.py's manual-setup step already uses.
-
-Failure detection is REACTIVE, not proactive: a dropped connection is
-only discovered when a scheduled read actually fails, not via a bleak
-disconnect callback. Given the fast tier already polls every ~10s, this
-is at most ~10s of staleness in exchange for meaningfully simpler code.
+with Home Assistant's own shared Bluetooth manager. Instead,
+MobiusConnectionManager reads Home Assistant's own already-running
+Bluetooth cache (bluetooth.async_discovered_service_info()), the same
+approach config_flow.py's manual-setup step already uses.
 """
 
 from __future__ import annotations
@@ -48,12 +79,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    MobiusDevice, PrimitiveType, Model, MOBIUS_COMPANY_ID, parse_manufacturer_data,
+    MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model,
+    MOBIUS_COMPANY_ID, parse_manufacturer_data,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE,
+    PRIMITIVE_SIZE, extract_short_address,
 )
 
-from .const import CONNECT_TIMEOUT, FAST_POLL_INTERVAL, SLOW_POLL_INTERVAL, DOMAIN
+from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN
+from .gateway_registry import GatewayRegistry, PanGroup
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,9 +94,11 @@ _LOGGER = logging.getLogger(__name__)
 class MobiusConnectionManager:
     """
     Owns a single persistent MobiusDevice connection for one physical
-    device, shared by both coordinator tiers for that device -- the
-    actual point of this class existing is that there's exactly one BLE
-    connection per device, not one per poll per tier.
+    device -- the gateway of a pan_id group. Shared (via
+    gateway_registry.PanGroup.gateway_connection) by every coordinator
+    for devices in that group, not just the gateway's own -- the actual
+    point of this class existing is that there's exactly one real BLE
+    connection per GROUP, not one per device.
     """
 
     def __init__(self, hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore):
@@ -71,8 +106,8 @@ class MobiusConnectionManager:
         self.serial = serial
         self._semaphore = semaphore
         self._device: Optional[MobiusDevice] = None
-        # Prevents two coordinators (status + schedule) from both trying
-        # to reconnect the same device at the same time.
+        # Prevents multiple coordinators relaying through this same
+        # gateway from all trying to reconnect it at the same time.
         self._lock = asyncio.Lock()
 
     async def _resolve_current_ble_device(self):
@@ -110,8 +145,9 @@ class MobiusConnectionManager:
             return self._device
 
         async with self._lock:
-            # Re-check after acquiring the lock -- the other coordinator
-            # may have already reconnected while we were waiting on it.
+            # Re-check after acquiring the lock -- another coordinator
+            # relaying through this gateway may have already reconnected
+            # it while we were waiting.
             if self._device is not None and self._device.is_connected:
                 return self._device
 
@@ -145,155 +181,204 @@ class MobiusConnectionManager:
             self._device = None
 
 
-class MobiusCoordinatorBase(DataUpdateCoordinator[dict[str, Any]]):
-    """Shared read/error-handling plumbing for both tiers, on top of a
-    shared MobiusConnectionManager."""
+async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
+    """
+    The actual read logic, merging what used to be two separate tiers
+    (status: identity + live telemetry; schedule: programmed schedule +
+    firmware version) into one. `device` can be a directly-connected
+    MobiusDevice or a RelayedMobiusDevice -- identical either way, since
+    RelayedMobiusDevice implements the same interface transparently.
+    """
+    info = await device.get_device_info()
+    primitive_name = info.get("primitive_type")
+    try:
+        primitive = PrimitiveType[primitive_name] if primitive_name else None
+    except KeyError:
+        primitive = None
+
+    if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
+        info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
+        info["telemetry"] = await device.get_pump_telemetry()
+        info["operation_state"] = (await device.get_operation_state()).name
+    elif primitive in LIGHT_PRIMITIVES:
+        info["support"] = "light"
+    else:
+        info["support"] = "unsupported"
+        size = PRIMITIVE_SIZE.get(primitive) if primitive else None
+        info["support_note"] = (
+            f"PrimitiveType {primitive_name!r} has no parser implemented "
+            f"({size} byte primitive)." if size is not None else
+            f"PrimitiveType {primitive_name!r} has no parser implemented."
+        )
+
+    # Use Home Assistant's configured timezone, not the container's system
+    # time -- these can differ, and the interpolation/block lookup is
+    # meaningless if "now" is wrong.
+    now = dt_util.now()
+    minute_of_day = now.hour * 60 + now.minute
+
+    model_raw = info.get("model_raw")
+    try:
+        model = Model(model_raw) if model_raw is not None else None
+    except ValueError:
+        model = None
+    info["firmware_versions"] = await device.get_firmware_versions(model=model)
+
+    if primitive in LIGHT_PRIMITIVES:
+        info["channels"] = [c.name for c in await device.get_supported_channels()]
+        points = await device.get_light_schedule(which=1)
+        info["schedule_point_count"] = len(points)
+        current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
+        info["current_intensities"] = {ch.name: v for ch, v in current.items()}
+        # Confirmed light-only via real device testing AND the app's own
+        # UI gating -- returns None for pumps, which is fine (the sensor
+        # built on this is only added for light devices anyway).
+        info["calibration"] = await device.get_calibration_info()
+
+    elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
+        points = await device.get_pump_schedule(which=1)
+        info["schedule_point_count"] = len(points)
+        block = await device.get_current_pump_block(which=1, minute_of_day=minute_of_day)
+        if block:
+            info["current_pump_mode"] = block.pump.mode.name
+            info["current_pump_params"] = {
+                p.name: (v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v))
+                for p, v in block.pump.params.items()
+            }
+
+    return info
+
+
+class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """One coordinator per device. See this module's docstring for the
+    gateway-vs-relayed and graceful-failure design."""
 
     def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        connection_manager: MobiusConnectionManager,
-        update_interval,
-        name_suffix: str,
-    ) -> None:
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=f"mobius_{connection_manager.serial}_{name_suffix}",
-            update_interval=update_interval,
-        )
+        self, hass: HomeAssistant, entry: ConfigEntry, registry: GatewayRegistry,
+        serial: str, pan_id: int,
+    ):
+        super().__init__(hass, _LOGGER, name=f"mobius_{serial}", update_interval=POLL_INTERVAL)
         self.config_entry = entry
-        self._connection_manager = connection_manager
+        self.registry = registry
+        self.serial = serial
+        self.pan_id = pan_id
+        self._last_success: Optional[Any] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            device = await self._connection_manager.ensure_connected()
-            return await self._async_fetch(device)
-        except UpdateFailed:
-            raise
+            data = await self._fetch()
+            self._last_success = dt_util.utcnow()
+            self._sync_sw_version(data)
+            return data
         except Exception as err:
-            # A read failed even though we thought we were connected -- the
-            # connection may have dropped since ensure_connected() last
-            # checked. Reactive detection: try ONE reconnect + retry within
-            # this same poll cycle before giving up for this cycle.
-            _LOGGER.debug(
-                "Read failed for %s (%s), attempting one reconnect",
-                self._connection_manager.serial, err,
-            )
-            self._connection_manager.mark_disconnected()
-            try:
-                device = await self._connection_manager.ensure_connected()
-                return await self._async_fetch(device)
-            except Exception as err2:
-                raise UpdateFailed(
-                    f"Error communicating with {self._connection_manager.serial}: {err2}"
-                ) from err2
+            now = dt_util.utcnow()
+            if self._last_success is not None and (now - self._last_success) < MARK_UNAVAILABLE_AFTER:
+                _LOGGER.debug(
+                    "Read failed for %s (%s), within the %s grace period -- "
+                    "keeping last-known-good data instead of going unavailable",
+                    self.serial, err, MARK_UNAVAILABLE_AFTER,
+                )
+                return self.data
+            raise UpdateFailed(f"Error communicating with {self.serial}: {err}") from err
 
-    async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
-        raise NotImplementedError
-
-
-class MobiusStatusCoordinator(MobiusCoordinatorBase):
-    """Fast tier: identity + live telemetry. No schedule fetch."""
-
-    def __init__(self, hass, entry, connection_manager):
-        super().__init__(hass, entry, connection_manager, FAST_POLL_INTERVAL, "status")
-
-    async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
-        info = await device.get_device_info()
-        primitive_name = info.get("primitive_type")
-        try:
-            primitive = PrimitiveType[primitive_name] if primitive_name else None
-        except KeyError:
-            primitive = None
-
-        if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
-            info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
-            info["telemetry"] = await device.get_pump_telemetry()
-            info["operation_state"] = (await device.get_operation_state()).name
-        elif primitive in LIGHT_PRIMITIVES:
-            info["support"] = "light"
-        else:
-            info["support"] = "unsupported"
-            size = PRIMITIVE_SIZE.get(primitive) if primitive else None
-            info["support_note"] = (
-                f"PrimitiveType {primitive_name!r} has no parser implemented "
-                f"({size} byte primitive)." if size is not None else
-                f"PrimitiveType {primitive_name!r} has no parser implemented."
-            )
-        return info
-
-
-class MobiusScheduleCoordinator(MobiusCoordinatorBase):
-    """Slow tier: schedule fetch + interpolation/block-lookup, plus
-    firmware version (see _async_update_data() override below for why)."""
-
-    def __init__(self, hass, entry, connection_manager):
-        super().__init__(hass, entry, connection_manager, SLOW_POLL_INTERVAL, "schedule")
-
-    async def _async_fetch(self, device: MobiusDevice) -> dict[str, Any]:
-        primitive = await device.identify_device_type()
-        data: dict[str, Any] = {"primitive_type": primitive.name}
-
-        # Use Home Assistant's configured timezone, not the container's
-        # system time -- these can differ, and the interpolation/block
-        # lookup is meaningless if "now" is wrong.
-        now = dt_util.now()
-        minute_of_day = now.hour * 60 + now.minute
-
-        # Firmware version -- re-fetched here on the slow tier (not once
-        # at setup and never again) because firmware DOES change: real
-        # devices got an OTA update mid-development of this integration.
-        # The fast tier would be excessive for something that changes this
-        # infrequently, but "once and never checked again" was wrong.
-        info = await device.get_device_info()
-        model_raw = info.get("model_raw")
-        try:
-            model = Model(model_raw) if model_raw is not None else None
-        except ValueError:
-            model = None
-        data["firmware_versions"] = await device.get_firmware_versions(model=model)
-
-        if primitive in LIGHT_PRIMITIVES:
-            data["channels"] = [c.name for c in await device.get_supported_channels()]
-            points = await device.get_light_schedule(which=1)
-            data["schedule_point_count"] = len(points)
-            current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
-            data["current_intensities"] = {ch.name: v for ch, v in current.items()}
-            # Confirmed via real device testing AND via the app's own UI
-            # gating (DeviceSettingsFragment.java) to be a light feature --
-            # returns None for pumps, which is fine (the sensor built on
-            # this is only added for light devices anyway). Belongs here
-            # (slow tier) rather than the fast tier since calibration
-            # status essentially never changes during normal operation.
-            data["calibration"] = await device.get_calibration_info()
-
-        elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
-            points = await device.get_pump_schedule(which=1)
-            data["schedule_point_count"] = len(points)
-            block = await device.get_current_pump_block(which=1, minute_of_day=minute_of_day)
-            if block:
-                data["current_pump_mode"] = block.pump.mode.name
-                data["current_pump_params"] = {
-                    p.name: (v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v))
-                    for p, v in block.pump.params.items()
-                }
-
-        return data
-
-    async def _async_update_data(self) -> dict[str, Any]:
-        data = await super()._async_update_data()
-        # Keep the device registry's sw_version in sync with reality --
-        # firmware changes are infrequent but real (see _async_fetch()
-        # above), so this needs to actually propagate, not just be
-        # captured once at setup and left stale forever after.
+    def _sync_sw_version(self, data: dict[str, Any]) -> None:
+        """Keeps the device registry's sw_version in sync with reality --
+        firmware changes are infrequent but real (a real device got an OTA
+        update mid-development of this integration), so this needs to
+        actually propagate, not just be captured once at setup and left
+        stale forever after."""
         sw_version = (data.get("firmware_versions") or {}).get("Product OS")
-        if sw_version:
-            device_registry = dr.async_get(self.hass)
-            device_entry = device_registry.async_get_device(
-                identifiers={(DOMAIN, self.config_entry.data[CONF_ADDRESS])}
+        if not sw_version:
+            return
+        device_registry = dr.async_get(self.hass)
+        device_entry = device_registry.async_get_device(
+            identifiers={(DOMAIN, self.config_entry.data[CONF_ADDRESS])}
+        )
+        if device_entry is not None and device_entry.sw_version != sw_version:
+            device_registry.async_update_device(device_entry.id, sw_version=sw_version)
+
+    async def _fetch(self) -> dict[str, Any]:
+        group = self.registry.group(self.pan_id)
+        if group is None or group.gateway_serial is None:
+            raise UpdateFailed(
+                f"No gateway currently available for pan_id {self.pan_id:#06x}"
             )
-            if device_entry is not None and device_entry.sw_version != sw_version:
-                device_registry.async_update_device(device_entry.id, sw_version=sw_version)
-        return data
+
+        is_gateway = group.gateway_serial == self.serial
+        try:
+            if is_gateway:
+                device = await group.gateway_connection.ensure_connected()
+                data = await _fetch_all(device)
+                self.registry.record_gateway_success(self.pan_id)
+                return data
+            else:
+                gateway_device = await group.gateway_connection.ensure_connected()
+                peer = await self._resolve_own_mesh_peer(group)
+                relayed = RelayedMobiusDevice(gateway_device, peer)
+                return await _fetch_all(relayed)
+        except Exception:
+            # A READ can fail even after ensure_connected() reported
+            # success (the connection can drop in between) -- this needs
+            # to mark the connection disconnected in that case too, not
+            # just when ensure_connected() itself raises, or the next
+            # poll cycle would keep reusing the same dead connection
+            # forever instead of ever actually reconnecting.
+            #
+            # Only done when THIS device is the gateway -- see this
+            # module's docstring for why a relayed device's own failure
+            # doesn't touch the shared gateway connection's state at all
+            # (it might be specific to this device/target, not the
+            # gateway connection itself; the gateway's own coordinator
+            # independently detects and handles its own connection health
+            # on its own cycle regardless).
+            if is_gateway:
+                group.gateway_connection.mark_disconnected()
+                await self.registry.record_gateway_failure(self.pan_id)
+            raise
+
+    async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
+        """Returns a MeshPeer for THIS coordinator's own device, using a
+        cached mesh address if available (see the background prefetch
+        task in __init__.py), or discovering it on demand via a brief
+        direct connection if not."""
+        member = group.members.get(self.serial)
+        address = member.mesh_address if member else None
+
+        if address is None:
+            address = await self._discover_own_mesh_address()
+            if address is None:
+                raise UpdateFailed(
+                    f"Could not determine Thread mesh address for {self.serial} "
+                    "(needed to relay through the group's gateway)"
+                )
+            self.registry.update_mesh_address(self.pan_id, self.serial, address)
+
+        return MeshPeer(
+            serial=self.serial, model_raw=0, model=None,
+            short_address=extract_short_address(address), address=address,
+        )
+
+    async def _discover_own_mesh_address(self) -> Optional[bytes]:
+        """On-demand fallback for _resolve_own_mesh_peer() -- connects
+        directly and briefly to THIS device (not the gateway) to read its
+        own mesh address, matching the same Bluetooth-cache-based address
+        resolution MobiusConnectionManager uses."""
+        for info in bluetooth.async_discovered_service_info(self.hass, connectable=True):
+            payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+            if not payload:
+                continue
+            parsed = parse_manufacturer_data(payload)
+            if not parsed or parsed.serial != self.serial:
+                continue
+            ble_device = bluetooth.async_ble_device_from_address(
+                self.hass, info.address, connectable=True
+            )
+            if ble_device is None:
+                return None
+            try:
+                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                    return await mdevice.get_own_mesh_address()
+            except Exception as err:
+                _LOGGER.debug("On-demand mesh address discovery failed for %s: %s", self.serial, err)
+                return None
+        return None

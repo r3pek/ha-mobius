@@ -23,14 +23,15 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData
-from .const import DOMAIN
-from .coordinator import MobiusScheduleCoordinator, MobiusStatusCoordinator
+from .const import DOMAIN, CONF_PAN_ID
+from .coordinator import MobiusDeviceCoordinator
 
 
-def _device_info(address: str, status_data: dict, sw_version: str | None = None) -> DeviceInfo:
-    custom_name = status_data.get("name")
-    model = status_data.get("model")
-    serial = status_data.get("serial")
+def _device_info(address: str, data: dict, pan_id: int | None = None,
+                  sw_version: str | None = None) -> DeviceInfo:
+    custom_name = data.get("name")
+    model = data.get("model")
+    serial = data.get("serial")
 
     # The device's own configured "name" attribute is often blank (confirmed
     # on real hardware -- one of our test XR15 lights had an empty name).
@@ -49,41 +50,31 @@ def _device_info(address: str, status_data: dict, sw_version: str | None = None)
     else:
         name = "Mobius device"
 
+    # Appends which tank (pan_id) this device belongs to -- useful once
+    # more than one tank is in play, since device/entity names otherwise
+    # give no indication of which physical tank a device is part of.
+    if pan_id is not None:
+        name = f"{name} — Tank {pan_id:04X}"
+
     return DeviceInfo(
         identifiers={(DOMAIN, address)},
         connections={("bluetooth", address)},
         name=name,
-        manufacturer=status_data.get("manufacturer"),
+        manufacturer=data.get("manufacturer"),
         model=model,
         serial_number=serial,
         sw_version=sw_version,
     )
 
 
-class MobiusStatusEntity(CoordinatorEntity[MobiusStatusCoordinator], SensorEntity):
-    """Base for sensors fed by the fast status coordinator."""
+class MobiusEntity(CoordinatorEntity[MobiusDeviceCoordinator], SensorEntity):
+    """Base for every Mobius sensor -- one coordinator per device now
+    (status and schedule data both come from the same read cycle), unlike
+    the earlier two-tier design."""
 
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: MobiusStatusCoordinator, address: str, key: str,
-                 description: SensorEntityDescription) -> None:
-        super().__init__(coordinator)
-        self.entity_description = description
-        self._address = address
-        self._attr_unique_id = f"{address}_{key}"
-        self._attr_device_info = _device_info(address, coordinator.data or {})
-
-    @property
-    def available(self) -> bool:
-        return super().available and self.coordinator.data is not None
-
-
-class MobiusScheduleEntity(CoordinatorEntity[MobiusScheduleCoordinator], SensorEntity):
-    """Base for sensors fed by the slow schedule coordinator."""
-
-    _attr_has_entity_name = True
-
-    def __init__(self, coordinator: MobiusScheduleCoordinator, address: str, key: str,
+    def __init__(self, coordinator: MobiusDeviceCoordinator, address: str, key: str,
                  description: SensorEntityDescription, device_info: DeviceInfo) -> None:
         super().__init__(coordinator)
         self.entity_description = description
@@ -96,15 +87,14 @@ class MobiusScheduleEntity(CoordinatorEntity[MobiusScheduleCoordinator], SensorE
         return super().available and self.coordinator.data is not None
 
 
-# ---- status-tier entities --------------------------------------------------
-
-class SupportTierSensor(MobiusStatusEntity):
+class SupportTierSensor(MobiusEntity):
     """Diagnostic: which support tier this device falls into (light/pump/unsupported)."""
 
-    def __init__(self, coordinator, address):
+    def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "support",
             SensorEntityDescription(key="support", translation_key="support"),
+            device_info,
         )
         # Set directly rather than via SensorEntityDescription -- observed
         # HA (at least 2025.1.4) returning a plain str instead of the
@@ -125,11 +115,12 @@ class SupportTierSensor(MobiusStatusEntity):
         return attrs
 
 
-class ErrorStateSensor(MobiusStatusEntity):
-    def __init__(self, coordinator, address):
+class ErrorStateSensor(MobiusEntity):
+    def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "error_state",
             SensorEntityDescription(key="error_state", translation_key="error_state"),
+            device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
@@ -138,13 +129,14 @@ class ErrorStateSensor(MobiusStatusEntity):
         return (self.coordinator.data or {}).get("error_state")
 
 
-class OperationStateSensor(MobiusStatusEntity):
+class OperationStateSensor(MobiusEntity):
     """Pump/light devices only -- OperationState (Schedule/Scene/LiveDemo/OOB)."""
 
-    def __init__(self, coordinator, address):
+    def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "operation_state",
             SensorEntityDescription(key="operation_state", translation_key="operation_state"),
+            device_info,
         )
 
     @property
@@ -152,20 +144,21 @@ class OperationStateSensor(MobiusStatusEntity):
         return (self.coordinator.data or {}).get("operation_state")
 
 
-class MotorSpeedSensor(MobiusStatusEntity):
+class MotorSpeedSensor(MobiusEntity):
     """Pump devices only. Confirmed (via the decompiled app's own display
     code -- see python-mobius documentation/03) to be a percentage of max
     pump power, not RPM. Uses speed_percent (always non-negative); the raw
     signed value (sign encodes reverse-rotation direction) is exposed as an
     attribute rather than the primary state."""
 
-    def __init__(self, coordinator, address):
+    def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "motor_speed",
             SensorEntityDescription(
                 key="motor_speed", translation_key="motor_speed",
                 native_unit_of_measurement="%", state_class=SensorStateClass.MEASUREMENT,
             ),
+            device_info,
         )
 
     @property
@@ -182,7 +175,7 @@ class MotorSpeedSensor(MobiusStatusEntity):
         return {"raw_signed_value": raw, "reverse_rotation": raw < 0}
 
 
-class FlowRateSensor(MobiusStatusEntity):
+class FlowRateSensor(MobiusEntity):
     """Pump devices only. Estimated flow (GPH), confirmed live-queried by the app.
 
     native_unit_of_measurement stays "gal/h" -- that's the actual native
@@ -208,7 +201,7 @@ class FlowRateSensor(MobiusStatusEntity):
     ~2026, double check this still validates.
     """
 
-    def __init__(self, coordinator, address):
+    def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "flow_rate",
             SensorEntityDescription(
@@ -216,6 +209,7 @@ class FlowRateSensor(MobiusStatusEntity):
                 device_class=SensorDeviceClass.VOLUME_FLOW_RATE,
                 native_unit_of_measurement="gal/h", state_class=SensorStateClass.MEASUREMENT,
             ),
+            device_info,
         )
 
     @property
@@ -224,9 +218,7 @@ class FlowRateSensor(MobiusStatusEntity):
         return telemetry.get("gph")
 
 
-# ---- schedule-tier entities -------------------------------------------------
-
-class SchedulePointCountSensor(MobiusScheduleEntity):
+class SchedulePointCountSensor(MobiusEntity):
     def __init__(self, coordinator, address, device_info):
         super().__init__(
             coordinator, address, "schedule_point_count",
@@ -242,7 +234,7 @@ class SchedulePointCountSensor(MobiusScheduleEntity):
         return (self.coordinator.data or {}).get("schedule_point_count")
 
 
-class CurrentPumpModeSensor(MobiusScheduleEntity):
+class CurrentPumpModeSensor(MobiusEntity):
     """Pump devices only -- the currently active schedule block's mode."""
 
     def __init__(self, coordinator, address, device_info):
@@ -261,7 +253,7 @@ class CurrentPumpModeSensor(MobiusScheduleEntity):
         return (self.coordinator.data or {}).get("current_pump_params") or {}
 
 
-class LightChannelIntensitySensor(MobiusScheduleEntity):
+class LightChannelIntensitySensor(MobiusEntity):
     """Light devices only -- one entity per channel, current interpolated intensity in %."""
 
     def __init__(self, coordinator, address, device_info, channel_name: str):
@@ -285,7 +277,7 @@ class LightChannelIntensitySensor(MobiusScheduleEntity):
         return round(raw / 10, 1) if raw is not None else None
 
 
-class CalibrationSensor(MobiusScheduleEntity):
+class CalibrationSensor(MobiusEntity):
     """
     Light devices only -- confirmed via real device testing AND the app's
     own UI gating (device.primitive.category() == M.DeviceCategory.Lighting
@@ -336,23 +328,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up sensors for a Mobius config entry."""
     runtime: MobiusRuntimeData = entry.runtime_data
+    coordinator = runtime.coordinator
     address = entry.data[CONF_ADDRESS]
-    status = runtime.status
-    schedule = runtime.schedule
-
-    entities: list[SensorEntity] = [
-        SupportTierSensor(status, address),
-        ErrorStateSensor(status, address),
-    ]
-
-    support = (status.data or {}).get("support", "")
-
-    if support.startswith("pump"):
-        entities += [
-            OperationStateSensor(status, address),
-            MotorSpeedSensor(status, address),
-            FlowRateSensor(status, address),
-        ]
+    pan_id = entry.data.get(CONF_PAN_ID)
+    data = coordinator.data or {}
+    support = data.get("support", "")
 
     # "Product OS" is the confirmed real display label for the main
     # firmware version across both pumps and lights (see python-mobius's
@@ -361,27 +341,33 @@ async def async_setup_entry(
     # firmware components as separate sensors -- that would be sensor
     # sprawl for something that's fundamentally device info, not a
     # changing value; the full breakdown is available via python-mobius
-    # directly for anyone who wants it. Comes from the schedule
-    # coordinator (which re-fetches it periodically, not just once at
-    # setup -- firmware does change, confirmed via a real OTA update
-    # during this project's development) rather than a separate one-time
-    # fetch; that coordinator's own _async_update_data() override also
-    # keeps the device registry in sync if it changes after setup.
-    sw_version = (schedule.data or {}).get("firmware_versions", {}).get("Product OS")
-    device_info = _device_info(address, status.data or {}, sw_version=sw_version)
-    entities.append(SchedulePointCountSensor(schedule, address, device_info))
+    # directly for anyone who wants it. coordinator._sync_sw_version()
+    # also keeps the device registry in sync if it changes after setup.
+    sw_version = data.get("firmware_versions", {}).get("Product OS")
+    device_info = _device_info(address, data, pan_id=pan_id, sw_version=sw_version)
+
+    entities: list[SensorEntity] = [
+        SupportTierSensor(coordinator, address, device_info),
+        ErrorStateSensor(coordinator, address, device_info),
+        SchedulePointCountSensor(coordinator, address, device_info),
+    ]
 
     if support.startswith("pump"):
-        entities.append(CurrentPumpModeSensor(schedule, address, device_info))
+        entities += [
+            OperationStateSensor(coordinator, address, device_info),
+            MotorSpeedSensor(coordinator, address, device_info),
+            FlowRateSensor(coordinator, address, device_info),
+            CurrentPumpModeSensor(coordinator, address, device_info),
+        ]
     elif support == "light":
-        channel_names = (schedule.data or {}).get("channels") or []
+        channel_names = data.get("channels") or []
         for name in channel_names:
-            entities.append(LightChannelIntensitySensor(schedule, address, device_info, name))
+            entities.append(LightChannelIntensitySensor(coordinator, address, device_info, name))
         # Only added if calibration data was actually present at setup --
         # confirmed via real hardware that not all lights necessarily
         # support this, and there's no point creating a permanently
         # unavailable entity for one that doesn't.
-        if (schedule.data or {}).get("calibration") is not None:
-            entities.append(CalibrationSensor(schedule, address, device_info))
+        if data.get("calibration") is not None:
+            entities.append(CalibrationSensor(coordinator, address, device_info))
 
     async_add_entities(entities)

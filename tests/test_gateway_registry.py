@@ -258,6 +258,29 @@ class TestUpdateRssi:
         assert "nonexistent" not in registry.group(PAN_A).members
 
 
+class TestUpdateMeshAddress:
+    @pytest.mark.asyncio
+    async def test_updates_existing_member(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        address = bytes.fromhex("fd11223344556677000000fffe001234")
+        registry.update_mesh_address(PAN_A, "gw", address)
+        assert registry.group(PAN_A).members["gw"].mesh_address == address
+
+    def test_nonexistent_group_is_a_safe_noop(self, registry):
+        registry.update_mesh_address(0x9999, "nobody", b"\x00" * 16)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_member_is_a_safe_noop(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        registry.update_mesh_address(PAN_A, "nonexistent", b"\x00" * 16)  # must not raise
+        assert "nonexistent" not in registry.group(PAN_A).members
+
+    @pytest.mark.asyncio
+    async def test_new_member_starts_with_no_cached_address(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        assert registry.group(PAN_A).members["gw"].mesh_address is None
+
+
 class TestCrossGroupIsolation:
     @pytest.mark.asyncio
     async def test_two_groups_are_fully_independent(self, registry):

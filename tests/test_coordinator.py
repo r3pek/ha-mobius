@@ -1,27 +1,31 @@
 """
-Tests for MobiusConnectionManager (persistent, serial-resolved connections
-shared between both coordinator tiers) and the coordinators built on it.
+Tests for MobiusConnectionManager (persistent, serial-resolved
+connections, now shared per pan_id group via gateway_registry rather
+than per-device) and MobiusDeviceCoordinator built on top of it -- one
+coordinator per device, one merged status+schedule read per cycle,
+gateway-vs-relayed dispatch, and graceful (grace-period, not immediate)
+failure handling.
 """
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL
-from custom_components.mobius.coordinator import (
-    MobiusConnectionManager,
-    MobiusScheduleCoordinator,
-    MobiusStatusCoordinator,
-)
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
+from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator
+from custom_components.mobius.gateway_registry import GatewayRegistry
 from mobius import PrimitiveType
 
 PUMP_SERIAL = "76517731952041"
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
+PAN_ID = 0x3D0F
 
 # Real captured payload for this pump (see python-mobius's own tests).
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736353137373331393532303431")
@@ -61,6 +65,11 @@ def _make_fake_pump_device():
         "Product OS": "2.1.5", "Product Bootloader": "1.0",
     })
     return device
+
+
+def _make_registry(hass) -> GatewayRegistry:
+    semaphore = asyncio.Semaphore(2)
+    return GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
 
 
 # --------------------------------------------------------------------------
@@ -183,9 +192,9 @@ async def test_disconnect_calls_device_disconnect_and_clears_state(hass):
 
 
 async def test_concurrent_ensure_connected_only_connects_once(hass):
-    """Both coordinators calling ensure_connected() around the same time
-    should only trigger one actual connect -- the lock exists specifically
-    for this."""
+    """Multiple coordinators relaying through the same gateway calling
+    ensure_connected() around the same time should only trigger one
+    actual connect -- the lock exists specifically for this."""
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
 
@@ -207,105 +216,296 @@ async def test_concurrent_ensure_connected_only_connects_once(hass):
 
 
 # --------------------------------------------------------------------------
-# Coordinators using MobiusConnectionManager
+# MobiusDeviceCoordinator -- gateway path (this device IS the gateway)
 # --------------------------------------------------------------------------
 
-async def test_status_coordinator_fetches_pump_telemetry(hass):
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+async def test_gateway_coordinator_fetches_merged_status_and_schedule(hass):
+    """The actual point of the single-tier merge: one read cycle produces
+    BOTH status-shaped data (telemetry, operation_state) AND
+    schedule-shaped data (schedule_point_count, current_pump_mode) --
+    previously two separate coordinator tiers."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
     entry = MagicMock()
-    coordinator = MobiusStatusCoordinator(hass, entry, manager)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()
-    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success
     assert coordinator.data["support"] == "pump"
     assert coordinator.data["telemetry"] == {"speed": 447, "speed_percent": 44.7, "gph": 2272}
     assert coordinator.data["operation_state"] == "Schedule"
-
-
-async def test_schedule_coordinator_fetches_pump_schedule(hass):
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
-    entry = MagicMock()
-    coordinator = MobiusScheduleCoordinator(hass, entry, manager)
-
-    fake_device = _make_fake_pump_device()
-    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
-        await coordinator.async_refresh()
-
-    assert coordinator.last_update_success
     assert coordinator.data["schedule_point_count"] == 11
     assert coordinator.data["current_pump_mode"] == "TidalSwell"
 
 
-async def test_coordinator_marks_unavailable_when_not_resolvable(hass):
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+async def test_gateway_read_success_resets_registry_failure_counter(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    registry.group(PAN_ID).consecutive_gateway_failures = 2  # simulate prior failures
     entry = MagicMock()
-    coordinator = MobiusStatusCoordinator(hass, entry, manager)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
-    with patch.object(manager, "ensure_connected", AsyncMock(side_effect=UpdateFailed("not found"))):
+    fake_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    assert registry.group(PAN_ID).consecutive_gateway_failures == 0
+
+
+async def test_gateway_connect_failure_reports_to_registry_and_marks_disconnected(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    group = registry.group(PAN_ID)
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(side_effect=UpdateFailed("not found")),
+    ), patch.object(group.gateway_connection, "mark_disconnected") as mock_mark:
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success is False
+    assert registry.group(PAN_ID).consecutive_gateway_failures == 1
+    mock_mark.assert_called_once()
 
 
-async def test_coordinator_retries_once_on_read_failure_then_succeeds(hass):
-    """The actual reactive-reconnect behavior: a read fails once (stale
-    connection), coordinator marks disconnected and retries within the
-    same poll cycle, succeeding the second time."""
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+async def test_gateway_read_failure_after_successful_connect_also_reports_and_marks(hass):
+    """The actual bug this covers: a read failing AFTER ensure_connected()
+    already succeeded must still mark the connection disconnected and
+    report a gateway failure -- not just a failure to connect in the
+    first place."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
     entry = MagicMock()
-    coordinator = MobiusStatusCoordinator(hass, entry, manager)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     broken_device = MagicMock()
     broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
-    good_device = _make_fake_pump_device()
 
-    call_count = 0
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=broken_device)), \
+         patch.object(group.gateway_connection, "mark_disconnected") as mock_mark:
+        await coordinator.async_refresh()
 
-    async def fake_ensure_connected():
-        nonlocal call_count
-        call_count += 1
-        return broken_device if call_count == 1 else good_device
+    assert coordinator.last_update_success is False
+    assert registry.group(PAN_ID).consecutive_gateway_failures == 1
+    mock_mark.assert_called_once()
 
-    with patch.object(manager, "ensure_connected", side_effect=fake_ensure_connected), \
-         patch.object(manager, "mark_disconnected") as mock_mark:
+
+# --------------------------------------------------------------------------
+# MobiusDeviceCoordinator -- relayed path (a DIFFERENT device is gateway)
+# --------------------------------------------------------------------------
+
+async def test_relayed_coordinator_uses_cached_mesh_address(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, "gateway-serial", rssi=-50)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)  # weaker signal -- stays relayed
+    address = bytes.fromhex("fd11223344556677000000fffe001234")
+    registry.update_mesh_address(PAN_ID, PUMP_SERIAL, address)
+
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_gateway_device = MagicMock()
+    fake_relayed_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+    ) as mock_relayed_ctor, patch.object(
+        coordinator, "_discover_own_mesh_address", AsyncMock(),
+    ) as mock_discover:
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success
     assert coordinator.data["support"] == "pump"
-    mock_mark.assert_called_once()
-    assert call_count == 2
+    mock_relayed_ctor.assert_called_once()
+    call_args = mock_relayed_ctor.call_args
+    assert call_args[0][0] is fake_gateway_device
+    assert call_args[0][1].address == address
+    mock_discover.assert_not_called()  # cached -- no on-demand discovery needed
 
 
-async def test_coordinator_fails_after_reconnect_also_fails(hass):
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+async def test_relayed_coordinator_discovers_address_on_demand_when_not_cached(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, "gateway-serial", rssi=-50)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)
+    # No update_mesh_address() call -- not cached.
+
     entry = MagicMock()
-    coordinator = MobiusStatusCoordinator(hass, entry, manager)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
-    broken_device = MagicMock()
-    broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+    address = bytes.fromhex("fd11223344556677000000fffe005678")
+    fake_gateway_device = MagicMock()
+    fake_relayed_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
 
-    with patch.object(manager, "ensure_connected", AsyncMock(return_value=broken_device)), \
-         patch.object(manager, "mark_disconnected"):
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+    ), patch.object(
+        coordinator, "_discover_own_mesh_address", AsyncMock(return_value=address),
+    ) as mock_discover:
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    mock_discover.assert_called_once()
+    # Discovered address is cached for next time.
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == address
+
+
+async def test_relayed_coordinator_fails_cleanly_when_address_undiscoverable(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, "gateway-serial", rssi=-50)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)
+
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_gateway_device = MagicMock()
+    group = registry.group(PAN_ID)
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch.object(
+        coordinator, "_discover_own_mesh_address", AsyncMock(return_value=None),
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+
+
+async def test_relayed_coordinator_failure_does_not_touch_gateway_connection_state(hass):
+    """The actual point of this test: a relayed device's own failure must
+    NOT mark the shared gateway connection disconnected or report a
+    gateway failure -- only the gateway's own coordinator does that."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, "gateway-serial", rssi=-50)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)
+    registry.update_mesh_address(PAN_ID, PUMP_SERIAL, bytes.fromhex("fd11223344556677000000fffe001234"))
+
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_gateway_device = MagicMock()
+    broken_relayed_device = MagicMock()
+    broken_relayed_device.get_device_info = AsyncMock(side_effect=IOError("relay failed"))
+    group = registry.group(PAN_ID)
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch.object(
+        group.gateway_connection, "mark_disconnected",
+    ) as mock_mark, patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=broken_relayed_device,
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+    mock_mark.assert_not_called()
+    assert registry.group(PAN_ID).consecutive_gateway_failures == 0
+
+
+# --------------------------------------------------------------------------
+# No gateway available for the group
+# --------------------------------------------------------------------------
+
+async def test_fails_cleanly_when_group_has_no_gateway(hass):
+    registry = _make_registry(hass)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+    # Deliberately never joined -- registry.group(PAN_ID) is None.
+
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+
+
+# --------------------------------------------------------------------------
+# Graceful (grace-period) failure handling -- avoid unavailable on a
+# single/transient failure
+# --------------------------------------------------------------------------
+
+async def test_transient_failure_within_grace_period_keeps_last_known_data(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+    assert coordinator.last_update_success
+    first_data = coordinator.data
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(side_effect=UpdateFailed("transient")),
+    ):
+        await coordinator.async_refresh()
+
+    # Still "successful" from HA's perspective (entities stay available),
+    # serving the last-known-good data rather than going unavailable.
+    assert coordinator.last_update_success
+    assert coordinator.data is first_data
+
+
+async def test_failure_past_grace_period_marks_unavailable(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+    assert coordinator.last_update_success
+
+    # Simulate the grace period having already elapsed.
+    coordinator._last_success = dt_util.utcnow() - MARK_UNAVAILABLE_AFTER - timedelta(seconds=1)
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(side_effect=UpdateFailed("still down")),
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+
+
+async def test_first_ever_failure_with_no_prior_success_raises_immediately(hass):
+    """No last-known-good data exists yet -- nothing to gracefully fall
+    back to, so this must fail immediately rather than somehow succeed
+    with nothing."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    group = registry.group(PAN_ID)
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(side_effect=UpdateFailed("never connected")),
+    ):
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success is False
 
 
 # --------------------------------------------------------------------------
-# Firmware version: re-fetched on the slow tier (not just once at setup --
-# real devices got an OTA update mid-development of this integration) and
+# Firmware version: re-fetched every cycle (not just once at setup -- real
+# devices got an OTA update mid-development of this integration) and
 # synced to the device registry when it changes.
 # --------------------------------------------------------------------------
 
-async def test_schedule_coordinator_syncs_device_registry_sw_version_on_change(hass):
+async def test_coordinator_syncs_device_registry_sw_version_on_change(hass):
     """The actual point of this fix: a firmware version that changes
     between polls must propagate to the device registry, not just be
     captured once and left stale."""
@@ -323,9 +523,9 @@ async def test_schedule_coordinator_syncs_device_registry_sw_version_on_change(h
     )
     assert device_entry.sw_version == "2.1.5"
 
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
-    coordinator = MobiusScheduleCoordinator(hass, entry, manager)
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()
     fake_device.get_firmware_versions = AsyncMock(return_value={
@@ -334,7 +534,8 @@ async def test_schedule_coordinator_syncs_device_registry_sw_version_on_change(h
         "Product Bootloader": "1.0",
     })
 
-    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success
@@ -342,7 +543,7 @@ async def test_schedule_coordinator_syncs_device_registry_sw_version_on_change(h
     assert updated_device.sw_version == "2.2.0"
 
 
-async def test_schedule_coordinator_does_not_touch_registry_when_unchanged(hass):
+async def test_coordinator_does_not_touch_registry_when_sw_version_unchanged(hass):
     entry = MockConfigEntry(
         domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
         unique_id=PUMP_SERIAL,
@@ -356,13 +557,14 @@ async def test_schedule_coordinator_does_not_touch_registry_when_unchanged(hass)
         sw_version="2.1.5",
     )
 
-    semaphore = asyncio.Semaphore(2)
-    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
-    coordinator = MobiusScheduleCoordinator(hass, entry, manager)
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()  # same "2.1.5" as already registered
 
-    with patch.object(manager, "ensure_connected", AsyncMock(return_value=fake_device)):
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
         await coordinator.async_refresh()
 
     assert coordinator.last_update_success

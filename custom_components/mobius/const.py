@@ -22,18 +22,13 @@ CONF_SERIAL = "serial"
 # read once at initial setup.
 CONF_PAN_ID = "pan_id"
 
-# Two polling tiers, per the design discussion in documentation/: telemetry
-# is cheap (a couple of small GATT reads), schedule fetches are expensive
-# (multiple round trips for potentially many points), and schedules don't
-# change minute-to-minute anyway.
-#
-# As of the persistent-connection rework (see coordinator.py's
-# MobiusConnectionManager), both tiers share ONE long-lived BLE connection
-# per device instead of connecting/disconnecting every poll -- so this 10s
-# interval no longer means a full connect/disconnect handshake every time,
-# just a read over an already-open connection in the common case.
-FAST_POLL_INTERVAL = timedelta(seconds=10)
-SLOW_POLL_INTERVAL = timedelta(minutes=10)
+# One unified polling tier, not the previous fast/slow split -- with a
+# persistent connection (direct for the gateway, relayed-but-still-
+# persistent for everyone else) and cached mesh addresses, a single read
+# covering both status and schedule data each cycle is fast enough not to
+# need splitting; schedule data changing rarely doesn't by itself justify
+# a separate slower tier if fetching it isn't meaningfully more costly.
+POLL_INTERVAL = timedelta(seconds=30)
 
 # How many devices this integration will attempt to CONNECT (or RECONNECT)
 # simultaneously across all config entries. With persistent connections,

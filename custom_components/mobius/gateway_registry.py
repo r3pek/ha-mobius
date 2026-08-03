@@ -269,3 +269,15 @@ class GatewayRegistry:
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
             group.members[serial].rssi = rssi
+
+    def update_mesh_address(self, pan_id: int, serial: str, address: bytes) -> None:
+        """Caches a member's Thread mesh-local IPv6 address (see
+        coordinator.py's on-demand discovery fallback, and the dedicated
+        background prefetch task) -- does nothing if the group or member
+        doesn't (yet) exist. Not gated by the group lock, matching
+        update_rssi()'s reasoning: a cached address is only ever read
+        during a relay attempt, not during gateway selection, so losing a
+        race against a concurrent join()/leave() is harmless."""
+        group = self._groups.get(pan_id)
+        if group is not None and serial in group.members:
+            group.members[serial].mesh_address = address

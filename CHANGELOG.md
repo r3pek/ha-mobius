@@ -2,14 +2,40 @@
 
 ## Unreleased
 
-- **Added `gateway_registry.py`**: the shared per-pan_id gateway registry
-  for multi-device relay support -- devices sharing a pan_id (Thread
-  mesh/"tank", confirmed via `Tank`/`CommGroup` in the decompiled app)
-  will share one physical BLE connection instead of each holding their
-  own. This patch is infrastructure only -- the registry itself, fully
-  unit-tested (25 tests: RSSI-based election among concurrent joiners,
-  gateway failover/promotion, cross-pan_id isolation, moving a device
-  between tanks) -- not yet wired into actual device setup/polling.
+- **Multi-device relay support**: devices sharing a pan_id (Thread mesh/
+  "tank", confirmed via `Tank`/`CommGroup` in the decompiled app) now
+  share one physical BLE connection instead of each holding its own.
+  - `gateway_registry.py`: tracks each pan_id's current gateway and
+    members. Gateway selection is RSSI-based among devices joining a
+    newly-forming group concurrently (e.g. several config entries loading
+    around Home Assistant startup); an established group's gateway is
+    never displaced just because a better-signal device joins later.
+    Failover promotes another member after `GATEWAY_FAILURE_THRESHOLD`
+    (3) consecutive gateway read failures -- deliberately much faster
+    than the 5-minute general mark-unavailable grace period, since a bad
+    gateway takes its whole group down with it. A device moving to a
+    different pan_id (a device physically moved to a different tank) is
+    handled as a leave-then-join, re-promoting the old group's gateway if
+    the mover was it.
+  - `coordinator.py`: one coordinator per device now (previously two,
+    fast/slow tiers), one ~30s cycle fetching both status and schedule
+    data together. Each cycle checks fresh whether this device is
+    currently its group's gateway (direct read) or not (reads through
+    `RelayedMobiusDevice`, addressed to a cached or on-demand-discovered
+    mesh address) -- a promotion between cycles is picked up automatically
+    on the very next read, no separate transition handling needed. A
+    single failed read doesn't immediately mark a device unavailable --
+    last-known-good data is served for up to 5 minutes of consecutive
+    failures first.
+  - `config_flow.py`/`const.py`: pan_id is now stored in config entry
+    data (`CONF_PAN_ID`) alongside serial/address, read from the same BLE
+    advertisement manufacturer data, no connection needed. Entries
+    created before this was added fail setup cleanly (asking for
+    re-configuration), same handling as the existing missing-serial case.
+  - `sensor.py`: device names now include which tank (pan_id) a device
+    belongs to, since names otherwise give no indication once more than
+    one tank is in play.
+  - Requires `python-mobius>=0.2.0` (for `RelayedMobiusDevice`).
 
 - **Fixed a real bug: the manual-setup device list wasn't actually
   excluding already-configured devices.** After switching `unique_id` to

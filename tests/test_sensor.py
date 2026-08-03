@@ -14,8 +14,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID
 
+PAN_ID = 0x3D0F
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
 PUMP_SERIAL = "76517731952041"
 LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
@@ -100,7 +101,7 @@ def _fake_light_device():
 async def test_pump_entry_setup_creates_expected_sensors(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
         unique_id=PUMP_ADDRESS,
     )
     entry.add_to_hass(hass)
@@ -114,27 +115,27 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
 
     assert entry.state.value == "loaded"
 
-    speed = hass.states.get("sensor.mp40qd_right_motor_speed")
+    speed = hass.states.get("sensor.mp40qd_right_tank_3d0f_motor_speed")
     assert speed is not None
     assert speed.state == "44.7"
     assert speed.attributes["unit_of_measurement"] == "%"
     assert speed.attributes["raw_signed_value"] == 447
     assert speed.attributes["reverse_rotation"] is False
 
-    flow = hass.states.get("sensor.mp40qd_right_estimated_flow")
+    flow = hass.states.get("sensor.mp40qd_right_tank_3d0f_estimated_flow")
     assert flow is not None
     assert flow.state == "2272"
     assert flow.attributes["unit_of_measurement"] == "gal/h"
 
-    mode = hass.states.get("sensor.mp40qd_right_current_mode")
+    mode = hass.states.get("sensor.mp40qd_right_tank_3d0f_current_mode")
     assert mode is not None
     assert mode.state == "TidalSwell"
 
-    support = hass.states.get("sensor.mp40qd_right_support_tier")
+    support = hass.states.get("sensor.mp40qd_right_tank_3d0f_support_tier")
     assert support is not None
     assert support.state == "pump"
 
-    point_count = hass.states.get("sensor.mp40qd_right_schedule_points")
+    point_count = hass.states.get("sensor.mp40qd_right_tank_3d0f_schedule_points")
     assert point_count is not None
     assert point_count.state == "11"
 
@@ -146,13 +147,13 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_ADDRESS)})
     assert device is not None
     assert device.sw_version == "2.1.5"
-    assert hass.states.get("sensor.mp40qd_right_calibration") is None
+    assert hass.states.get("sensor.mp40qd_right_tank_3d0f_calibration") is None
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: LIGHT_ADDRESS, CONF_SERIAL: LIGHT_SERIAL},
+        data={CONF_ADDRESS: LIGHT_ADDRESS, CONF_SERIAL: LIGHT_SERIAL, CONF_PAN_ID: PAN_ID},
         unique_id=LIGHT_ADDRESS,
     )
     entry.add_to_hass(hass)
@@ -166,15 +167,15 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 
     assert entry.state.value == "loaded"
 
-    royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_royalblue_intensity")
+    royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_royalblue_intensity")
     assert royal_blue is not None
     assert royal_blue.state == "100.0"  # 1000 permille / 10 = 100.0%
 
-    cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_coolwhite_intensity")
+    cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_coolwhite_intensity")
     assert cool_white is not None
     assert cool_white.state == "24.0"  # 240 permille / 10 = 24.0%
 
-    support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_support_tier")
+    support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_support_tier")
     assert support is not None
     assert support.state == "light"
 
@@ -185,7 +186,7 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     assert device is not None
     assert device.sw_version == "1.0"
 
-    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_calibration")
+    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_calibration")
     assert calibration is not None
     assert calibration.state == "True"
     assert "lower_bound" not in calibration.attributes  # fixture sets it to None -> omitted
@@ -195,7 +196,7 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 async def test_entry_unload_removes_entities_and_disconnects(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
         unique_id=PUMP_ADDRESS,
     )
     entry.add_to_hass(hass)
@@ -210,7 +211,7 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
+        assert hass.states.get("sensor.mp40qd_right_tank_3d0f_motor_speed") is not None
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
