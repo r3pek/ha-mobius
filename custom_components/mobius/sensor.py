@@ -24,7 +24,7 @@ from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData
 from .const import DOMAIN, CONF_PAN_ID
-from .coordinator import MobiusDeviceCoordinator
+from .coordinator import MobiusDeviceCoordinator, derive_sw_version
 
 
 def _device_info(address: str, data: dict, pan_id: int | None = None,
@@ -335,15 +335,19 @@ async def async_setup_entry(
     support = data.get("support", "")
 
     # "Product OS" is the confirmed real display label for the main
-    # firmware version across both pumps and lights (see python-mobius's
-    # get_firmware_versions() -- MainMicroOS for EcoTech devices), the
-    # most meaningful single "what firmware is this" answer. Not all
-    # firmware components as separate sensors -- that would be sensor
-    # sprawl for something that's fundamentally device info, not a
-    # changing value; the full breakdown is available via python-mobius
-    # directly for anyone who wants it. coordinator._sync_sw_version()
-    # also keeps the device registry in sync if it changes after setup.
-    sw_version = data.get("firmware_versions", {}).get("Product OS")
+    # firmware version (see python-mobius's get_firmware_versions() --
+    # MainMicroOS for EcoTech devices) -- but real hardware testing found
+    # at least some lights don't report that specific FirmwareType at
+    # all, so derive_sw_version() falls through a priority list of other
+    # labels rather than assuming "Product OS" is always present (see its
+    # own comment for the fallback order and why). Not all firmware
+    # components as separate sensors -- that would be sensor sprawl for
+    # something that's fundamentally device info, not a changing value;
+    # the full breakdown is available via python-mobius directly for
+    # anyone who wants it. coordinator._sync_sw_version() also keeps the
+    # device registry in sync if it changes after setup, using the same
+    # fallback logic.
+    sw_version = derive_sw_version(data.get("firmware_versions", {}))
     device_info = _device_info(address, data, pan_id=pan_id, sw_version=sw_version)
 
     entities: list[SensorEntity] = [

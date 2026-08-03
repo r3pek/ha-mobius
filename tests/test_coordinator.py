@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
-from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator
+from custom_components.mobius.coordinator import MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from mobius import PrimitiveType
 
@@ -570,3 +570,52 @@ async def test_coordinator_does_not_touch_registry_when_sw_version_unchanged(has
     assert coordinator.last_update_success
     updated_device = device_registry.async_get(device_entry.id)
     assert updated_device.sw_version == "2.1.5"  # unchanged, as expected
+
+
+# --------------------------------------------------------------------------
+# derive_sw_version() -- picks a "main" firmware version to display,
+# falling through a priority list rather than assuming "Product OS" is
+# always present. Real hardware testing found at least some Radion
+# lights don't report that specific FirmwareType at all, which left
+# sw_version silently empty for those devices with a single hardcoded
+# lookup -- these tests cover the actual bug scenario, not just the
+# already-working "Product OS present" case.
+# --------------------------------------------------------------------------
+
+class TestDeriveSwVersion:
+    def test_prefers_product_os_when_present(self):
+        versions = {
+            "Product OS": "2.1.5", "Radio Firmware": "1.5.103", "Radio OS": "1.5.103",
+        }
+        assert derive_sw_version(versions) == "2.1.5"
+
+    def test_falls_back_to_radio_firmware_when_no_product_os(self):
+        """The actual real-hardware scenario this was built for: a light
+        that reports Radio Firmware/Filesystem/Radio OS/Radio/WLAN but no
+        Product OS at all (no MainMicroOS FirmwareType in its response)."""
+        versions = {
+            "Radio Firmware": "1.5.103", "Filesystem": "1.1.0",
+            "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
+        }
+        assert derive_sw_version(versions) == "1.5.103"
+
+    def test_falls_back_to_radio_os_when_no_product_os_or_radio_firmware(self):
+        versions = {"Radio OS": "1.5.103", "WLAN": "3.1.0"}
+        assert derive_sw_version(versions) == "1.5.103"
+
+    def test_falls_back_to_radio_as_last_resort(self):
+        versions = {"WLAN": "3.1.0", "Radio": "3.1.0"}
+        assert derive_sw_version(versions) == "3.1.0"
+
+    def test_returns_none_when_nothing_in_priority_list_present(self):
+        versions = {"Product Bootloader": "1.0", "Radio Bootloader": "1.2"}
+        assert derive_sw_version(versions) is None
+
+    def test_returns_none_for_empty_dict(self):
+        assert derive_sw_version({}) is None
+
+    def test_ignores_empty_string_values(self):
+        """A present-but-empty value shouldn't be treated as "found" --
+        must fall through to the next candidate."""
+        versions = {"Product OS": "", "Radio Firmware": "1.5.103"}
+        assert derive_sw_version(versions) == "1.5.103"

@@ -181,6 +181,32 @@ class MobiusConnectionManager:
             self._device = None
 
 
+# Priority order for picking a single "main" firmware version to display
+# as a device's sw_version. "Product OS" (FirmwareType.MainMicroOS) is
+# the confirmed real display label the app itself treats as primary --
+# but real hardware testing found at least some Radion lights don't
+# report that FirmwareType at all (lights are QCA4020-based, and appear
+# to not always have a distinct "main micro" component the way pumps
+# do), which left sw_version silently empty for those devices with a
+# single hardcoded lookup. Falls through this list rather than assuming
+# any one label is always present; the first one found wins, matching
+# "the most main-firmware-like thing this device actually reported"
+# rather than picking arbitrarily among what's left.
+_SW_VERSION_LABEL_PRIORITY = ["Product OS", "Radio Firmware", "Radio OS", "Radio"]
+
+
+def derive_sw_version(firmware_versions: dict) -> Optional[str]:
+    """Picks a single version string to show as a device's sw_version,
+    from whichever of _SW_VERSION_LABEL_PRIORITY's labels this device
+    actually reported -- see that list's comment for why this isn't just
+    a single hardcoded lookup."""
+    for label in _SW_VERSION_LABEL_PRIORITY:
+        version = firmware_versions.get(label)
+        if version:
+            return version
+    return None
+
+
 async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     """
     The actual read logic, merging what used to be two separate tiers
@@ -287,7 +313,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         update mid-development of this integration), so this needs to
         actually propagate, not just be captured once at setup and left
         stale forever after."""
-        sw_version = (data.get("firmware_versions") or {}).get("Product OS")
+        sw_version = derive_sw_version(data.get("firmware_versions") or {})
         if not sw_version:
             return
         device_registry = dr.async_get(self.hass)

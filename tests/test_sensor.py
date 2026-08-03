@@ -84,9 +84,17 @@ def _fake_light_device():
         intensity_map[key] = value
     device.get_current_light_intensities = AsyncMock(return_value=intensity_map)
 
+    # Deliberately WITHOUT "Product OS" -- matches the confirmed real-world
+    # scenario this fixture is meant to represent: at least some real
+    # Radion lights simply don't report that FirmwareType at all (no
+    # MainMicroOS index in their FirmwareVersion response), unlike pumps
+    # which always have one. This is the actual bug derive_sw_version()'s
+    # fallback chain exists to cover -- see its own tests in
+    # test_coordinator.py for the fallback logic itself; this fixture
+    # confirms the full setup flow picks up the fallback correctly too.
     device.get_firmware_versions = AsyncMock(return_value={
-        "Product OS": "1.0", "Product Bootloader": "1.0", "Radio Firmware": "3.1.0",
-        "Filesystem": "1", "Radio OS": "2.0", "Radio": "2.0", "WLAN": "1.1",
+        "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
+        "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
     })
 
     calibration = MagicMock()
@@ -179,12 +187,17 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     assert support is not None
     assert support.state == "light"
 
-    # The actual new behavior: sw_version + a calibration sensor, since
-    # calibration is confirmed real/populated for lights (unlike pumps).
+    # The actual point of this assertion: this light's fixture reports no
+    # "Product OS" at all (see _fake_light_device()'s comment) -- sw_version
+    # must still be populated via derive_sw_version()'s fallback chain,
+    # not silently left empty, confirming the real bug fix end-to-end
+    # through the full setup flow. Also confirms a calibration sensor is
+    # created, since calibration is confirmed real/populated for lights
+    # (unlike pumps).
     device_registry = dr.async_get(hass)
     device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_ADDRESS)})
     assert device is not None
-    assert device.sw_version == "1.0"
+    assert device.sw_version == "1.5.103"
 
     calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_calibration")
     assert calibration is not None

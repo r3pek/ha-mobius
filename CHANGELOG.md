@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Fixed a real bug: lights' device card showed no firmware version at
+  all.** `sw_version` was derived from a single hardcoded lookup of
+  `"Product OS"` (`FirmwareType.MainMicroOS`) in the firmware versions
+  dict -- confirmed real display label for the app's own "main" firmware,
+  but at least some real Radion lights don't report that specific
+  `FirmwareType` in their response at all (unlike pumps, which always
+  do), silently leaving `sw_version` empty for those devices. Added
+  `derive_sw_version()`: falls through a priority list (`Product OS` →
+  `Radio Firmware` → `Radio OS` → `Radio`) rather than assuming any one
+  label is always present, used consistently at both initial device
+  registry creation and the coordinator's ongoing sync. 7 new tests
+  covering the fallback chain itself, plus the existing full-setup-flow
+  light test's fixture updated to match the actual real-world scenario
+  (no `Product OS` reported) rather than the untested assumption it had
+  before.
+
 - **Multi-device relay support**: devices sharing a pan_id (Thread mesh/
   "tank", confirmed via `Tank`/`CommGroup` in the decompiled app) now
   share one physical BLE connection instead of each holding its own.
