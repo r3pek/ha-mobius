@@ -37,13 +37,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements_test.txt
 
+      # manifest.json's own "requirements" (python-mobius, bleak-retry-
+      # connector) are what Home Assistant itself installs at runtime for
+      # this integration -- not covered by requirements_test.txt, which is
+      # test-tooling only. Reads them from manifest.json directly rather
+      # than hardcoding the same versions a second time here, so this
+      # can't drift out of sync with the manifest.
+      # NOTE: this pulls from PyPI, so manifest.json's version constraint
+      # (currently python-mobius>=0.3.0) must already be published there
+      # -- if python-mobius's own release hasn't happened yet, this step
+      # fails with "could not find a version that satisfies" until it has.
+      - name: Install integration runtime requirements (from manifest.json)
+        run: |
+          python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
+          pip install -r /tmp/manifest_requirements.txt
+
       # Gate: the rest of this job (release creation) only runs if this
       # step succeeds. No build/publish steps here at all -- unlike
       # python-mobius, this isn't a PyPI package; HACS installs directly
       # from the tagged repo source (confirmed via hacs.json's own
       # "zip_release": false), so there's nothing to build or upload.
+      # `python -m pytest`, not bare `pytest` -- confirmed via a real CI
+      # failure that this matters here: `python -m X` prepends the
+      # current working directory to sys.path, which is what makes
+      # `custom_components.mobius` importable at all (this repo's own
+      # top-level package, not something pip-installed). The bare `pytest`
+      # entry-point script does not do this the same way, and fails with
+      # "No module named 'custom_components'" without it.
       - name: Run tests
-        run: pytest tests/ -q
+        run: python -m pytest tests/ -q
 
       # Pulls the section of CHANGELOG.md under the heading matching this
       # tag's version (tag v0.2.0 -> "## 0.2.0") for the Forgejo release

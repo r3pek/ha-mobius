@@ -2,3 +2,12 @@ pytest-homeassistant-custom-component
 pytest-asyncio
 bleak-retry-connector>=3.0
 pyudev
+# pyserial: not a direct dependency of this integration, but
+# homeassistant.components.usb (imported by homeassistant.components.
+# bluetooth, which the tests import directly) needs it. Missing this
+# broke every test file that imports from homeassistant.components.
+# bluetooth with ModuleNotFoundError: No module named 'serial' --
+# confirmed via a fresh CI run, not present in earlier ad-hoc local
+# testing only because it happened to already be installed there from
+# unrelated prior work.
+pyserial
