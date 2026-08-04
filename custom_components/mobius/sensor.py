@@ -359,13 +359,19 @@ class HardwareRevisionSensor(MobiusEntity):
     Diagnostic: the same headline value already shown as hw_version on
     Home Assistant's own built-in device info card (labeled "Hardware" --
     not customizable per-integration), but as a first-class entity with
-    the full per-field breakdown available as attributes (Color/
-    ProductType/RadioType/MotorType, alongside Revision itself). No
-    display-formatting convention is confirmed for any of these fields
-    (see python-mobius's get_hardware_info() docstring) -- each decoded
-    the same way derive_hw_version() decodes "Revision" (a plain
-    little-endian unsigned integer) for consistency, not because that's
-    a confirmed correct interpretation for the other fields specifically.
+    the full per-field breakdown available as attributes.
+
+    Requires python-mobius>=0.3.0: as of that version,
+    get_hardware_info() already decodes Color/ProductType/RadioType/
+    MotorType into their own confirmed display label strings (e.g.
+    "White"/"VorTech"/"QCA4020"/"VorTech MP40 G3" -- each is itself a
+    confirmed enum with confirmed labels, see that library's
+    mobius.constants), and Revision/Segments as plain integers -- used
+    directly here, not re-decoded. An earlier version of this class
+    manually decoded every field as a raw little-endian integer, which
+    was correct only for Revision/Segments and actively wrong for the
+    other four once python-mobius started returning real label strings
+    instead of raw bytes for them.
     """
 
     def __init__(self, coordinator, address, device_info):
@@ -382,8 +388,7 @@ class HardwareRevisionSensor(MobiusEntity):
 
     @property
     def extra_state_attributes(self):
-        raw = (self.coordinator.data or {}).get("hardware_info") or {}
-        return {k: int.from_bytes(v, byteorder="little", signed=False) for k, v in raw.items() if v}
+        return (self.coordinator.data or {}).get("hardware_info") or {}
 
 
 async def async_setup_entry(

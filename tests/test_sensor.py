@@ -57,7 +57,9 @@ def _fake_pump_device():
         "Radio": "4.0.21", "Radio Bootloader": "1.2",
         "Product OS": "2.1.5", "Product Bootloader": "1.0",
     })
-    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
+    device.get_hardware_info = AsyncMock(return_value={
+        "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
+    })
     return device
 
 
@@ -97,7 +99,7 @@ def _fake_light_device():
         "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
         "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
     })
-    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([1])})
+    device.get_hardware_info = AsyncMock(return_value={"Revision": 1})
 
     calibration = MagicMock()
     calibration.completed = True
@@ -163,6 +165,13 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert hardware is not None
     assert hardware.state == "2"
     assert hardware.attributes["Revision"] == 2
+    # The actual point of this extended fixture: confirms decoded string
+    # fields (from python-mobius>=0.3.0) pass through as-is, not
+    # re-decoded or mangled -- an earlier version of this sensor tried
+    # to int.from_bytes() these, which would have crashed on a string.
+    assert hardware.attributes["Color"] == "Black"
+    assert hardware.attributes["ProductType"] == "VorTech"
+    assert hardware.attributes["RadioType"] == "QCA4020"
 
     # The actual new behavior: sw_version comes from the confirmed "Product
     # OS" label, and pumps don't support calibration (get_calibration_info()

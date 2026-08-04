@@ -67,7 +67,7 @@ def _make_fake_pump_device():
         "Radio": "4.0.21", "Radio Bootloader": "1.2",
         "Product OS": "2.1.5", "Product Bootloader": "1.0",
     })
-    device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})
+    device.get_hardware_info = AsyncMock(return_value={"Revision": 2})
     return device
 
 
@@ -539,7 +539,7 @@ async def test_coordinator_syncs_device_registry_sw_and_hw_version_on_change(has
         "Product OS": "2.2.0",  # the NEW version, after the OTA update
         "Product Bootloader": "1.0",
     })
-    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": bytes([2])})  # a board revision
+    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": 2})  # a board revision
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
@@ -647,25 +647,37 @@ class TestDeriveSwVersion:
 
 
 class TestDeriveHwVersion:
-    def test_returns_revision_as_a_plain_integer_string(self):
-        assert derive_hw_version({"Revision": bytes([2])}) == "2"
+    """Requires python-mobius>=0.3.0's get_hardware_info() shape: Revision
+    is already a plain int (no confirmed enum meaning for it), and
+    Color/ProductType/RadioType/MotorType are already decoded label
+    strings (see that library's own tests for the decoding itself) --
+    derive_hw_version() just picks out and stringifies Revision, nothing
+    more, so these tests confirm that narrow behavior against the actual
+    current input shape rather than a shape python-mobius no longer
+    produces."""
 
-    def test_multi_byte_revision_decoded_little_endian(self):
-        # 0x0102 little-endian -> 258
-        assert derive_hw_version({"Revision": bytes([2, 1])}) == "258"
+    def test_returns_revision_as_a_plain_string(self):
+        assert derive_hw_version({"Revision": 2}) == "2"
+
+    def test_handles_larger_revision_values(self):
+        assert derive_hw_version({"Revision": 258}) == "258"
 
     def test_ignores_other_hardware_info_fields(self):
-        info = {"Color": bytes([1]), "Revision": bytes([3]), "ProductType": bytes([5])}
+        info = {"Color": "White", "Revision": 3, "ProductType": "VorTech"}
         assert derive_hw_version(info) == "3"
 
     def test_returns_none_when_no_revision_field(self):
-        assert derive_hw_version({"Color": bytes([1])}) is None
+        assert derive_hw_version({"Color": "White"}) is None
 
     def test_returns_none_for_empty_dict(self):
         assert derive_hw_version({}) is None
 
-    def test_returns_none_for_empty_bytes(self):
-        assert derive_hw_version({"Revision": b""}) is None
+    def test_revision_zero_is_a_real_value_not_treated_as_missing(self):
+        """The actual point of this test: Revision=0 is a legitimate
+        value (e.g. a first hardware revision), not an absent field --
+        must not be conflated with "not present" the way a falsy-value
+        check would incorrectly do."""
+        assert derive_hw_version({"Revision": 0}) == "0"
 
 
 # --------------------------------------------------------------------------

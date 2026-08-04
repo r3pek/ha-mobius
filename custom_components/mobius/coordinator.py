@@ -221,24 +221,23 @@ def derive_sw_version(firmware_versions: dict) -> Optional[str]:
 def derive_hw_version(hardware_info: dict) -> Optional[str]:
     """
     Picks a single string to show as a device's hw_version, from
-    get_hardware_info()'s raw {HardwareInfo_name: raw_bytes} dict.
-    "Revision" (HardwareInfo.Revision) is the field name most directly
-    matching "hardware revision" as a concept -- there's no other
-    reasonable candidate among Color/ProductType/RadioType/MotorType/
-    Segments, which describe entirely different things.
+    get_hardware_info()'s {HardwareInfo_name: value} dict. "Revision"
+    (HardwareInfo.Revision) is the field name most directly matching
+    "hardware revision" as a concept -- there's no other reasonable
+    candidate among Color/ProductType/RadioType/MotorType/Segments,
+    which describe entirely different things.
 
-    No display-formatting convention is confirmed for this field in
-    python-mobius (see get_hardware_info()'s own docstring: these read
-    more like small integer/enum codes than version numbers, unlike
-    firmware versions' confirmed dot-joined format) -- shown as a plain
-    unsigned integer from the raw bytes, the most honest representation
-    available without inventing a format that hasn't actually been
-    confirmed against real hardware.
+    Requires python-mobius>=0.3.0: as of that version, "Revision" is
+    already a plain int (no confirmed enum meaning exists for it, unlike
+    Color/ProductType/RadioType/MotorType, which that version decodes
+    into their own confirmed label strings) -- just stringified here, not
+    decoded from raw bytes the way an earlier version of this function
+    needed to.
     """
     raw = hardware_info.get("Revision")
-    if not raw:
+    if raw is None:
         return None
-    return str(int.from_bytes(raw, byteorder="little", signed=False))
+    return str(raw)
 
 
 async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:

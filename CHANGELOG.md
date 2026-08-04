@@ -2,6 +2,25 @@
 
 ## 0.2.0
 
+- **Fixed a follow-up bug: the new hardware sensor tried to re-decode
+  values `python-mobius>=0.3.0` already decodes.** That release changed
+  `get_hardware_info()` to return confirmed label strings for `Color`/
+  `ProductType`/`RadioType`/`MotorType` (e.g. `"White"`/`"VorTech"`)
+  instead of raw bytes -- `HardwareRevisionSensor.extra_state_attributes`
+  and `derive_hw_version()` were both still calling `int.from_bytes()` on
+  what's now already a string or plain int, which would have raised on
+  the four decoded fields (and silently misbehaved for `Revision`, which
+  is now an int, not bytes, so `int.from_bytes()` on it would also fail).
+  Both now use the already-decoded values directly rather than
+  re-decoding them. Also fixed a latent bug while in there:
+  `derive_hw_version()` used a falsy check (`if not raw`) that would
+  have incorrectly treated a legitimate `Revision=0` as "missing" --
+  now checks `is None` instead. Requires `python-mobius>=0.3.0`.
+  `TestDeriveHwVersion`'s 6 tests rewritten for the new input shape
+  (including one new test specifically covering the `Revision=0` case),
+  plus extended assertions in the existing sensor setup test confirming
+  decoded string fields pass through the sensor unmangled.
+
 - **Added `Firmware version` and `Hardware revision` diagnostic
   sensors**, each with the full per-component breakdown as attributes
   (e.g. `Radio Firmware`/`Filesystem`/`Radio OS`/`Radio`/`WLAN`/
