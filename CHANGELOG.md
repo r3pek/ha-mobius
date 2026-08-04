@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.2.1
 
 - **Light channel intensity sensors now round to whole numbers** instead
   of one decimal place (e.g. `100%`, not `100.0%`) -- the underlying raw
@@ -29,6 +29,8 @@
   (including one new test specifically covering the `Revision=0` case),
   plus extended assertions in the existing sensor setup test confirming
   decoded string fields pass through the sensor unmangled.
+
+## 0.2.0
 
 - **Added `Firmware version` and `Hardware revision` diagnostic
   sensors**, each with the full per-component breakdown as attributes
