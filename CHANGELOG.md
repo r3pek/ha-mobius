@@ -2,6 +2,15 @@
 
 ## 0.2.0
 
+- **Light channel intensity sensors now round to whole numbers** instead
+  of one decimal place (e.g. `100%`, not `100.0%`) -- the underlying raw
+  value is itself only ever a coarse permille figure, so a fractional
+  percent didn't represent any real additional precision. Also set
+  `suggested_display_precision=0` as a frontend display hint. 4 new
+  tests confirming actual rounding behavior (not just the string
+  formatting difference) -- including that even an evenly-divisible
+  value now comes back as a true `int`, not a `float` like `100.0`.
+
 - **Fixed a follow-up bug: the new hardware sensor tried to re-decode
   values `python-mobius>=0.3.0` already decodes.** That release changed
   `get_hardware_info()` to return confirmed label strings for `Color`/

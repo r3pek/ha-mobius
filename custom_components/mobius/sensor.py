@@ -255,7 +255,20 @@ class CurrentPumpModeSensor(MobiusEntity):
 
 
 class LightChannelIntensitySensor(MobiusEntity):
-    """Light devices only -- one entity per channel, current interpolated intensity in %."""
+    """
+    Light devices only -- one entity per channel, current interpolated
+    intensity in %.
+
+    Whole numbers, not decimals -- the underlying raw value is itself
+    only ever a coarse permille figure (confirmed schedule/interpolation
+    granularity), so a fractional percent doesn't represent any real
+    additional precision; it's just noise. suggested_display_precision=0
+    is a frontend display hint (a user could still override it per-entity
+    in HA's own UI) -- native_value itself also returns a true int
+    (round() with no second argument, not round(x, 0) which would still
+    be a float like 100.0), so the underlying state/history is whole
+    numbers too, not just the display.
+    """
 
     def __init__(self, coordinator, address, device_info, channel_name: str):
         self._channel_name = channel_name
@@ -267,6 +280,7 @@ class LightChannelIntensitySensor(MobiusEntity):
                 translation_placeholders={"channel": channel_name},
                 native_unit_of_measurement="%",
                 state_class="measurement",
+                suggested_display_precision=0,
             ),
             device_info,
         )
@@ -275,7 +289,7 @@ class LightChannelIntensitySensor(MobiusEntity):
     def native_value(self):
         current = (self.coordinator.data or {}).get("current_intensities") or {}
         raw = current.get(self._channel_name)
-        return round(raw / 10, 1) if raw is not None else None
+        return round(raw / 10) if raw is not None else None
 
 
 class CalibrationSensor(MobiusEntity):

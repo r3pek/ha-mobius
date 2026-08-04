@@ -203,11 +203,11 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 
     royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_royalblue_intensity")
     assert royal_blue is not None
-    assert royal_blue.state == "100.0"  # 1000 permille / 10 = 100.0%
+    assert royal_blue.state == "100"  # 1000 permille / 10 = 100% (whole number, not 100.0)
 
     cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_coolwhite_intensity")
     assert cool_white is not None
-    assert cool_white.state == "24.0"  # 240 permille / 10 = 24.0%
+    assert cool_white.state == "24"  # 240 permille / 10 = 24% (whole number, not 24.0)
 
     support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_support_tier")
     assert support is not None
@@ -297,3 +297,46 @@ def test_identical_model_devices_get_distinct_names_via_serial():
     assert info_a["name"] != info_b["name"]
     assert "7V4Z00F149RBF3" in info_a["name"]
     assert "7V4Z00F143RBED" in info_b["name"]
+
+
+class TestLightChannelIntensitySensorRounding:
+    """LightChannelIntensitySensor.native_value -- confirms actual
+    rounding behavior, not just the whole-number/decimal string
+    formatting difference. Instantiates the sensor directly (bypassing
+    __init__/CoordinatorEntity setup entirely, via object.__new__) since
+    native_value only reads self.coordinator.data -- no need for a full
+    config entry / HA integration setup just to test one property."""
+
+    def _make_sensor(self, current_intensities: dict):
+        from custom_components.mobius.sensor import LightChannelIntensitySensor
+
+        sensor = object.__new__(LightChannelIntensitySensor)
+        sensor._channel_name = "RoyalBlue"
+        sensor.coordinator = MagicMock()
+        sensor.coordinator.data = {"current_intensities": current_intensities}
+        return sensor
+
+    def test_rounds_down_below_the_midpoint(self):
+        # 247 permille -> 24.7% -> rounds to 25, not 24 or 24.7
+        sensor = self._make_sensor({"RoyalBlue": 247.0})
+        assert sensor.native_value == 25
+        assert isinstance(sensor.native_value, int)
+
+    def test_rounds_up_above_the_midpoint(self):
+        # 243 permille -> 24.3% -> rounds to 24
+        sensor = self._make_sensor({"RoyalBlue": 243.0})
+        assert sensor.native_value == 24
+
+    def test_evenly_divisible_value_is_still_a_true_int(self):
+        # The actual point of this fix: even a value that already divides
+        # evenly must come out as a real int (100), not a float (100.0) --
+        # confirms the fix isn't just rounding differently, it's actually
+        # returning int, not round(x, 0) which would still be a float.
+        sensor = self._make_sensor({"RoyalBlue": 1000.0})
+        assert sensor.native_value == 100
+        assert isinstance(sensor.native_value, int)
+        assert not isinstance(sensor.native_value, float)
+
+    def test_returns_none_when_channel_not_present(self):
+        sensor = self._make_sensor({})
+        assert sensor.native_value is None
