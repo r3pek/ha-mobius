@@ -1,0 +1,78 @@
+name: Release
+
+# Triggers on any tag matching v* (e.g. v0.2.0) -- or manually via
+# workflow_dispatch (Forgejo's web UI / API "Run workflow" button) for
+# testing/debugging the workflow itself. Does NOT trigger on regular
+# pushes.
+# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
+# interpret the bare word as the boolean `true` instead of the literal
+# key GitHub/Forgejo Actions expects.
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    # ubuntu-22.04 label -> catthehacker/ubuntu:act-22.04, the only one of
+    # this runner's three labels with a full, GitHub-Actions-compatible
+    # environment (Python, Node, glibc). The "docker" label maps to a bare
+    # Alpine image, which lacks the glibc most published actions expect.
+    runs-on: ubuntu-22.04
+    steps:
+      # Unlike python-mobius, this repo does NOT use the SHA256 object
+      # format, so the standard checkout action works fine here -- no
+      # need for the manual git-clone workaround that repo needed.
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Set up Python
+        uses: https://code.forgejo.org/actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_test.txt
+
+      # Gate: the rest of this job (release creation) only runs if this
+      # step succeeds. No build/publish steps here at all -- unlike
+      # python-mobius, this isn't a PyPI package; HACS installs directly
+      # from the tagged repo source (confirmed via hacs.json's own
+      # "zip_release": false), so there's nothing to build or upload.
+      - name: Run tests
+        run: pytest tests/ -q
+
+      # Pulls the section of CHANGELOG.md under the heading matching this
+      # tag's version (tag v0.2.0 -> "## 0.2.0") for the Forgejo release
+      # notes, rather than letting Forgejo auto-generate notes from
+      # commits. Fails the job (on purpose) if no matching section is
+      # found, rather than silently publishing a release with empty or
+      # wrong notes. Same script as python-mobius uses -- the CHANGELOG.md
+      # format is identical between the two repos.
+      # Only on a real tag push -- a workflow_dispatch run (manual, for
+      # testing/debugging this workflow itself) has no version tag to
+      # look up, and github.ref_name would just be whatever branch was
+      # picked, not a version.
+      - name: Extract changelog section for this version
+        if: github.event_name == 'push'
+        run: python3 .forgejo/scripts/extract_changelog_section.py "${{ github.ref_name }}"
+
+      # No release-dir set -- no files attached to the release, matching
+      # hacs.json's "zip_release": false (HACS pulls directly from the
+      # tagged source, not a release asset). This step only creates the
+      # release entry with the extracted changelog section as its notes.
+      # Same event-gating reason as the step above -- nothing to release
+      # against on a manual, non-tag run.
+      - name: Create Forgejo release
+        if: github.event_name == 'push'
+        uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload
+          url: https://code.r3pek.org
+          repo: r3pek/ha-mobius
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          release-notes-file: release_notes.md
