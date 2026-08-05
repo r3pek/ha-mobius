@@ -64,23 +64,45 @@ jobs:
           github_token: ${{ secrets.GH_MIRROR_TOKEN }}
 
   hassfest:
-    runs-on: ubuntu-22.04
+    # dind label -> docker:dind (the official Docker-in-Docker image, with
+    # its OWN nested daemon, not sharing this runner host's socket at all)
+    # -- a different, better fix than the earlier Docker-socket-mounting
+    # approach for this specific job. That approach shares the runner
+    # HOST's own daemon, and hassfest's action does `docker run -v
+    # <workspace-path>:...`, where <workspace-path> only exists inside
+    # this job's own container, not on the actual host filesystem the
+    # shared daemon looks in -- confirmed via a real failure ("No
+    # integrations found!", an empty mount) on this exact job. A truly
+    # separate nested daemon, running INSIDE this job's own container,
+    # doesn't have that mismatch: the workspace path DOES exist from
+    # its point of view, since it's the same container's filesystem.
+    #
+    # docker:dind is Alpine-based with no Node.js, so actions/checkout
+    # (a Node-based action) won't run here -- checkout is a plain git
+    # clone instead, git installed explicitly since a minimal Alpine
+    # image doesn't have it.
+    runs-on: dind
     steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Install git, checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          apk add --no-cache git
+          git -c http.extraheader="Authorization: Bearer ${FORGEJO_TOKEN}" \
+            clone --depth 1 --branch "${{ github.ref_name }}" \
+            https://code.r3pek.org/r3pek/ha-mobius.git .
 
-      # Same not-mirrored-on-code.forgejo.org caveat as hacs/action above.
-      #
-      # This action shells out to `docker run` internally (it pulls and
-      # runs ghcr.io/home-assistant/hassfest itself, rather than doing
-      # the validation directly in this job's own container) -- needs
-      # Docker-in-Docker enabled on the runner side (act_runner's own
-      # config.yaml: container.privileged: true, plus mounting
-      # /var/run/docker.sock via container.options and allow-listing it
-      # in container.valid_volumes) or this step fails with "Cannot
-      # connect to the Docker daemon at unix:///var/run/docker.sock" --
-      # confirmed via a real failure on this exact job before DinD was
-      # enabled. Nothing in this workflow file itself needs to change for
-      # that -- it's entirely a runner-host configuration matter.
+      # act_runner overrides this image's own entrypoint (the part that
+      # would normally auto-start dockerd) with its own "keep the
+      # container alive for step-by-step execution" entrypoint -- so the
+      # nested daemon needs to be started explicitly here, not assumed to
+      # already be running just because this is the dind image. Waits for
+      # it to actually respond before moving on, rather than assuming a
+      # fixed sleep is long enough.
+      - name: Start nested Docker daemon
+        run: |
+          dockerd &
+          timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
       - name: Hassfest validation
         uses: https://github.com/home-assistant/actions/hassfest@master
