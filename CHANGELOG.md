@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1
+## Unreleased
 
 - **Fixed two real hassfest findings, caught once its CI check actually
   started running.** `manifest.json`'s keys weren't in hassfest's
@@ -15,6 +15,8 @@
   via YAML anyway, it logs a clear error and creates a Home Assistant
   Repairs issue instead, which is the actual intended, more
   user-friendly handling. 2 new tests.
+
+## 0.2.1
 
 - **Light channel intensity sensors now round to whole numbers** instead
   of one decimal place (e.g. `100%`, not `100.0%`) -- the underlying raw
