@@ -1,0 +1,44 @@
+name: Test
+
+# Runs the test suite on every push and pull request -- separate from
+# release.yml (tag pushes only) and validate.yml (HACS/hassfest
+# publishing requirements), since "does the code work" is a different
+# concern from "is this ready to release" or "does this meet HACS's
+# specific publishing rules".
+# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
+# interpret the bare word as the boolean `true` instead of the literal
+# key GitHub/Forgejo Actions expects.
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Same setup as release.yml's own test step -- see that file's
+    # comments for why each of these specific choices (ubuntu-22.04 for
+    # a full GitHub-Actions-compatible environment, reading runtime
+    # requirements from manifest.json rather than hardcoding them,
+    # python -m pytest rather than bare pytest).
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Set up Python
+        uses: https://code.forgejo.org/actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_test.txt
+
+      - name: Install integration runtime requirements (from manifest.json)
+        run: |
+          python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
+          pip install -r /tmp/manifest_requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q

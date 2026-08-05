@@ -112,3 +112,29 @@ jobs:
           tag: ${{ github.ref_name }}
           release-dir: dist/release
           release-notes-file: release_notes.md
+
+      # This project is mirrored to GitHub (github.com/r3pek/ha-mobius) --
+      # HACS's own install/update detection reads real GitHub releases
+      # from there, not just the tag itself, so this step is what
+      # actually makes new versions visible to HACS users, not just to
+      # people watching this Forgejo repo directly.
+      #
+      # Same reasoning as hacs/action in validate.yml: github_token here
+      # is NOT secrets.GITHUB_TOKEN -- that's a Forgejo-scoped token,
+      # meaningless to GitHub's API, and creating a release additionally
+      # needs WRITE access (hacs/action's use of GH_MIRROR_TOKEN only
+      # ever needed read access) -- confirm that secret's token actually
+      # has write permission on the mirror repo before relying on this,
+      # rather than assuming the existing read-scoped one is enough.
+      #
+      # Reuses the same release_notes.md this job already built for the
+      # Forgejo release -- one changelog extraction, used for both.
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: https://github.com/softprops/action-gh-release@v2
+        with:
+          repository: r3pek/ha-mobius
+          token: ${{ secrets.GH_MIRROR_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: dist/release/mobius.zip
