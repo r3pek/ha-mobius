@@ -1,0 +1,21 @@
+# GitHub's issue-template config schema -- see
+# https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository#configuring-the-template-chooser
+#
+# This repository's actual home is code.r3pek.org (a self-hosted Forgejo
+# instance) -- github.com/r3pek/ha-mobius is a mirror kept only for
+# GitHub-specific tooling (HACS's own validation/installation flow is
+# built entirely around GitHub, and has no concept of a Forgejo-only
+# repo -- see .forgejo/workflows/validate.yml's own comments on this).
+#
+# blank_issues_enabled: false removes the "Open a blank issue" option
+# from GitHub's template chooser entirely, leaving only the contact link
+# below -- so filing an issue directly on GitHub isn't just discouraged
+# with a note, it's not offered as an option at all.
+blank_issues_enabled: false
+contact_links:
+  - name: File an issue at this project's actual repository
+    url: https://code.r3pek.org/r3pek/ha-mobius/issues
+    about: >-
+      This GitHub repository is a mirror. Issues, bug reports, and
+      feature requests are tracked at code.r3pek.org, not here --
+      please file there instead.
