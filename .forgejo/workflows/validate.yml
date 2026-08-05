@@ -1,0 +1,52 @@
+name: Validate
+
+# HACS's own publishing requirements (https://hacs.xyz/docs/publish/include/)
+# call for both of these checks passing before a PR is submitted -- hence
+# push/pull_request/schedule, matching the exact trigger set both actions'
+# own official docs use, not just tag pushes like release.yml.
+# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
+# interpret the bare word as the boolean `true` instead of the literal
+# key GitHub/Forgejo Actions expects.
+"on":
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  hacs:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      # NOTE: this references github.com directly, not a
+      # code.forgejo.org-mirrored action like the rest of this project's
+      # workflows do -- hacs/action isn't mirrored there. Untested on
+      # this specific runner as of writing; confirm it actually resolves
+      # and runs correctly (via workflow_dispatch) before relying on it.
+      # category: "integration" -- confirmed required input, per
+      # https://hacs.xyz/docs/publish/action/; this repo's hacs.json has
+      # no "render_readme"-adjacent category field of its own, so this
+      # is the one place that classification needs to be stated.
+      # comment: "false" -- the action's default (true) posts a PR
+      # comment with the validation result via GitHub's API specifically;
+      # not applicable here and would presumably just fail or no-op
+      # against a Forgejo PR, so disabled explicitly rather than left to
+      # find out.
+      - name: HACS validation
+        uses: https://github.com/hacs/action@main
+        with:
+          category: "integration"
+          comment: "false"
+
+  hassfest:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      # Same not-mirrored-on-code.forgejo.org caveat as hacs/action above.
+      - name: Hassfest validation
+        uses: https://github.com/home-assistant/actions/hassfest@master

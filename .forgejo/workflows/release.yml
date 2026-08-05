@@ -87,15 +87,20 @@ jobs:
       # ("Failed to open/read local data from file") trying to create the
       # release, which is consistent with the action expecting a real,
       # existing directory there rather than tolerating an absent one.
-      # Creating it explicitly, empty, matches the README's own pattern
-      # instead of relying on unconfirmed default behavior -- still no
-      # files attached to the release either way, matching hacs.json's
-      # "zip_release": false (HACS pulls directly from the tagged source,
-      # not a release asset); this step only creates the release entry
-      # with the extracted changelog section as its notes.
-      - name: Ensure release-dir exists (empty -- no files attached)
+      #
+      # hacs.json's "zip_release" stays false -- HACS itself still
+      # installs directly from the tagged repo source, not this asset.
+      # This zip is only for anyone installing manually instead of
+      # through HACS: extracting it directly into their own
+      # custom_components/mobius/ (hence zipping the CONTENTS of that
+      # directory, not the directory itself -- no extra nesting to undo).
+      - name: Build release zip
         if: github.event_name == 'push'
-        run: mkdir -p dist/release
+        run: |
+          mkdir -p dist/release
+          cd custom_components/mobius
+          find . -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          zip -r ../../dist/release/mobius.zip .
       - name: Create Forgejo release
         if: github.event_name == 'push'
         uses: https://code.forgejo.org/actions/forgejo-release@v2
