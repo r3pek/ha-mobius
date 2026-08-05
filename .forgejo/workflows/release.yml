@@ -42,11 +42,9 @@ jobs:
       # this integration -- not covered by requirements_test.txt, which is
       # test-tooling only. Reads them from manifest.json directly rather
       # than hardcoding the same versions a second time here, so this
-      # can't drift out of sync with the manifest.
-      # NOTE: this pulls from PyPI, so manifest.json's version constraint
-      # (currently python-mobius>=0.3.0) must already be published there
-      # -- if python-mobius's own release hasn't happened yet, this step
-      # fails with "could not find a version that satisfies" until it has.
+      # can't drift out of sync with the manifest. Pulls from PyPI, so
+      # the version constraint in manifest.json must already be published
+      # there for this step to succeed.
       - name: Install integration runtime requirements (from manifest.json)
         run: |
           python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
@@ -82,12 +80,22 @@ jobs:
         if: github.event_name == 'push'
         run: python3 .forgejo/scripts/extract_changelog_section.py "${{ github.ref_name }}"
 
-      # No release-dir set -- no files attached to the release, matching
-      # hacs.json's "zip_release": false (HACS pulls directly from the
-      # tagged source, not a release asset). This step only creates the
-      # release entry with the extracted changelog section as its notes.
-      # Same event-gating reason as the step above -- nothing to release
-      # against on a manual, non-tag run.
+      # Both of the action's own README examples always set release-dir
+      # explicitly, even though it's documented as optional with a
+      # default -- an earlier version of this workflow omitted it
+      # entirely (relying on that default) and hit a curl failure
+      # ("Failed to open/read local data from file") trying to create the
+      # release, which is consistent with the action expecting a real,
+      # existing directory there rather than tolerating an absent one.
+      # Creating it explicitly, empty, matches the README's own pattern
+      # instead of relying on unconfirmed default behavior -- still no
+      # files attached to the release either way, matching hacs.json's
+      # "zip_release": false (HACS pulls directly from the tagged source,
+      # not a release asset); this step only creates the release entry
+      # with the extracted changelog section as its notes.
+      - name: Ensure release-dir exists (empty -- no files attached)
+        if: github.event_name == 'push'
+        run: mkdir -p dist/release
       - name: Create Forgejo release
         if: github.event_name == 'push'
         uses: https://code.forgejo.org/actions/forgejo-release@v2
@@ -97,4 +105,5 @@ jobs:
           repo: r3pek/ha-mobius
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
+          release-dir: dist/release
           release-notes-file: release_notes.md
