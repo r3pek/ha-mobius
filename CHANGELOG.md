@@ -2,6 +2,20 @@
 
 ## 0.2.1
 
+- **Fixed two real hassfest findings, caught once its CI check actually
+  started running.** `manifest.json`'s keys weren't in hassfest's
+  required order (`domain`, `name`, then alphabetical) -- reordered.
+  Added `CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)`:
+  hassfest requires any integration implementing `async_setup` to define
+  one of `CONFIG_SCHEMA`/`PLATFORM_SCHEMA`/`PLATFORM_SCHEMA_BASE` (or a
+  helper equivalent); this integration is config-entry-only (no YAML
+  `configuration.yaml` support at all), so
+  `config_entry_only_config_schema` is the correct one -- confirmed via
+  real behavior testing that it doesn't raise if someone configures it
+  via YAML anyway, it logs a clear error and creates a Home Assistant
+  Repairs issue instead, which is the actual intended, more
+  user-friendly handling. 2 new tests.
+
 - **Light channel intensity sensors now round to whole numbers** instead
   of one decimal place (e.g. `100%`, not `100.0%`) -- the underlying raw
   value is itself only ever a coarse permille figure, so a fractional

@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
+from homeassistant.helpers import config_validation as cv
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
@@ -21,6 +22,17 @@ from .gateway_registry import GatewayRegistry
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+# This integration is config-entry-only (config_flow: true in manifest.json,
+# devices discovered via Bluetooth or added manually through the UI) -- no
+# YAML configuration.yaml support at all. cv.config_entry_only_config_schema
+# is the confirmed-correct helper for exactly this case: it both satisfies
+# hassfest's requirement that any integration implementing async_setup
+# define one of CONFIG_SCHEMA/PLATFORM_SCHEMA/PLATFORM_SCHEMA_BASE (or one
+# of its helper equivalents), and gives a clear, real error if someone
+# tries to configure this integration via YAML anyway, rather than a
+# confusing failure.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 @dataclass

@@ -311,3 +311,44 @@ async def test_proactive_discovery_skipped_when_already_cached(hass):
 
     mock_discover.assert_not_called()
     assert prebuilt_group.members[PUMP_SERIAL].mesh_address == cached_address
+
+
+# --------------------------------------------------------------------------
+# CONFIG_SCHEMA -- required by hassfest for any integration implementing
+# async_setup (confirmed via a real hassfest finding: "Integrations which
+# implement 'async_setup' or 'setup' must define ... CONFIG_SCHEMA ...").
+# This integration is config-entry-only (config_flow: true, no YAML
+# configuration.yaml support), so cv.config_entry_only_config_schema is
+# the confirmed-correct helper -- not just "define something to satisfy
+# the linter", it also gives a real, clear error if someone tries to
+# configure this integration via YAML anyway.
+# --------------------------------------------------------------------------
+
+def test_config_schema_is_config_entry_only(caplog):
+    from custom_components.mobius import CONFIG_SCHEMA
+
+    assert CONFIG_SCHEMA is not None
+    # A bare {"mobius": {}} (as if someone wrote this in configuration.yaml)
+    # must be flagged as unsupported -- confirms this actually enforces
+    # "config entries only", not just present to silence hassfest without
+    # doing anything. Confirmed via real behavior: this doesn't raise (an
+    # earlier version of this test assumed it would) -- it logs a clear
+    # error and creates a repairs issue instead, which is the actual,
+    # more user-friendly way cv.config_entry_only_config_schema handles
+    # this, surfaced in Home Assistant's own Repairs UI rather than
+    # crashing startup outright.
+    result = CONFIG_SCHEMA({DOMAIN: {}})
+    assert result == {DOMAIN: {}}  # passed through unchanged, not stripped or rejected
+    assert "does not support YAML setup" in caplog.text
+
+
+def test_config_schema_allows_no_mobius_key_at_all():
+    """The common case: mobius isn't mentioned in configuration.yaml at
+    all (the expected setup, since it's added via the UI) -- must not be
+    rejected just because the integration exists."""
+    from custom_components.mobius import CONFIG_SCHEMA
+
+    # Should not raise -- an empty overall config, or one where "mobius"
+    # simply isn't a key, is exactly what's expected for a config-entry-
+    # only integration.
+    CONFIG_SCHEMA({})
