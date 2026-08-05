@@ -81,7 +81,18 @@ jobs:
     # (a Node-based action) won't run here -- checkout is a plain git
     # clone instead, git installed explicitly since a minimal Alpine
     # image doesn't have it.
+    #
+    # defaults.run.shell: sh -- Alpine also doesn't have bash, which is
+    # otherwise the default shell Actions uses to execute `run:` steps
+    # even under a label-mapped image like this one (confirmed via a
+    # real failure: "exec: bash: executable file not found"). None of
+    # this job's own script logic (apk/git/dockerd/until-do-done/&
+    # backgrounding) is bash-specific, so plain POSIX sh covers all of
+    # it without needing to install bash just to avoid rewriting anything.
     runs-on: dind
+    defaults:
+      run:
+        shell: sh
     steps:
       - name: Install git, checkout
         env:
