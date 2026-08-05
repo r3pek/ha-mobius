@@ -82,13 +82,17 @@ jobs:
     # clone instead, git installed explicitly since a minimal Alpine
     # image doesn't have it.
     #
-    # defaults.run.shell: sh -- Alpine also doesn't have bash, which is
-    # otherwise the default shell Actions uses to execute `run:` steps
-    # even under a label-mapped image like this one (confirmed via a
-    # real failure: "exec: bash: executable file not found"). None of
-    # this job's own script logic (apk/git/dockerd/until-do-done/&
-    # backgrounding) is bash-specific, so plain POSIX sh covers all of
-    # it without needing to install bash just to avoid rewriting anything.
+    # defaults.run.shell: sh -- covers this job's OWN two run: steps
+    # below (neither is bash-specific: apk/git/dockerd/until-do-done/&
+    # backgrounding are all plain POSIX). Doesn't cover the third
+    # (hassfest itself): that's a third-party composite action, and a
+    # composite action's own internal run steps use whatever shell its
+    # author specified, independent of the calling job's defaults --
+    # confirmed via a real failure that persisted even after adding this
+    # defaults setting, meaning hassfest's own action.yml hardcodes bash
+    # for its steps regardless. bash installed explicitly below for that
+    # reason, rather than trying to work around a third-party action's
+    # own shell choice.
     runs-on: dind
     defaults:
       run:
@@ -98,7 +102,7 @@ jobs:
         env:
           FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          apk add --no-cache git
+          apk add --no-cache git bash
           git -c http.extraheader="Authorization: Bearer ${FORGEJO_TOKEN}" \
             clone --depth 1 --branch "${{ github.ref_name }}" \
             https://code.r3pek.org/r3pek/ha-mobius.git .
