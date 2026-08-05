@@ -21,11 +21,31 @@ jobs:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      # NOTE: this references github.com directly, not a
-      # code.forgejo.org-mirrored action like the rest of this project's
-      # workflows do -- hacs/action isn't mirrored there. Untested on
-      # this specific runner as of writing; confirm it actually resolves
-      # and runs correctly (via workflow_dispatch) before relying on it.
+      # This project is mirrored to GitHub (github.com/r3pek/ha-mobius),
+      # which is what makes this job meaningful at all -- HACS itself
+      # (both this validation action and the real installation flow in
+      # Home Assistant) is built entirely around GitHub; it has no
+      # concept of a Forgejo-only repo. references github.com directly,
+      # not a code.forgejo.org-mirrored action like the rest of this
+      # project's workflows do -- hacs/action isn't mirrored there.
+      #
+      # repository input set explicitly to the GitHub mirror's path --
+      # left to auto-detect, it would resolve to the Forgejo repo's own
+      # path via this run's environment, which happens to be the same
+      # string ("r3pek/ha-mobius") but isn't actually where the action
+      # needs to look; being explicit here doesn't rely on that
+      # coincidence continuing to hold.
+      #
+      # github_token is REQUIRED here and is NOT secrets.GITHUB_TOKEN --
+      # confirmed via a real failure on this exact job (401, "Repository
+      # ... not loaded properly in HACS"): this action authenticates to
+      # api.github.com specifically, and Forgejo's automatic
+      # secrets.GITHUB_TOKEN is a Forgejo-scoped token, meaningless to
+      # GitHub's API. Needs a real GitHub Personal Access Token (public
+      # repo read access is enough) stored as its own secret --
+      # GH_MIRROR_TOKEN here, deliberately not named GITHUB_TOKEN since
+      # that name is already reserved for Forgejo's own auto-provided one.
+      #
       # category: "integration" -- confirmed required input, per
       # https://hacs.xyz/docs/publish/action/; this repo's hacs.json has
       # no "render_readme"-adjacent category field of its own, so this
@@ -40,6 +60,8 @@ jobs:
         with:
           category: "integration"
           comment: "false"
+          repository: "r3pek/ha-mobius"
+          github_token: ${{ secrets.GH_MIRROR_TOKEN }}
 
   hassfest:
     runs-on: ubuntu-22.04
@@ -48,5 +70,17 @@ jobs:
         uses: https://code.forgejo.org/actions/checkout@v4
 
       # Same not-mirrored-on-code.forgejo.org caveat as hacs/action above.
+      #
+      # This action shells out to `docker run` internally (it pulls and
+      # runs ghcr.io/home-assistant/hassfest itself, rather than doing
+      # the validation directly in this job's own container) -- needs
+      # Docker-in-Docker enabled on the runner side (act_runner's own
+      # config.yaml: container.privileged: true, plus mounting
+      # /var/run/docker.sock via container.options and allow-listing it
+      # in container.valid_volumes) or this step fails with "Cannot
+      # connect to the Docker daemon at unix:///var/run/docker.sock" --
+      # confirmed via a real failure on this exact job before DinD was
+      # enabled. Nothing in this workflow file itself needs to change for
+      # that -- it's entirely a runner-host configuration matter.
       - name: Hassfest validation
         uses: https://github.com/home-assistant/actions/hassfest@master
