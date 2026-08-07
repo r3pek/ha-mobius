@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
+
+- **Requires `python-mobius>=0.3.1`** for a real, high-impact fix in
+  that library: `Brightness` (the schedule's master dimmer channel) was
+  never being applied to any other channel at all -- every channel,
+  moonlight included, was being interpolated and returned without ever
+  being scaled by `Brightness`. Found via real hardware testing: a light
+  showing ~1% in the app's own display came back as ~25% from this
+  integration's sensors at the same moment. No code changes needed on
+  this side -- `LightChannelIntensitySensor` (and everywhere else that
+  reads `current_intensities`) already just displays whatever
+  `python-mobius` computes, so this integration picks up the corrected
+  values automatically once the dependency is upgraded. Confirmed by
+  actually installing the fixed `python-mobius` into this project's own
+  test environment and running the full suite against it (98/98 still
+  passing), not just assumed compatible from reading the change.
 
 - **Fixed two real hassfest findings, caught once its CI check actually
   started running.** `manifest.json`'s keys weren't in hassfest's
