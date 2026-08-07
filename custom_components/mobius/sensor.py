@@ -295,8 +295,7 @@ class LightChannelIntensitySensor(MobiusEntity):
 class CalibrationSensor(MobiusEntity):
     """
     Light devices only -- confirmed via real device testing AND the app's
-    own UI gating (device.primitive.category() == M.DeviceCategory.Lighting
-    in DeviceSettingsFragment.java) to be a light feature; pumps don't
+    own UI gating (its own device category check) to be a light feature; pumps don't
     expose this (get_calibration_info() returns None for them, confirmed
     against real VorTech hardware). Only added to a config entry if
     calibration data was actually present at setup -- see
