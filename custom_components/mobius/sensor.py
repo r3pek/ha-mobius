@@ -8,6 +8,7 @@ library grows write support.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 
 from homeassistant.components.sensor import (
@@ -25,7 +26,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData, tank_device_identifier
-from .const import DOMAIN, CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
+from .const import DOMAIN, CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
 
 _LOGGER = logging.getLogger(__name__)
 from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
@@ -466,7 +467,12 @@ class MeshAddressSensor(MobiusEntity):
         member = group.members.get(self.coordinator.serial)
         if member is None or member.mesh_address is None:
             return None
-        return member.mesh_address.hex()
+        # A real Thread mesh-local IPv6 address (16 raw bytes, confirmed
+        # in python-mobius's own wire-format documentation) -- format it
+        # as one (standard colon-separated, zero-compressed notation via
+        # the stdlib ipaddress module), not the flat, unrecognizable hex
+        # string an earlier version of this sensor showed instead.
+        return str(ipaddress.IPv6Address(member.mesh_address))
 
     @property
     def available(self) -> bool:
@@ -490,9 +496,15 @@ class DiscoveryAgeSensor(MobiusEntity):
     that actually had one (see async_setup_entry() below) -- never for
     an ad-hoc device, which never successfully calls discover_tank() in
     the first place (see config_flow.py's own module docstring).
+
+    discovered_at (if the tank had one recorded -- see const.py's own
+    CONF_DISCOVERED_AT docstring) is exposed as an attribute, giving
+    this otherwise-bare, ever-more-stale number a real anchor point:
+    "age=14519" alone says nothing about whether that's from five
+    minutes or five months ago.
     """
 
-    def __init__(self, coordinator, serial, device_info, age: int):
+    def __init__(self, coordinator, serial, device_info, age: int, discovered_at: str | None = None):
         super().__init__(
             coordinator, serial, "discovery_age",
             SensorEntityDescription(key="discovery_age", translation_key="discovery_age"),
@@ -500,10 +512,17 @@ class DiscoveryAgeSensor(MobiusEntity):
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._age = age
+        self._discovered_at = discovered_at
 
     @property
     def native_value(self):
         return self._age
+
+    @property
+    def extra_state_attributes(self):
+        if self._discovered_at is None:
+            return None
+        return {"discovered_at": self._discovered_at}
 
     @property
     def available(self) -> bool:
@@ -616,7 +635,10 @@ async def async_setup_entry(
         # permanently-unavailable entity for one that never will.
         age = device_record.get(CONF_AGE)
         if age is not None:
-            entities.append(DiscoveryAgeSensor(coordinator, serial, device_info, age))
+            entities.append(DiscoveryAgeSensor(
+                coordinator, serial, device_info, age,
+                discovered_at=entry.data.get(CONF_DISCOVERED_AT),
+            ))
 
         if support.startswith("pump"):
             entities += [

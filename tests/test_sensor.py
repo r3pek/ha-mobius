@@ -15,7 +15,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from mobius import PrimitiveType
 
 from custom_components.mobius import tank_device_identifier
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
 
 PAN_ID = 0x3D0F
 MLPREFIX_HEX = "fd1c5ec780e35c01"
@@ -198,7 +198,7 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # this proactively discovered too, not just relayed ones.
     mesh_address = hass.states.get("sensor.mp40qd_right_mesh_address")
     assert mesh_address is not None
-    assert mesh_address.state == "fd1c5ec780e35c01000000fffe001234"
+    assert mesh_address.state == "fd1c:5ec7:80e3:5c01:0:ff:fe00:1234"
 
     # No discovery-age sensor -- this is an ad-hoc entry (no CONF_AGE on
     # its device record), which never successfully calls discover_tank()
@@ -335,6 +335,7 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
                 {CONF_SERIAL: PUMP_SERIAL, CONF_AGE: 373},
                 {CONF_SERIAL: LIGHT_SERIAL, CONF_AGE: 8490},
             ],
+            CONF_DISCOVERED_AT: "2026-08-01T12:00:00+00:00",
         },
         unique_id=MLPREFIX_HEX,
         title="Mobius Tank (2 devices)",
@@ -379,6 +380,10 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     pump_age = hass.states.get("sensor.mp40qd_right_age_at_discovery")
     assert pump_age is not None
     assert pump_age.state == "373"
+    # The actual point of the new attribute: a bare age number has no
+    # anchor point on its own -- confirms the shared, tank-level
+    # discovery timestamp is attached, not just the number itself.
+    assert pump_age.attributes["discovered_at"] == "2026-08-01T12:00:00+00:00"
 
     # The prefix sensor is on the tank device, not any per-device entity
     # -- shared, tank-level data.

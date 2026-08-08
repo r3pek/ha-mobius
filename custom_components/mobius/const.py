@@ -122,6 +122,21 @@ CONF_DEVICES = "devices"
 # -- see config_flow.py's own docstring for why).
 CONF_AGE = "age"
 
+# Not a standard homeassistant.const constant -- ISO 8601 timestamp of
+# the ORIGINAL discover_tank() call that populated CONF_AGE for every
+# peer in this tank (a single, shared value for the whole tank, not
+# per-device -- confirmed accurate since discover_tank() fetches
+# NetworkedThreadDevices as one atomic read, so every peer's own
+# CONF_AGE necessarily comes from that exact same moment regardless of
+# which peer it's attached to). Exists purely to contextualize CONF_AGE
+# for display (see DiscoveryAgeSensor in sensor.py) -- "age" alone, with
+# no anchor point, becomes progressively less meaningful the longer a
+# tank has been set up, for a value whose own exact meaning isn't even
+# independently confirmed to begin with (see CONF_AGE's own docstring
+# above). None (not present in entry.data at all) for an ad-hoc,
+# tank-less entry, for the same reason CONF_MLPREFIX is absent there.
+CONF_DISCOVERED_AT = "discovered_at"
+
 # Not a standard homeassistant.const constant -- the tank's own confirmed,
 # stable identity (see python-mobius's mobius.discovery.discover_tank()):
 # an 8-byte Thread mesh-local prefix, stored here as its hex string. Used

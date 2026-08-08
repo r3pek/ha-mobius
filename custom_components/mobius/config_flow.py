@@ -55,10 +55,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.util import dt as dt_util
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data, Tank
 
-from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, MAX_CONCURRENT_CONNECTIONS
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT, MAX_CONCURRENT_CONNECTIONS
 from .coordinator import discover_tank_for_serial
 
 _LOGGER = logging.getLogger(__name__)
@@ -514,7 +515,11 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Each peer's CONF_AGE (if the underlying MeshPeer had one -- see
         that field's own docstring for the important caveat that it's a
         one-time discovery snapshot, not live data) is stored too, for
-        display -- see const.py's own CONF_AGE docstring.
+        display -- see const.py's own CONF_AGE docstring. CONF_DISCOVERED_AT
+        records exactly when this happened (a single, shared timestamp for
+        the whole tank, not per-device -- see its own docstring for why
+        that's accurate, not just simpler), so CONF_AGE has an anchor point
+        to be displayed against rather than an ever-more-stale bare number.
 
         title comes from what was actually typed/kept on the
         tank_confirm form (see async_step_tank_confirm()) -- not always
@@ -536,5 +541,6 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PAN_ID: self._pending_pan_id,
                 CONF_MLPREFIX: tank.prefix.hex(),
                 CONF_DEVICES: devices,
+                CONF_DISCOVERED_AT: dt_util.utcnow().isoformat(),
             },
         )
