@@ -72,15 +72,14 @@ from typing import Any, Optional
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model,
-    MOBIUS_COMPANY_ID, parse_manufacturer_data,
+    MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
+    MOBIUS_COMPANY_ID, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
     PRIMITIVE_SIZE, extract_short_address,
 )
@@ -346,14 +345,28 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         reality -- firmware changes are infrequent but real (a real
         device got an OTA update mid-development of this integration), so
         this needs to actually propagate, not just be captured once at
-        setup and left stale forever after."""
+        setup and left stale forever after.
+
+        Looks the device up by SERIAL, not BLE address -- a real,
+        necessary fix, not incidental to this integration's move to
+        tank-aware, multi-device config entries: an entry's own data no
+        longer has one single top-level address at all (multiple devices
+        now share one entry), and a tank peer never has any stored
+        address in the first place (see config_flow.py's own
+        _async_create_tank_entry() docstring for why). serial is the
+        only identifier guaranteed present for every device either way
+        -- see python-mobius's own documentation/12-device-identity-and-
+        address-stability.md for why it's the right one regardless, not
+        just the only available option here. sensor.py's own
+        _device_info() must build its own DeviceInfo.identifiers the
+        same, serial-based way, or this lookup would never find anything."""
         sw_version = derive_sw_version(data.get("firmware_versions") or {})
         hw_version = derive_hw_version(data.get("hardware_info") or {})
         if not sw_version and not hw_version:
             return
         device_registry = dr.async_get(self.hass)
         device_entry = device_registry.async_get_device(
-            identifiers={(DOMAIN, self.config_entry.data[CONF_ADDRESS])}
+            identifiers={(DOMAIN, self.serial)}
         )
         if device_entry is None:
             return
@@ -478,5 +491,49 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
                     return await mdevice.get_own_mesh_address()
         except Exception as err:
             _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
+            return None
+    return None
+
+
+async def discover_tank_for_serial(
+    hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore,
+) -> Optional[Tank]:
+    """
+    Connects directly and briefly to whichever device is currently
+    advertising `serial` and calls python-mobius's
+    mobius.discovery.discover_tank() on it -- the config flow's own way
+    of answering "is this device part of a multi-device tank, and if so
+    who else is on it" before deciding whether to offer a one-tank or
+    one-device confirm. Same resolution/connection pattern as
+    discover_mesh_address() above (including sharing the same connection
+    semaphore, for the same real-world-confirmed reason that function's
+    own docstring explains), just calling a different python-mobius
+    function once connected.
+
+    Returns None (not an exception, not an empty Tank) if the device
+    can't currently be found/reached at all -- distinguishable from
+    discover_tank()'s own Tank(prefix=None, peers=[]) return, which means
+    "reached the device fine, but it isn't part of any provisioned
+    Thread network" (the genuine "ad-hoc, no tank" case the config flow
+    falls back to a single-device confirm for). Callers need to tell
+    these apart: this function's None means "try again later, this
+    device isn't currently reachable," not "this device has no tank."
+    """
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+        if not payload:
+            continue
+        parsed = parse_manufacturer_data(payload)
+        if not parsed or parsed.serial != serial:
+            continue
+        ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
+        if ble_device is None:
+            return None
+        try:
+            async with semaphore:
+                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                    return await discover_tank(mdevice)
+        except Exception as err:
+            _LOGGER.debug("Tank discovery failed for %s: %s", serial, err)
             return None
     return None

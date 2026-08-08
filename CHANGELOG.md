@@ -1,5 +1,83 @@
 # Changelog
 
+## Unreleased
+
+- **Config entries are now tank-scoped, not device-scoped: one entry can
+  represent an entire tank (multiple devices), not just one device.**
+  Requires `python-mobius>=0.4.0` for `Tank`/`discover_tank()`. When a
+  new, unconfigured device is discovered, this integration now connects
+  briefly to ask what else shares its Thread mesh -- if it finds more
+  than one device, a single "add tank with N devices" confirm creates
+  ONE entry covering all of them; if it finds only itself (or can't
+  connect, or the device genuinely isn't part of any provisioned Thread
+  network yet), it falls back to the original single-device confirm,
+  unchanged. A device belonging to an ALREADY-configured tank is merged
+  into that entry automatically (reloaded, not re-prompted) rather than
+  offered as a new "add tank" confirm -- see config_flow.py's own module
+  docstring for the full merge/tank/ad-hoc decision tree. Old entries
+  (device/serial stored directly at the top level, from before this
+  change) aren't automatically migrated -- there's no safe way to know
+  which of a device's currently-visible peers, if any, it should now be
+  grouped with -- so they raise a clear `ConfigEntryError` asking for a
+  clean re-setup rather than silently misbehaving.
+
+- **Every device in a tank now visually groups under a synthetic "tank"
+  device** (`via_device` -- the same Home Assistant mechanism a
+  Bluetooth/DHCP/etc-discovered hub with sub-devices already uses, not
+  something specific to this integration), matching a "one hub, N child
+  devices" UI. Only for a genuine multi-device tank -- a single, ad-hoc
+  device skips this entirely (a "hub" with one child would just be UI
+  noise). The tank device's own name defaults to something like "Mobius
+  Tank (2 devices)" and is renameable afterward like any other device.
+
+- **`GatewayRegistry.join()` gained `prefer_as_gateway`**: when setting
+  up a tank entry, the FIRST device in its list (always the one the
+  config flow actually connected to, to run `discover_tank()` in the
+  first place) skips the normal RSSI-based settle-window election and
+  becomes gateway immediately -- direct, fresh proof of reachability is
+  worth more than an untested peer's merely-stronger signal. Only
+  affects a genuinely brand-new group; never displaces an already-
+  established gateway. 4 new tests.
+
+- **Added three new diagnostic sensors, closing the loop on "show
+  address/age/prefix" from earlier work**: `Mesh address` (per device,
+  live from the gateway registry's own cache -- required fixing a real
+  gap where the registry never populated a group's own GATEWAY's
+  address, since nothing else in normal operation needed it; now every
+  device gets this proactively discovered at setup, gateway included,
+  at the cost of one extra brief connection for the gateway specifically,
+  bounded to setup/restart, not ongoing), `Age (at discovery)` (per tank
+  peer, a clearly-labeled ONE-TIME snapshot from the original
+  `discover_tank()` scan that found it -- not live, continuously-
+  refreshed data; only present for tank peers that had one, never for an
+  ad-hoc device), and `Mesh prefix` (tank-level, attached to the
+  synthetic tank device itself, not any one real device, since it's
+  shared -- a static value, not backed by a coordinator at all).
+
+- **A real, necessary device-identity fix, forced by (not incidental
+  to) the move to multi-device entries**: every device's own identity in
+  Home Assistant's device registry is now SERIAL-based, not BLE-address-
+  based. A tank peer never has any stored BLE address in the first place
+  (only its serial is known from `discover_tank()`), so address
+  couldn't remain the identity for every device. Caught via a real,
+  reproducible bug: `coordinator.py`'s own device-registry sync used
+  `entry.data[CONF_ADDRESS]`, a key that no longer exists at all in a
+  multi-device entry's data, and which couldn't have disambiguated
+  between an entry's several devices even if it did. This also happens
+  to fix a pre-existing, real instability bug (BLE addresses can rotate
+  -- see python-mobius's own documentation/12-device-identity-and-
+  address-stability.md), not just something incidental to this change.
+  Every sensor's own `unique_id` moved the same way. The old "— Tank
+  {pan_id}" suffix on every device's own name was removed -- redundant
+  now that `via_device` grouping shows this visually instead.
+
+- Also cleaned up two long-standing references to the app's own
+  decompiled source (`Tank/CommGroup`) in `const.py`/`gateway_registry.py`'s
+  own docstrings, left over from before this project's cleanup pass
+  (never applied here, only to python-mobius, until now) -- both now use
+  the same generic "confirmed via reverse engineering" language the rest
+  of this codebase already does.
+
 ## 0.2.2
 
 - **Requires `python-mobius>=0.3.1`** for a real, high-impact fix in

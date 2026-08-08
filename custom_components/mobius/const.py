@@ -63,9 +63,10 @@ MAX_CONCURRENT_CONNECTIONS = 1
 CONNECT_TIMEOUT = 30.0
 
 # Multiple devices sharing the same pan_id (Thread mesh/"tank", confirmed
-# via Tank/CommGroup in the decompiled app -- see python-mobius's
-# documentation/09-thread-coap-relay.md) share ONE physical BLE
-# connection rather than each holding their own -- see gateway_registry.py.
+# via reverse engineering the app's own tank-grouping model -- see
+# python-mobius's documentation/09-thread-coap-relay.md) share ONE
+# physical BLE connection rather than each holding their own -- see
+# gateway_registry.py.
 
 # How long a newly-forming group waits for other devices to also report
 # in before finalizing gateway selection by RSSI. Only affects the very
@@ -89,3 +90,47 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # faster, gateway-specific optimization that tries to avoid ever reaching
 # this for an entire group at once.
 MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
+
+# --------------------------------------------------------------------------
+# Tank-level config entries -- one config entry per Thread mesh/"tank"
+# (see gateway_registry.py's own docstring for why pan_id is the
+# established local proxy for this), not one per device. A config
+# entry's data looks like:
+#   {CONF_PAN_ID: 0x1234, CONF_MLPREFIX: "fd1122...", CONF_DEVICES: [
+#       {CONF_SERIAL: "765...", CONF_ADDRESS: "AA:BB:..."}, ...
+#   ]}
+# CONF_DEVICES is a list even for a single, tank-less ("ad-hoc") device --
+# uniform shape rather than two different entry types to support.
+# --------------------------------------------------------------------------
+
+# Not a standard homeassistant.const constant -- each entry in
+# CONF_DEVICES is itself a dict with CONF_SERIAL/CONF_ADDRESS keys (reuses
+# the same two constants a single device's own data already used before
+# this integration moved to tank-level entries), plus an optional
+# CONF_AGE for tank peers (see its own docstring below).
+CONF_DEVICES = "devices"
+
+# Not a standard homeassistant.const constant -- each tank peer's "age"
+# value AS OF THE ORIGINAL discover_tank() CALL THAT FOUND IT (see
+# python-mobius's MeshPeer -- confirmed present in the wire format, but
+# its exact meaning isn't independently confirmed against real hardware,
+# so this is surfaced as a one-time discovery-time snapshot, not implied
+# to be live/continuously refreshed -- there's currently no ongoing way
+# to refresh it short of a fresh discover_tank() scan). Only present for
+# tank peers (discovered via discover_tank()), never for an ad-hoc
+# device (single-device entries never call discover_tank() successfully
+# -- see config_flow.py's own docstring for why).
+CONF_AGE = "age"
+
+# Not a standard homeassistant.const constant -- the tank's own confirmed,
+# stable identity (see python-mobius's mobius.discovery.discover_tank()):
+# an 8-byte Thread mesh-local prefix, stored here as its hex string. Used
+# as the tank config entry's unique_id, and as the synthetic tank
+# device's own identifier (see __init__.py's _tank_device_identifier())
+# for via_device grouping -- more stable than pan_id for this purpose,
+# since pan_id is only ever meant to disambiguate at the BLE-advertisement
+# level, not serve as a long-term stable identity. None (not present in
+# entry.data at all) for an ad-hoc, tank-less entry, where there's no
+# prefix to have discovered in the first place.
+CONF_MLPREFIX = "mlprefix"
+

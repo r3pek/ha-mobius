@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, Platform
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
-from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID
+from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 from .coordinator import MobiusDeviceCoordinator, discover_mesh_address
 from .gateway_registry import GatewayRegistry
 
@@ -35,9 +36,29 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
+def tank_device_identifier(mlprefix_hex: str) -> tuple[str, str]:
+    """The synthetic tank device's own device-registry identifier -- a
+    real device_registry entry with no coordinator/entities of its own,
+    existing purely so every real device's own DeviceInfo can point
+    via_device at it (see sensor.py), producing the same "one hub, N
+    child devices" grouping this whole feature was designed against (a
+    Home Assistant Bluetooth/DHCP/etc-discovered hub with sub-devices --
+    not a Mobius-specific mechanism, see this integration's own design
+    notes). Shared here (rather than inlined at each of the two call
+    sites -- registration below, and via_device in sensor.py) so both
+    sides can never drift apart on the exact identifier shape.
+    """
+    return (DOMAIN, f"tank_{mlprefix_hex}")
+
+
 @dataclass
 class MobiusRuntimeData:
-    coordinator: MobiusDeviceCoordinator
+    """One entry, one-or-more devices -- see const.py's own module-level
+    docstring for the full CONF_DEVICES data shape this mirrors at
+    runtime. Keyed by serial, matching how every other per-device lookup
+    in this integration already works (gateway_registry.PanGroup.members,
+    for instance)."""
+    coordinators: dict[str, MobiusDeviceCoordinator] = field(default_factory=dict)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -68,8 +89,35 @@ def _current_rssi(hass: HomeAssistant, serial: str) -> int | None:
     return None
 
 
+def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex: str, device_count: int) -> None:
+    """Registers (or updates) the synthetic tank device real devices'
+    own DeviceInfo will point via_device at -- see tank_device_identifier()
+    for why this exists at all. Idempotent: safe to call on every setup
+    (including every Home Assistant restart, not just first-ever setup),
+    since async_get_or_create() is itself idempotent. device_count isn't
+    stored directly (it would just duplicate what the entry's own,
+    renameable title already conveys by default, e.g. "Mobius Tank (2
+    devices)") -- accepted as a parameter mainly so callers don't need
+    to recompute len(devices) themselves, and to keep this function's
+    signature self-documenting about what it needs to know."""
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={tank_device_identifier(mlprefix_hex)},
+        name=entry.title,
+        manufacturer="EcoTech Marine",
+        model="Tank",
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Mobius from a config entry (one physical device)."""
+    """Set up Mobius from a config entry -- one Thread mesh/"tank" (see
+    gateway_registry.py's own docstring for why pan_id is the
+    established local proxy for this), which may hold one or more
+    physical devices (CONF_DEVICES) -- not necessarily one, the way a
+    single ad-hoc device's own entry still uses the exact same shape
+    with a one-element list (see config_flow.py's own module docstring
+    for the full merge/tank/ad-hoc design)."""
     hass.data.setdefault(DOMAIN, {})
     semaphore = hass.data[DOMAIN].setdefault(
         "connection_semaphore", asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
@@ -78,70 +126,117 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "gateway_registry", GatewayRegistry(hass, semaphore)
     )
 
-    serial = entry.data.get(CONF_SERIAL)
-    if serial is None:
-        # Entries created before serial-based identity was added won't
-        # have this. There's no safe way to connect without it (address
-        # alone isn't reliable -- see documentation/
-        # 12-device-identity-and-address-stability.md), so ask for a clean
-        # re-setup rather than falling back to the old address-only path.
+    devices = entry.data.get(CONF_DEVICES)
+    if not devices:
+        # Entries created before tank-aware, CONF_DEVICES-based entries
+        # existed (the old shape stored a single device's own
+        # CONF_SERIAL/CONF_ADDRESS directly at the top level, not nested
+        # under a list at all). There's no safe, automatic way to migrate
+        # that shape forward, so ask for a clean re-setup rather than
+        # guessing.
         raise ConfigEntryError(
-            f"This Mobius device (address {entry.data.get(CONF_ADDRESS)}) was set up "
-            "before serial-based device identity was added and is missing its serial "
-            "number. Please remove and re-add it."
+            f"This Mobius entry ({entry.title!r}) was set up before tank-aware, "
+            "multi-device config entries were added and is missing its device "
+            "list. Please remove and re-add it."
         )
 
     pan_id = entry.data.get(CONF_PAN_ID)
     if pan_id is None:
         # Entries created before pan_id-based gateway grouping was added.
-        # Same reasoning as the serial check above -- there's no safe way
-        # to know which group this device belongs to without it.
+        # Same reasoning as the CONF_DEVICES check above -- there's no
+        # safe way to know which group these devices belong to without it.
         raise ConfigEntryError(
-            f"This Mobius device ({serial}) was set up before pan_id-based device "
-            "grouping was added and is missing its pan_id. Please remove and re-add it."
+            f"This Mobius entry ({entry.title!r}) was set up before pan_id-based "
+            "device grouping was added and is missing its pan_id. Please remove "
+            "and re-add it."
         )
 
-    rssi = _current_rssi(hass, serial)
-    group = await registry.join(pan_id, serial, rssi)
+    mlprefix_hex = entry.data.get(CONF_MLPREFIX)
+    # Only registers a synthetic tank ("hub") device -- and therefore
+    # only gets real devices' own via_device grouping under it, see
+    # sensor.py -- for a genuine multi-device tank. A single ad-hoc
+    # device (no confirmed tank prefix at all, or a tank entry that
+    # currently only has one device in it e.g. right after the first of
+    # a two-device tank was added but before the second was merged in)
+    # skips this entirely: a "hub" with one child device (or none real
+    # yet) would just be UI noise, not useful grouping.
+    if mlprefix_hex is not None and len(devices) > 1:
+        _register_tank_device(hass, entry, mlprefix_hex, len(devices))
 
-    # Proactively discover and cache this device's own mesh address
-    # BEFORE the coordinator's first refresh, if it's going to need one
-    # (relayed, not this group's gateway) -- runs every time this entry
-    # is set up, which covers both a brand-new device AND every existing
-    # device on every Home Assistant restart, not just first-ever setup.
-    # Avoids the first poll cycle having to pay for both address
-    # discovery and the actual relay read together. A failure here isn't
-    # fatal: it's just treated as "will retry via the coordinator's own
-    # on-demand fallback," not raised.
-    if group.gateway_serial != serial and group.members[serial].mesh_address is None:
-        address = await discover_mesh_address(hass, serial, semaphore)
-        if address is not None:
-            registry.update_mesh_address(pan_id, serial, address)
-        else:
-            _LOGGER.debug(
-                "Could not proactively discover mesh address for %s at setup -- "
-                "will retry on the next poll cycle", serial,
-            )
+    coordinators: dict[str, MobiusDeviceCoordinator] = {}
+    for index, device in enumerate(devices):
+        serial = device[CONF_SERIAL]
+        rssi = _current_rssi(hass, serial)
+        # The FIRST device in CONF_DEVICES is always the one the config
+        # flow actually connected to, to run discover_tank() in the
+        # first place (python-mobius's own discover_tank() always
+        # returns the connected device's own info first in its peers
+        # list -- see its docstring -- and _async_create_tank_entry()
+        # in config_flow.py builds CONF_DEVICES straight from that same
+        # order) -- so it's the one with direct, fresh proof of
+        # reachability, worth preferring as gateway over an untested
+        # peer purely by RSSI (see GatewayRegistry.join()'s own
+        # docstring for prefer_as_gateway's full reasoning). Only
+        # matters for a genuinely brand-new group; harmless no-op
+        # (ignored) for an already-established one, or for an ad-hoc
+        # single-device entry (trivially becomes gateway either way).
+        group = await registry.join(pan_id, serial, rssi, prefer_as_gateway=(index == 0))
 
-    coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
-    await coordinator.async_config_entry_first_refresh()
+        # Proactively discover and cache this device's own mesh address
+        # BEFORE its coordinator's first refresh -- runs every time this
+        # entry is set up, which covers both a brand-new device AND
+        # every existing device on every Home Assistant restart, not
+        # just first-ever setup. Avoids the first poll cycle having to
+        # pay for both address discovery and the actual relay read
+        # together. A failure here isn't fatal: it's just treated as
+        # "will retry via the coordinator's own on-demand fallback," not
+        # raised.
+        #
+        # Deliberately NOT gated on "only if relayed, not this group's
+        # gateway" the way an earlier version of this was -- the new
+        # MeshAddressSensor (see sensor.py) needs this cached for EVERY
+        # device, including the gateway, which otherwise never gets its
+        # own address populated into the registry at all (nothing else
+        # ever calls update_mesh_address() for a group's own gateway,
+        # since relay itself has no need to know the gateway's address).
+        # A real, accepted trade-off: this costs the gateway device an
+        # extra brief connect/disconnect here, separate from the direct
+        # connection its own coordinator will make moments later for its
+        # first real poll -- happens once at setup/restart, not on every
+        # poll cycle, so the redundant connection is bounded, not
+        # ongoing.
+        if group.members[serial].mesh_address is None:
+            address = await discover_mesh_address(hass, serial, semaphore)
+            if address is not None:
+                registry.update_mesh_address(pan_id, serial, address)
+            else:
+                _LOGGER.debug(
+                    "Could not proactively discover mesh address for %s at setup -- "
+                    "will retry on the next poll cycle", serial,
+                )
 
-    entry.runtime_data = MobiusRuntimeData(coordinator=coordinator)
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
+        await coordinator.async_config_entry_first_refresh()
+        coordinators[serial] = coordinator
+
+    entry.runtime_data = MobiusRuntimeData(coordinators=coordinators)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry. If this device was its group's gateway,
-    leaving the registry promotes a replacement (and disconnects the old
-    gateway connection) automatically -- see gateway_registry.leave()."""
+    """Unload a config entry. For each of its devices, leaving the
+    registry promotes a replacement gateway (and disconnects the old
+    gateway connection) automatically if that device was its group's
+    gateway -- see gateway_registry.leave()."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
     if runtime is not None:
         registry: GatewayRegistry | None = hass.data.get(DOMAIN, {}).get("gateway_registry")
         if registry is not None:
-            await registry.leave(runtime.coordinator.pan_id, runtime.coordinator.serial)
+            for coordinator in runtime.coordinators.values():
+                await registry.leave(coordinator.pan_id, coordinator.serial)
 
     return unload_ok

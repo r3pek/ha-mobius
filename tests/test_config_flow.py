@@ -3,7 +3,9 @@ actual hardware during python-mobius development (see its
 documentation/08-manufacturer-data.md)."""
 
 import time
+from unittest.mock import patch, AsyncMock
 
+import pytest
 from bleak.backends.device import BLEDevice
 from homeassistant import config_entries
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -11,7 +13,8 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
+from mobius import Tank, MeshPeer, Model
 
 # Real captured payload for a VorTech MP40QD pump (see python-mobius tests).
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736343935323231303539303139")
@@ -24,8 +27,14 @@ LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
 PUMP_SERIAL = "76495221059019"
 LIGHT_SERIAL = "7V4Z00F143RBED"
 # Decoded pan_id from REAL_PUMP_PAYLOAD/REAL_LIGHT_PAYLOAD above -- both
-# real captures share the same pan_id (same physical tank).
+# real captures share the same pan_id (same physical tank) -- deliberately
+# reused for the multi-device tank tests below, not a coincidence.
 PAN_ID = 0x3D0F
+
+# A confirmed real 8-byte Thread mesh-local prefix (see python-mobius's own
+# NetworkedThreadDevices real-hardware capture) -- used as this tank's
+# CONF_MLPREFIX/unique_id in the tests below.
+MLPREFIX = bytes.fromhex("fd1c5ec780e35c01")
 
 
 def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBleak:
@@ -46,22 +55,69 @@ def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBl
     )
 
 
+def _no_tank():
+    """The common "connected fine, but this device isn't part of any
+    provisioned Thread network" result -- falls back to the ad-hoc,
+    single-device confirm flow."""
+    return Tank(prefix=None, peers=[])
+
+
+def _multi_device_tank():
+    """A genuine 2-device tank -- the pump and light share PAN_ID, so
+    this represents what a real discover_tank() call would find if
+    asked from either one."""
+    return Tank(
+        prefix=MLPREFIX,
+        peers=[
+            MeshPeer(
+                serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+                short_address=0x1234, address=MLPREFIX + bytes.fromhex("000000fffe001234"),
+            ),
+            MeshPeer(
+                serial=LIGHT_SERIAL, model_raw=179, model=Model.RadionXR15wG6Pro,
+                short_address=0x5678, address=MLPREFIX + bytes.fromhex("000000fffe005678"),
+            ),
+        ],
+    )
+
+
+def _mock_tank_discovery(tank_or_none):
+    """Patches discover_tank_for_serial() at its config_flow.py import
+    location -- the actual connection attempt this whole flow now makes
+    before it can show any confirm screen. Every test that reaches
+    async_step_scan_tank() needs this, or it hits a real (test-
+    environment-blocked) socket connection attempt."""
+    return patch(
+        "custom_components.mobius.config_flow.discover_tank_for_serial",
+        AsyncMock(return_value=tank_or_none),
+    )
+
+
 async def test_bluetooth_discovery_creates_entry(hass):
     discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
-    )
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "bluetooth_confirm"
+    with _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
 
-    result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
     assert result2["type"] == FlowResultType.CREATE_ENTRY
-    assert result2["data"][CONF_ADDRESS] == PUMP_ADDRESS
-    # The actual point of adding multi-device/multi-tank gateway grouping:
-    # pan_id must actually be stored in the entry's data, decoded from the
-    # same real captured advertisement, not just serial/address.
+    # The actual point of moving to CONF_DEVICES: an ad-hoc entry still
+    # stores address/serial, just nested under CONF_DEVICES now (one
+    # entry, uniform shape with a real multi-device tank entry) instead
+    # of flat top-level CONF_ADDRESS/CONF_SERIAL keys.
+    assert result2["data"][CONF_DEVICES] == [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}]
+    # pan_id must still be stored -- decoded from the same real captured
+    # advertisement, needed for later merge detection even for an ad-hoc
+    # entry (a second device from the same tank showing up later should
+    # still be able to find and merge into this entry).
     assert result2["data"][CONF_PAN_ID] == PAN_ID
+    # No CONF_MLPREFIX for an ad-hoc entry -- there's no confirmed tank
+    # prefix to store (see config_flow.py's own docstring).
+    assert CONF_MLPREFIX not in result2["data"]
     # The actual point of the serial-based identity fix: unique_id is the
     # serial, not the address.
     assert result2["result"].unique_id == PUMP_SERIAL
@@ -78,10 +134,11 @@ async def test_bluetooth_discovery_creates_entry(hass):
 async def test_bluetooth_discovery_light_title(hass):
     discovery_info = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
-    )
-    result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    with _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert "RadionXR15wG6Pro" in result2["title"]
 
@@ -89,15 +146,16 @@ async def test_bluetooth_discovery_light_title(hass):
 async def test_duplicate_bluetooth_discovery_aborts(hass):
     discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
-    )
-    await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    with _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
 
-    # Same address discovered again should abort, not create a duplicate entry.
-    result2 = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
-    )
+        # Same address discovered again should abort, not create a duplicate entry.
+        result2 = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
     assert result2["type"] == FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
 
@@ -113,29 +171,28 @@ async def test_address_change_is_recognized_as_the_same_device(hass):
     instead.
     """
     original = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=original
-    )
-    await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    with _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=original
+        )
+        await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
 
-    new_address = "F0:0D:BE:EF:CA:FE"  # a different address entirely
-    rediscovered = _make_discovery_info(new_address, REAL_PUMP_PAYLOAD)  # same serial
-    result2 = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=rediscovered
-    )
+        new_address = "F0:0D:BE:EF:CA:FE"  # a different address entirely
+        rediscovered = _make_discovery_info(new_address, REAL_PUMP_PAYLOAD)  # same serial
+        result2 = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=rediscovered
+        )
     assert result2["type"] == FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
 
 
 async def test_manual_setup_also_uses_serial_for_unique_id(hass):
-    from unittest.mock import patch
-
     discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
 
     with patch(
         "custom_components.mobius.config_flow.async_discovered_service_info",
         return_value=[discovery_info],
-    ):
+    ), _mock_tank_discovery(_no_tank()):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
@@ -144,10 +201,11 @@ async def test_manual_setup_also_uses_serial_for_unique_id(hass):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_ADDRESS: PUMP_ADDRESS}
         )
+        result3 = await hass.config_entries.flow.async_configure(result2["flow_id"], user_input={})
 
-    assert result2["type"] == FlowResultType.CREATE_ENTRY
-    assert result2["result"].unique_id == PUMP_SERIAL
-    assert result2["data"][CONF_PAN_ID] == PAN_ID
+    assert result3["type"] == FlowResultType.CREATE_ENTRY
+    assert result3["result"].unique_id == PUMP_SERIAL
+    assert result3["data"][CONF_PAN_ID] == PAN_ID
 
 
 async def test_bluetooth_discovery_aborts_without_manufacturer_data(hass):
@@ -158,8 +216,6 @@ async def test_bluetooth_discovery_aborts_without_manufacturer_data(hass):
     address-based identity that could break later if the address changes
     before a serial is ever learned.
     """
-    from unittest.mock import patch
-
     incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")
 
     with patch(
@@ -180,8 +236,6 @@ async def test_manual_setup_excludes_unidentifiable_devices(hass):
     """A device whose manufacturer data can't be parsed shouldn't even be
     offered in the manual-setup dropdown, rather than being offered and
     then failing on selection."""
-    from unittest.mock import patch
-
     good_discovery = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
     unidentifiable_discovery = _make_discovery_info("FF:FF:FF:FF:FF:FF", b"")
 
@@ -207,15 +261,14 @@ async def test_manual_setup_excludes_already_configured_devices(hass):
     SERIAL numbers, not addresses. Comparing a MAC against a set of
     serials never matches, so an already-configured device kept showing
     up in the dropdown as if it were new. Confirm it's actually excluded
-    now.
+    now -- against the current CONF_DEVICES-based entry shape.
     """
     entry = MockConfigEntry(
-        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}]},
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
-
-    from unittest.mock import patch
 
     already_configured = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
     new_device = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)
@@ -250,8 +303,6 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
     merge completed), showing a generic "Mobius device (address)" title
     instead of the real model. Confirms the confirm-step refresh picks up
     fuller data once it's available in HA's Bluetooth manager cache."""
-    from unittest.mock import patch
-
     incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")  # no usable payload yet
     # Real captured payload becomes available by the time we check again.
     complete_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
@@ -259,7 +310,7 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
     with patch(
         "custom_components.mobius.config_flow.async_last_service_info",
         return_value=complete_info,
-    ):
+    ), _mock_tank_discovery(_no_tank()):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=incomplete_info
         )
@@ -270,3 +321,249 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
         result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
         assert result2["type"] == FlowResultType.CREATE_ENTRY
         assert "VorTechMP40wG3QD" in result2["title"]
+
+
+# --------------------------------------------------------------------------
+# Tank-aware discovery -- see config_flow.py's own module docstring for
+# the full merge/tank/ad-hoc decision tree these tests confirm.
+# --------------------------------------------------------------------------
+
+async def test_bluetooth_discovery_of_tank_shows_tank_confirm(hass):
+    """The core new behavior: discovering more than one device on the
+    same Thread mesh shows ONE "add tank with N devices" confirm, not a
+    single-device confirm."""
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(_multi_device_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "tank_confirm"
+    assert result["description_placeholders"]["count"] == "2"
+
+
+async def test_tank_confirm_creates_multi_device_entry(hass):
+    """Confirming a tank creates ONE entry with every discovered peer's
+    serial in CONF_DEVICES, CONF_MLPREFIX set to the tank's real prefix,
+    and unique_id based on that prefix (not any single device's serial --
+    a tank entry doesn't "belong" to whichever device happened to be
+    discovered first)."""
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(_multi_device_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["data"][CONF_PAN_ID] == PAN_ID
+    assert result2["data"][CONF_MLPREFIX] == MLPREFIX.hex()
+    stored_serials = {d[CONF_SERIAL] for d in result2["data"][CONF_DEVICES]}
+    assert stored_serials == {PUMP_SERIAL, LIGHT_SERIAL}
+    assert result2["result"].unique_id == MLPREFIX.hex()
+    assert result2["title"] == "Mobius Tank (2 devices)"
+
+
+async def test_tank_confirm_stores_age_per_peer_when_present(hass):
+    """Each peer's own discovery-time age snapshot (see const.py's own
+    CONF_AGE docstring) is stored alongside its serial when the
+    underlying MeshPeer actually had one -- confirms the age isn't
+    dropped, and isn't accidentally shared/mixed up between peers."""
+    tank_with_ages = Tank(
+        prefix=MLPREFIX,
+        peers=[
+            MeshPeer(
+                serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+                short_address=0x1234, address=MLPREFIX + bytes.fromhex("000000fffe001234"),
+                age=373,
+            ),
+            MeshPeer(
+                serial=LIGHT_SERIAL, model_raw=179, model=Model.RadionXR15wG6Pro,
+                short_address=0x5678, address=MLPREFIX + bytes.fromhex("000000fffe005678"),
+                age=8490,
+            ),
+        ],
+    )
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(tank_with_ages):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+    ages_by_serial = {d[CONF_SERIAL]: d.get(CONF_AGE) for d in result2["data"][CONF_DEVICES]}
+    assert ages_by_serial[PUMP_SERIAL] == 373
+    assert ages_by_serial[LIGHT_SERIAL] == 8490
+
+
+async def test_single_peer_tank_falls_back_to_adhoc(hass):
+    """A device connected fine and reported a real, valid tank prefix,
+    but is the ONLY device on it -- functionally identical to "no tank"
+    from the user's perspective (no via_device hub needed for just one
+    device), so this falls back to the plain single-device confirm, not
+    tank_confirm."""
+    solo_tank = Tank(
+        prefix=MLPREFIX,
+        peers=[MeshPeer(
+            serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+            short_address=0x1234, address=MLPREFIX + bytes.fromhex("000000fffe001234"),
+        )],
+    )
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(solo_tank):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "bluetooth_confirm"
+
+
+async def test_tank_discovery_connection_failure_falls_back_to_adhoc(hass):
+    """discover_tank_for_serial() returning None (couldn't even reach the
+    device right now, distinct from Tank(prefix=None, ...) -- see its own
+    docstring) must still let setup proceed as ad-hoc, not get stuck or
+    error out just because the tank-discovery connection attempt itself
+    failed."""
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(None):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "bluetooth_confirm"
+
+
+async def test_merge_case_no_prompt_and_reloads_existing_entry(hass):
+    """The actual point of the merge design: a device belonging to a
+    pan_id that already has a configured tank entry gets silently added
+    to it (no prompt at all) and that entry gets reloaded -- confirmed
+    both that the flow itself aborts cleanly, and that the entry's own
+    data was actually updated with the new device."""
+    existing_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX.hex(),
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}],
+        },
+        unique_id=MLPREFIX.hex(),
+    )
+    existing_entry.add_to_hass(hass)
+
+    new_device_discovery = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)  # same PAN_ID
+
+    with patch(
+        "custom_components.mobius.config_flow.discover_tank_for_serial",
+        AsyncMock(side_effect=AssertionError("merge case must not attempt tank discovery")),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=new_device_discovery
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "merged_into_tank"
+
+    # The existing entry's own data was actually updated with the new device.
+    updated_entry = hass.config_entries.async_get_entry(existing_entry.entry_id)
+    stored_serials = {d[CONF_SERIAL] for d in updated_entry.data[CONF_DEVICES]}
+    assert stored_serials == {PUMP_SERIAL, LIGHT_SERIAL}
+
+
+async def test_already_configured_serial_does_not_trigger_merge(hass):
+    """A device whose serial is ALREADY in an entry's device list must
+    abort as already_configured, not attempt (or need) a merge --
+    confirms the "already configured" check runs before, and takes
+    priority over, the pan_id-based merge check."""
+    existing_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX.hex(),
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}],
+        },
+        unique_id=MLPREFIX.hex(),
+    )
+    existing_entry.add_to_hass(hass)
+
+    rediscovered = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)  # already-configured serial
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=rediscovered
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+async def test_manual_setup_of_device_belonging_to_existing_tank_also_merges(hass):
+    """The manual (async_step_user) path needs the same merge check as
+    automatic discovery -- a device visible in the dropdown (its own
+    serial isn't configured yet) can still belong to an already-tracked
+    tank if a DIFFERENT device from that same tank was the one that
+    originally triggered its automatic discovery."""
+    existing_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX.hex(),
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}],
+        },
+        unique_id=MLPREFIX.hex(),
+    )
+    existing_entry.add_to_hass(hass)
+
+    new_device_discovery = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)  # same PAN_ID
+
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        return_value=[new_device_discovery],
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_ADDRESS: LIGHT_ADDRESS}
+        )
+
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "merged_into_tank"
+    updated_entry = hass.config_entries.async_get_entry(existing_entry.entry_id)
+    stored_serials = {d[CONF_SERIAL] for d in updated_entry.data[CONF_DEVICES]}
+    assert stored_serials == {PUMP_SERIAL, LIGHT_SERIAL}
+
+
+async def test_concurrent_discovery_of_same_new_tank_is_deduplicated(hass):
+    """Two devices from the same brand-new (not-yet-configured) tank both
+    triggering async_step_bluetooth() must not produce two competing
+    "add tank" prompts -- the second flow aborts against the first one's
+    still-in-progress provisional unique_id. Tested by parking the first
+    flow at its confirm form (not yet submitted, but already registered
+    as "in progress" under its provisional pan-scoped unique_id) rather
+    than racing two genuinely concurrent tasks against a hanging mock --
+    the actual mechanism under test (async_set_unique_id's own
+    raise_on_progress=True) only cares that a flow is currently
+    in-progress when the second one starts, not the precise interleaving
+    that got it there."""
+    pump_discovery = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+    light_discovery = _make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)
+
+    with _mock_tank_discovery(_multi_device_tank()):
+        result1 = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=pump_discovery
+        )
+        # Parked at the tank_confirm form -- not yet submitted, but this
+        # flow instance is now genuinely "in progress" under its
+        # provisional pan-scoped unique_id.
+        assert result1["type"] == FlowResultType.FORM
+        assert result1["step_id"] == "tank_confirm"
+
+        result2 = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=light_discovery
+        )
+
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "already_in_progress"

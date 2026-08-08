@@ -4,6 +4,9 @@
       "bluetooth_confirm": {
         "description": "Do you want to set up {name}?"
       },
+      "tank_confirm": {
+        "description": "Found a tank with {count} devices ({name}). Do you want to add all of them?"
+      },
       "user": {
         "data": {
           "address": "Device"
@@ -13,6 +16,7 @@
     "abort": {
       "no_devices_found": "No unconfigured Mobius devices found.",
       "already_configured": "Device is already configured",
+      "merged_into_tank": "This device was automatically added to a tank you already have configured -- no further action needed.",
       "no_manufacturer_data": "This device's Bluetooth advertisement didn't include its serial number yet, which is needed to set it up reliably. This is normal and temporary -- Home Assistant will detect it again automatically within a few seconds once a fuller advertisement comes in, with no action needed from you. If it keeps happening, try moving the device closer or power-cycling it."
     }
   },
@@ -50,6 +54,15 @@
       },
       "hardware_revision": {
         "name": "Hardware revision"
+      },
+      "mesh_address": {
+        "name": "Mesh address"
+      },
+      "discovery_age": {
+        "name": "Age (at discovery)"
+      },
+      "mesh_prefix": {
+        "name": "Mesh prefix"
       }
     }
   }

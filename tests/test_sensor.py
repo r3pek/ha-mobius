@@ -14,9 +14,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID
+from custom_components.mobius import tank_device_identifier
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
 
 PAN_ID = 0x3D0F
+MLPREFIX_HEX = "fd1c5ec780e35c01"
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
 PUMP_SERIAL = "76517731952041"
 LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
@@ -60,6 +62,9 @@ def _fake_pump_device():
     device.get_hardware_info = AsyncMock(return_value={
         "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
     })
+    device.get_own_mesh_address = AsyncMock(
+        return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")
+    )
     return device
 
 
@@ -107,61 +112,75 @@ def _fake_light_device():
     calibration.lower_bound = None
     calibration.upper_bound = None
     device.get_calibration_info = AsyncMock(return_value=calibration)
+    device.get_own_mesh_address = AsyncMock(
+        return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe005678")
+    )
     return device
 
 
 async def test_pump_entry_setup_creates_expected_sensors(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
-        unique_id=PUMP_ADDRESS,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
 
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
     assert entry.state.value == "loaded"
 
-    speed = hass.states.get("sensor.mp40qd_right_tank_3d0f_motor_speed")
+    # No "_tank_3d0f" suffix in the entity ID anymore -- the old "—
+    # Tank {pan_id}" name suffix was removed once via_device grouping
+    # (see __init__.py's tank_device_identifier()) took over showing
+    # which tank a device belongs to visually, rather than baking it
+    # into every entity's own name/ID.
+    speed = hass.states.get("sensor.mp40qd_right_motor_speed")
     assert speed is not None
     assert speed.state == "44.7"
     assert speed.attributes["unit_of_measurement"] == "%"
     assert speed.attributes["raw_signed_value"] == 447
     assert speed.attributes["reverse_rotation"] is False
 
-    flow = hass.states.get("sensor.mp40qd_right_tank_3d0f_estimated_flow")
+    flow = hass.states.get("sensor.mp40qd_right_estimated_flow")
     assert flow is not None
     assert flow.state == "2272"
     assert flow.attributes["unit_of_measurement"] == "gal/h"
 
-    mode = hass.states.get("sensor.mp40qd_right_tank_3d0f_current_mode")
+    mode = hass.states.get("sensor.mp40qd_right_current_mode")
     assert mode is not None
     assert mode.state == "TidalSwell"
 
-    support = hass.states.get("sensor.mp40qd_right_tank_3d0f_support_tier")
+    support = hass.states.get("sensor.mp40qd_right_support_tier")
     assert support is not None
     assert support.state == "pump"
 
-    point_count = hass.states.get("sensor.mp40qd_right_tank_3d0f_schedule_points")
+    point_count = hass.states.get("sensor.mp40qd_right_schedule_points")
     assert point_count is not None
     assert point_count.state == "11"
 
     # The actual point of these two: full breakdown available as
     # attributes, not just the single headline value already shown on
     # the device card.
-    firmware = hass.states.get("sensor.mp40qd_right_tank_3d0f_firmware_version")
+    firmware = hass.states.get("sensor.mp40qd_right_firmware_version")
     assert firmware is not None
     assert firmware.state == "2.1.5"  # Product OS -- no "Firmware" label in this pump's fixture
     assert firmware.attributes["Radio"] == "4.0.21"
     assert firmware.attributes["Radio Bootloader"] == "1.2"
     assert firmware.attributes["Product Bootloader"] == "1.0"
 
-    hardware = hass.states.get("sensor.mp40qd_right_tank_3d0f_hardware_revision")
+    hardware = hass.states.get("sensor.mp40qd_right_hardware_revision")
     assert hardware is not None
     assert hardware.state == "2"
     assert hardware.attributes["Revision"] == 2
@@ -173,22 +192,44 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert hardware.attributes["ProductType"] == "VorTech"
     assert hardware.attributes["RadioType"] == "QCA4020"
 
+    # New: the mesh address sensor, populated via the gateway registry's
+    # own cached MemberState.mesh_address -- see __init__.py's own
+    # async_setup_entry() docstring for why the gateway device now gets
+    # this proactively discovered too, not just relayed ones.
+    mesh_address = hass.states.get("sensor.mp40qd_right_mesh_address")
+    assert mesh_address is not None
+    assert mesh_address.state == "fd1c5ec780e35c01000000fffe001234"
+
+    # No discovery-age sensor -- this is an ad-hoc entry (no CONF_AGE on
+    # its device record), which never successfully calls discover_tank()
+    # in the first place.
+    assert hass.states.get("sensor.mp40qd_right_age_at_discovery") is None
+
     # The actual new behavior: sw_version comes from the confirmed "Product
     # OS" label, and pumps don't support calibration (get_calibration_info()
     # returns None in the app's own confirmed real-hardware behavior), so
     # no calibration sensor should be created.
     device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_ADDRESS)})
+    # SERIAL-based identifiers now, not address-based -- a real, necessary
+    # fix, not incidental to tank-aware entries (see sensor.py's own
+    # _device_info() docstring for why).
+    device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_SERIAL)})
     assert device is not None
     assert device.sw_version == "2.1.5"
-    assert hass.states.get("sensor.mp40qd_right_tank_3d0f_calibration") is None
+    assert hass.states.get("sensor.mp40qd_right_calibration") is None
+
+    # No synthetic tank device for a single, ad-hoc entry.
+    assert device.via_device_id is None
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: LIGHT_ADDRESS, CONF_SERIAL: LIGHT_SERIAL, CONF_PAN_ID: PAN_ID},
-        unique_id=LIGHT_ADDRESS,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: LIGHT_SERIAL, CONF_ADDRESS: LIGHT_ADDRESS}],
+        },
+        unique_id=LIGHT_SERIAL,
     )
     entry.add_to_hass(hass)
 
@@ -201,15 +242,15 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 
     assert entry.state.value == "loaded"
 
-    royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_royalblue_intensity")
+    royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_royalblue_intensity")
     assert royal_blue is not None
     assert royal_blue.state == "100"  # 1000 permille / 10 = 100% (whole number, not 100.0)
 
-    cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_coolwhite_intensity")
+    cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_coolwhite_intensity")
     assert cool_white is not None
     assert cool_white.state == "24"  # 240 permille / 10 = 24% (whole number, not 24.0)
 
-    support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_support_tier")
+    support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_support_tier")
     assert support is not None
     assert support.state == "light"
 
@@ -221,11 +262,11 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     # created, since calibration is confirmed real/populated for lights
     # (unlike pumps).
     device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_ADDRESS)})
+    device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_SERIAL)})
     assert device is not None
     assert device.sw_version == "1.5.103"
 
-    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_calibration")
+    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_calibration")
     assert calibration is not None
     assert calibration.state == "True"
     assert "lower_bound" not in calibration.attributes  # fixture sets it to None -> omitted
@@ -235,13 +276,13 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     # at all) -- confirms the full breakdown sensor surfaces the
     # fallback-derived value too, plus every other reported component as
     # an attribute.
-    firmware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_firmware_version")
+    firmware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_firmware_version")
     assert firmware is not None
     assert firmware.state == "1.5.103"
     assert firmware.attributes["Filesystem"] == "1.1.0"
     assert firmware.attributes["WLAN"] == "3.1.0"
 
-    hardware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_tank_3d0f_hardware_revision")
+    hardware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_hardware_revision")
     assert hardware is not None
     assert hardware.state == "1"
 
@@ -249,8 +290,11 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 async def test_entry_unload_removes_entities_and_disconnects(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL, CONF_PAN_ID: PAN_ID},
-        unique_id=PUMP_ADDRESS,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
 
@@ -264,7 +308,7 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        assert hass.states.get("sensor.mp40qd_right_tank_3d0f_motor_speed") is not None
+        assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
 
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -277,6 +321,75 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
     mock_disconnect.assert_awaited_once()
 
 
+async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
+    """End-to-end: a genuine multi-device tank entry ends up with both
+    real devices' own DeviceInfo pointing via_device at the synthetic
+    tank device, and a MeshPrefixSensor attached to that tank device
+    itself -- the actual "one hub, N child devices" UI grouping this
+    whole feature was designed against."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [
+                {CONF_SERIAL: PUMP_SERIAL, CONF_AGE: 373},
+                {CONF_SERIAL: LIGHT_SERIAL, CONF_AGE: 8490},
+            ],
+        },
+        unique_id=MLPREFIX_HEX,
+        title="Mobius Tank (2 devices)",
+    )
+    entry.add_to_hass(hass)
+
+    def _fake_connect(*args, **kwargs):
+        # Whichever serial this connection is for, return the matching
+        # fixture -- both devices' coordinators share this same mocked
+        # ensure_connected, so it needs to distinguish between them.
+        return _fake_pump_device()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(side_effect=_fake_connect),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice",
+        return_value=_fake_pump_device(),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state.value == "loaded"
+
+    device_registry = dr.async_get(hass)
+    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX)})
+    assert tank_device is not None
+
+    pump_device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_SERIAL)})
+    light_device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_SERIAL)})
+    assert pump_device is not None
+    assert light_device is not None
+    assert pump_device.via_device_id == tank_device.id
+    assert light_device.via_device_id == tank_device.id
+
+    # Both devices got their own discovery-age sensor, from their own
+    # CONF_AGE entry -- confirms the per-device age doesn't get mixed up
+    # between the two.
+    pump_age = hass.states.get("sensor.mp40qd_right_age_at_discovery")
+    assert pump_age is not None
+    assert pump_age.state == "373"
+
+    # The prefix sensor is on the tank device, not any per-device entity
+    # -- shared, tank-level data.
+    prefix_states = [
+        s for s in hass.states.async_all("sensor")
+        if s.attributes.get("device_class") is None and "mesh_prefix" in s.entity_id
+    ]
+    assert len(prefix_states) == 1
+    assert prefix_states[0].state == MLPREFIX_HEX
+
+
 def test_identical_model_devices_get_distinct_names_via_serial():
     """The actual scenario this was built for: two identical-model devices
     (e.g. two XR15 lights) with blank configured names must not collide on
@@ -286,13 +399,15 @@ def test_identical_model_devices_get_distinct_names_via_serial():
     entries in one test)."""
     from custom_components.mobius.sensor import _device_info
 
-    status_a = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
-                "serial": "7V4Z00F149RBF3"}
-    status_b = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
-                "serial": "7V4Z00F143RBED"}
+    status_a = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine"}
+    status_b = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine"}
 
-    info_a = _device_info("84:25:3F:AF:F0:A2", status_a)
-    info_b = _device_info("84:25:3F:AF:F0:C2", status_b)
+    # serial is now the identifying parameter, not read from the status
+    # dict -- see _device_info()'s own docstring for why (a tank peer
+    # has no stored address, so serial had to become the one thing every
+    # device is guaranteed to provide).
+    info_a = _device_info("7V4Z00F149RBF3", status_a)
+    info_b = _device_info("7V4Z00F143RBED", status_b)
 
     assert info_a["name"] != info_b["name"]
     assert "7V4Z00F149RBF3" in info_a["name"]

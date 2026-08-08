@@ -309,3 +309,52 @@ class TestCrossGroupIsolation:
 
         assert registry.group(PAN_A).members["shared-name"].rssi == -50
         assert registry.group(PAN_B).members["shared-name"].rssi == -90
+
+
+class TestPreferAsGateway:
+    """prefer_as_gateway=True -- the hint used by the tank config flow,
+    which already proved a specific device is reachable (it just
+    connected to it to run discover_tank()) and shouldn't have to wait
+    out the normal settle-window election to find that out again."""
+
+    @pytest.mark.asyncio
+    async def test_immediately_assigns_gateway_no_settle_wait(self, registry):
+        # No sleep/settle window involved at all -- if this actually
+        # waited out election_settle_seconds, a badly-broken version of
+        # this feature would still eventually return the right answer,
+        # so the real point of this test is checking it does NOT go
+        # through _elect_initial_gateway()'s asyncio.sleep() at all.
+        group = await registry.join(PAN_A, "preferred", rssi=-80, prefer_as_gateway=True)
+        assert group.gateway_serial == "preferred"
+        assert group.gateway_connection is not None
+
+    @pytest.mark.asyncio
+    async def test_preferred_wins_even_with_worse_rssi_than_a_concurrent_joiner(self, registry):
+        """The whole point: skips RSSI comparison entirely for a
+        brand-new group, rather than possibly losing an election to a
+        stronger-signal-but-never-actually-connected-to member."""
+        results = await asyncio.gather(
+            registry.join(PAN_A, "preferred", rssi=-90, prefer_as_gateway=True),
+            registry.join(PAN_A, "untested-but-strong-signal", rssi=-30),
+        )
+        for group in results:
+            assert group.gateway_serial == "preferred"
+
+    @pytest.mark.asyncio
+    async def test_does_not_displace_an_already_established_gateway(self, registry):
+        """An existing, working gateway is never displaced just because
+        a later joiner asks to be preferred -- matches the same
+        reasoning GATEWAY_FAILURE_THRESHOLD's own docstring gives for
+        why signal strength alone doesn't churn an established
+        gateway."""
+        await registry.join(PAN_A, "original-gateway", rssi=-70)
+        group = await registry.join(PAN_A, "late-preferred", rssi=-10, prefer_as_gateway=True)
+        assert group.gateway_serial == "original-gateway"
+        assert "late-preferred" in group.members  # still joined as a regular member
+
+    @pytest.mark.asyncio
+    async def test_prefer_as_gateway_false_by_default_matches_prior_behavior(self, registry):
+        """Confirms the parameter is opt-in, not a default-on behavior
+        change for every existing join() call site."""
+        group = await registry.join(PAN_A, "solo", rssi=-70)
+        assert group.gateway_serial == "solo"  # still elected normally, no regression

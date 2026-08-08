@@ -21,10 +21,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
-    discover_mesh_address,
+    discover_mesh_address, discover_tank_for_serial,
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
-from mobius import PrimitiveType
+from mobius import PrimitiveType, Tank, MeshPeer, Model
 
 PUMP_SERIAL = "76517731952041"
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
@@ -522,7 +522,7 @@ async def test_coordinator_syncs_device_registry_sw_and_hw_version_on_change(has
     device_registry = dr.async_get(hass)
     device_entry = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, PUMP_ADDRESS)},
+        identifiers={(DOMAIN, PUMP_SERIAL)},
         sw_version="2.1.5",  # the OLD versions
         hw_version="1",
     )
@@ -561,7 +561,7 @@ async def test_coordinator_does_not_touch_registry_when_versions_unchanged(hass)
     device_registry = dr.async_get(hass)
     device_entry = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, PUMP_ADDRESS)},
+        identifiers={(DOMAIN, PUMP_SERIAL)},
         sw_version="2.1.5",
         hw_version="2",
     )
@@ -792,3 +792,133 @@ class TestDiscoverMeshAddressSemaphore:
         # this exact semaphore object -- confirms it's genuinely shared,
         # not a separate equally-sized-but-different instance.
         assert group.gateway_connection._semaphore is semaphore
+
+
+# --------------------------------------------------------------------------
+# discover_tank_for_serial() -- the config flow's own "is this device
+# part of a multi-device tank" call. Same connection-resolution pattern
+# as discover_mesh_address() above (including sharing the connection
+# semaphore for the same reasons), just calling
+# mobius.discovery.discover_tank() once connected instead.
+# --------------------------------------------------------------------------
+
+class TestDiscoverTankForSerial:
+    async def test_finds_device_and_returns_its_tank(self, hass):
+        semaphore = asyncio.Semaphore(1)
+        expected_tank = Tank(
+            prefix=bytes.fromhex("fd11223344556677"),
+            peers=[MeshPeer(
+                serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+                short_address=0x1234, address=bytes.fromhex("fd1122334455667700000000000012"),
+            )],
+        )
+
+        class FakeMobiusDevice:
+            def __init__(self, ble_device, connect_timeout=None):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        discovered = [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=discovered,
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.MobiusDevice", FakeMobiusDevice,
+        ), patch(
+            "custom_components.mobius.coordinator.discover_tank",
+            AsyncMock(return_value=expected_tank),
+        ):
+            result = await discover_tank_for_serial(hass, PUMP_SERIAL, semaphore)
+
+        assert result is expected_tank
+
+    async def test_returns_none_if_device_not_currently_advertising(self, hass):
+        """Distinguishable from discover_tank()'s own Tank(prefix=None,
+        peers=[]) -- this None specifically means "couldn't even find/
+        reach the device right now," not "reached it, but it has no
+        tank." Callers must not conflate the two."""
+        semaphore = asyncio.Semaphore(1)
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=[],
+        ):
+            result = await discover_tank_for_serial(hass, PUMP_SERIAL, semaphore)
+
+        assert result is None
+
+    async def test_returns_none_on_connection_failure_rather_than_raising(self, hass):
+        semaphore = asyncio.Semaphore(1)
+
+        class FailingMobiusDevice:
+            def __init__(self, ble_device, connect_timeout=None):
+                pass
+
+            async def __aenter__(self):
+                raise IOError("could not connect")
+
+        discovered = [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=discovered,
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.MobiusDevice", FailingMobiusDevice,
+        ):
+            result = await discover_tank_for_serial(hass, PUMP_SERIAL, semaphore)
+
+        assert result is None
+
+    async def test_shares_the_connection_semaphore(self, hass):
+        """Same real-world-confirmed reasoning as
+        TestDiscoverMeshAddressSemaphore above -- this connects
+        independently of any gateway connection, so it must be throttled
+        by the same shared semaphore or it can exceed the real adapter's
+        actual concurrent-connection capacity."""
+        semaphore = asyncio.Semaphore(1)
+        concurrent_count = {"current": 0, "max_seen": 0}
+
+        class FakeMobiusDevice:
+            def __init__(self, ble_device, connect_timeout=None):
+                pass
+
+            async def __aenter__(self):
+                concurrent_count["current"] += 1
+                concurrent_count["max_seen"] = max(concurrent_count["max_seen"], concurrent_count["current"])
+                await asyncio.sleep(0.05)
+                return self
+
+            async def __aexit__(self, *args):
+                concurrent_count["current"] -= 1
+
+        discovered = [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=discovered,
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.MobiusDevice", FakeMobiusDevice,
+        ), patch(
+            "custom_components.mobius.coordinator.discover_tank",
+            AsyncMock(return_value=Tank(prefix=None, peers=[])),
+        ):
+            await asyncio.gather(*[
+                discover_tank_for_serial(hass, PUMP_SERIAL, semaphore) for _ in range(4)
+            ])
+
+        assert concurrent_count["max_seen"] == 1

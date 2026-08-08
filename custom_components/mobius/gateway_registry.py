@@ -2,7 +2,8 @@
 Shared per-pan_id gateway registry.
 
 Multiple physical devices sharing the same pan_id (Thread mesh/"tank",
-confirmed via Tank/CommGroup in the decompiled app -- see python-mobius's
+confirmed via reverse engineering the app's own tank-grouping model --
+see python-mobius's
 documentation/09-thread-coap-relay.md) share ONE physical BLE connection
 rather than each holding their own. One member of the group is the
 "gateway" (owns a real MobiusConnectionManager, an actual BLE
@@ -127,20 +128,42 @@ class GatewayRegistry:
         removed after its last member left)."""
         return self._groups.get(pan_id)
 
-    async def join(self, pan_id: int, serial: str, rssi: Optional[int] = None) -> PanGroup:
+    async def join(
+        self, pan_id: int, serial: str, rssi: Optional[int] = None,
+        prefer_as_gateway: bool = False,
+    ) -> PanGroup:
         """
         Registers `serial` as a member of `pan_id`'s group, creating the
         group if it doesn't exist yet. Always returns a group with
         gateway_serial/gateway_connection populated -- waits for
         election to complete if this call triggered (or arrived during)
         a brand-new group's settle window.
+
+        `prefer_as_gateway`: set when the caller already has direct,
+        recent proof this specific device is reachable (e.g. the config
+        flow just connected to it to run discover_tank()) -- skips the
+        normal RSSI-based settle-window election entirely for a
+        brand-new group and assigns this serial gateway immediately,
+        rather than waiting GATEWAY_ELECTION_SETTLE_SECONDS to maybe
+        pick a different, equally-untested member by RSSI alone. Only
+        has any effect on a genuinely brand-new group (gateway_serial is
+        still None and no election is already in flight) -- a join()
+        for an already-established group ignores this, since an
+        existing working gateway is never displaced just because a
+        later joiner asks to be preferred (same reasoning
+        GATEWAY_FAILURE_THRESHOLD's own docstring gives for why
+        signal-strength alone doesn't churn an established gateway).
         """
         group = self._group_for(pan_id)
         async with group.lock:
             group.members[serial] = MemberState(serial=serial, rssi=rssi)
             if group.gateway_serial is None and not group._electing:
-                group._electing = True
-                asyncio.ensure_future(self._elect_initial_gateway(group))
+                if prefer_as_gateway:
+                    self._assign_gateway(group, serial)
+                    group._gateway_elected.set()
+                else:
+                    group._electing = True
+                    asyncio.ensure_future(self._elect_initial_gateway(group))
 
         if not group._gateway_elected.is_set():
             await group._gateway_elected.wait()
