@@ -5,7 +5,10 @@
         "description": "Do you want to set up {name}?"
       },
       "tank_confirm": {
-        "description": "Found a tank with {count} devices ({name}). Do you want to add all of them?"
+        "description": "Found {count} devices on this tank:\n\n{devices}",
+        "data": {
+          "name": "Name"
+        }
       },
       "user": {
         "data": {

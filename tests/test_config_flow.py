@@ -9,7 +9,7 @@ import pytest
 from bleak.backends.device import BLEDevice
 from homeassistant import config_entries
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -331,7 +331,8 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
 async def test_bluetooth_discovery_of_tank_shows_tank_confirm(hass):
     """The core new behavior: discovering more than one device on the
     same Thread mesh shows ONE "add tank with N devices" confirm, not a
-    single-device confirm."""
+    single-device confirm -- listing the actual devices found, not just
+    a bare count."""
     discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
 
     with _mock_tank_discovery(_multi_device_tank()):
@@ -342,6 +343,35 @@ async def test_bluetooth_discovery_of_tank_shows_tank_confirm(hass):
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "tank_confirm"
     assert result["description_placeholders"]["count"] == "2"
+    # The actual point of this fix: the real devices found are listed,
+    # not just asserted as a bare count.
+    devices_text = result["description_placeholders"]["devices"]
+    assert PUMP_SERIAL in devices_text
+    assert LIGHT_SERIAL in devices_text
+    assert "VorTechMP40wG3QD" in devices_text
+    assert "RadionXR15wG6Pro" in devices_text
+    # The form itself offers a name field, pre-filled with a suggested
+    # default -- not a bare confirm-only Yes/No.
+    name_marker = next(k for k in result["data_schema"].schema if k == CONF_NAME)
+    assert name_marker.default() == "Mobius Tank (2 devices)"
+
+
+async def test_tank_confirm_uses_the_typed_name_as_the_entry_title(hass):
+    """The actual point of adding a name field: a custom name typed on
+    the tank_confirm form becomes the entry's own title, not always the
+    auto-generated "Mobius Tank (N devices)" default."""
+    discovery_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+
+    with _mock_tank_discovery(_multi_device_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_NAME: "Living Room Reef"}
+        )
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["title"] == "Living Room Reef"
 
 
 async def test_tank_confirm_creates_multi_device_entry(hass):

@@ -7,6 +7,8 @@
   bigger setup and offers to add every device on that tank at once.
   Devices in the same tank are grouped together under one hub in the
   device list.
+- The "add tank" screen now lists the actual devices found, and lets
+  you name the tank right there.
 - A newly found device that belongs to a tank you've already set up
   gets added to it automatically -- no need to set it up separately.
 - Added Mesh address, Age (at discovery), and Mesh prefix diagnostic

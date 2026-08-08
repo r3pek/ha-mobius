@@ -52,7 +52,7 @@ from homeassistant.components.bluetooth import (
     async_last_service_info,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
@@ -105,10 +105,25 @@ def _title_for_tank(tank: Tank) -> str:
     """A multi-device tank entry's default title -- matches the "one
     integration entry = one hub with N child devices" grouping this is
     all in service of (the LG ThinQ-style UI reference this whole
-    feature was designed against). Renameable afterward like any other
-    entry/device title -- this is just the sensible starting point, not
-    meant to be the permanent name."""
+    feature was designed against). Just the SUGGESTED starting point,
+    pre-filled but editable on the tank_confirm form itself (see
+    async_step_tank_confirm()) -- not meant to be the only chance to
+    name it, but there's no reason to make picking a real name wait
+    until after setup either."""
     return f"Mobius Tank ({len(tank.peers)} devices)"
+
+
+def _device_list_for_display(tank: Tank) -> str:
+    """A human-readable, one-line-per-device listing for the
+    tank_confirm form's own description -- so "found a tank" doesn't
+    just assert a device count without showing what was actually found.
+    Matches _title_for()'s own "{model} ({serial})" format for a single
+    device, for consistency between the two confirm screens."""
+    lines = []
+    for peer in tank.peers:
+        model_name = peer.model.name if peer.model else f"unknown model ({peer.model_raw})"
+        lines.append(f"- {model_name} ({peer.serial})")
+    return "\n".join(lines)
 
 
 def _find_entry_containing_serial(hass: HomeAssistant, serial: str) -> ConfigEntry | None:
@@ -248,7 +263,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if tank is not None and tank.prefix is not None and len(tank.peers) > 1:
             self.context["title_placeholders"] = {
                 "count": str(len(tank.peers)),
-                "name": _title_for_tank(tank),
+                "devices": _device_list_for_display(tank),
             }
             return await self.async_step_tank_confirm()
 
@@ -288,7 +303,9 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_tank_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Confirm a multi-device tank before creating its entry."""
+        """Confirm a multi-device tank before creating its entry --
+        lets the tank be named right here, rather than only via a
+        separate rename afterward."""
         assert self._discovered_tank is not None
         if user_input is not None:
             # Overwrites the provisional "pan-{pan_id}" dedup ID from
@@ -300,11 +317,15 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # _find_entry_containing_serial()/_find_entry_for_pan_id().
             await self.async_set_unique_id(self._discovered_tank.prefix.hex())
             self._abort_if_unique_id_configured()
-            return self._async_create_tank_entry(self._discovered_tank)
+            return self._async_create_tank_entry(
+                self._discovered_tank, user_input[CONF_NAME]
+            )
 
-        self._set_confirm_only()
         return self.async_show_form(
             step_id="tank_confirm",
+            data_schema=vol.Schema({
+                vol.Required(CONF_NAME, default=_title_for_tank(self._discovered_tank)): str,
+            }),
             description_placeholders=self.context["title_placeholders"],
         )
 
@@ -441,7 +462,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    def _async_create_tank_entry(self, tank: Tank) -> FlowResult:
+    def _async_create_tank_entry(self, tank: Tank, title: str) -> FlowResult:
         """Creates a multi-device tank entry -- one entry, N devices,
         CONF_MLPREFIX set (the tank's own stable identity, used as this
         entry's unique_id and later as the synthetic tank device's own
@@ -454,7 +475,14 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Each peer's CONF_AGE (if the underlying MeshPeer had one -- see
         that field's own docstring for the important caveat that it's a
         one-time discovery snapshot, not live data) is stored too, for
-        display -- see const.py's own CONF_AGE docstring."""
+        display -- see const.py's own CONF_AGE docstring.
+
+        title comes from what was actually typed/kept on the
+        tank_confirm form (see async_step_tank_confirm()) -- not always
+        regenerated from _title_for_tank(tank) here, since the whole
+        point of that form's own name field is letting the tank be
+        named up front rather than only via a separate rename
+        afterward."""
         assert tank.prefix is not None
         assert self._pending_pan_id is not None
         devices = []
@@ -464,7 +492,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device[CONF_AGE] = peer.age
             devices.append(device)
         return self.async_create_entry(
-            title=_title_for_tank(tank),
+            title=title,
             data={
                 CONF_PAN_ID: self._pending_pan_id,
                 CONF_MLPREFIX: tank.prefix.hex(),
