@@ -261,9 +261,24 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovered_tank = tank
 
         if tank is not None and tank.prefix is not None and len(tank.peers) > 1:
+            # "name" is required here for a reason that has nothing to do
+            # with this step's own form text (which deliberately doesn't
+            # repeat it, to avoid the "Found N devices (Mobius Tank (N
+            # devices))" redundancy this whole change was meant to fix) --
+            # confirmed via Home Assistant's own developer docs: the
+            # "Discovered" card shown in Settings > Devices & Services
+            # BEFORE this form is even opened gets its own title from
+            # title_placeholders["name"] (combined with a flow_title
+            # template in strings.json -- see below), and if "name" isn't
+            # present at all, that whole mechanism is silently ignored --
+            # not just left blank, ignored entirely, falling back to the
+            # bare integration name ("Mobius"/"Mobius") instead. Confirmed
+            # via a real screenshot showing exactly that fallback after an
+            # earlier version of this dropped "name" from here.
             self.context["title_placeholders"] = {
                 "count": str(len(tank.peers)),
                 "devices": _device_list_for_display(tank),
+                "name": _title_for_tank(tank),
             }
             return await self.async_step_tank_confirm()
 

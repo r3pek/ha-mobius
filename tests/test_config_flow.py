@@ -349,6 +349,18 @@ async def test_bluetooth_discovery_of_tank_shows_tank_confirm(hass):
     assert PUMP_SERIAL in devices_text
     assert LIGHT_SERIAL in devices_text
     assert "VorTechMP40wG3QD" in devices_text
+    # A REAL regression this specific assertion guards against: "name"
+    # is required in title_placeholders for Home Assistant's own
+    # "Discovered" card (shown in Settings > Devices & Services BEFORE
+    # this form is even opened) to show anything meaningful at all --
+    # confirmed via HA's own developer docs that title_placeholders is
+    # silently ignored entirely if it doesn't include "name", falling
+    # back to the bare integration name. An earlier version of this
+    # change dropped "name" while adding "count"/"devices", breaking
+    # that card without touching this form's own description text at
+    # all -- a real screenshot showed the resulting "Mobius"/"Mobius"
+    # fallback before this was caught.
+    assert "name" in result["description_placeholders"]
     assert "RadionXR15wG6Pro" in devices_text
     # The form itself offers a name field, pre-filled with a suggested
     # default -- not a bare confirm-only Yes/No.
