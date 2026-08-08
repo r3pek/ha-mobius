@@ -13,6 +13,12 @@
   sensors.
 - Various reliability and under-the-hood fixes.
 
+**After upgrading**: your existing Mobius devices will show as failed.
+This is expected -- remove them and Home Assistant will find them again
+automatically, this time offering to add each tank as a whole. Do this
+after upgrading, not before, so rediscovery happens under the new
+version from the start.
+
 ## 0.2.2
 
 - **Requires `python-mobius>=0.3.1`** for a real, high-impact fix in
