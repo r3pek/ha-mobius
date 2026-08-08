@@ -13,10 +13,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.event import async_track_time_interval
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
-from .const import DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
+from .const import (
+    DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
+    TANK_REVALIDATION_INTERVAL,
+)
 from .coordinator import MobiusDeviceCoordinator, discover_mesh_address
 from .gateway_registry import GatewayRegistry
 
@@ -108,6 +112,94 @@ def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex:
         manufacturer="EcoTech Marine",
         model="Tank",
     )
+
+
+async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
+    """
+    Periodic per-entry membership check, run every TANK_REVALIDATION_INTERVAL
+    (see that constant's own docstring for why this is deliberately
+    infrequent) -- reuses the entry's existing gateway connection (no new
+    BLE connect/disconnect cycle in the common case, since the gateway is
+    already connected most of the time for its own regular polling) to
+    ask what else is currently on its Thread mesh.
+
+    Three real, considered outcomes:
+
+    - A tracked device now reported on a DIFFERENT, already-known entry's
+      own mesh is auto-migrated: removed from THIS entry, added to that
+      one, both reloaded. Matches the same "merge, don't re-prompt"
+      philosophy discovery-time merging already uses (see config_flow.
+      py's own module docstring) -- this is the same underlying event (a
+      device belongs somewhere else now), just detected later instead of
+      at first advertisement.
+    - A tracked device that simply isn't reported anymore is left
+      exactly where it is -- deliberately, permanently NEVER auto-
+      removed by this function. A single absence from one scan proves
+      nothing on its own (a transient connection issue, the device
+      briefly out of range, mid-reboot) and this maintenance task isn't
+      the right place to make that call -- MARK_UNAVAILABLE_AFTER
+      already handles "hasn't responded in a while" without deleting
+      anything, and that's as far as this goes without a person
+      deciding to remove it themselves.
+    - A completely new, never-before-seen serial reported on this mesh
+      is ignored here entirely -- discovering brand-new devices is
+      already config_flow.py's own job, triggered by that device's own
+      Bluetooth advertisement, not this task's.
+
+    A failed check (gateway unreachable, read timeout, anything) is
+    logged and skipped, not retried immediately -- the next scheduled
+    run acts as its own retry, matching the same "one bad read isn't
+    itself actionable" reasoning GATEWAY_FAILURE_THRESHOLD's own
+    docstring gives elsewhere in this integration.
+    """
+    registry: GatewayRegistry | None = hass.data.get(DOMAIN, {}).get("gateway_registry")
+    if registry is None:
+        return
+    pan_id = entry.data.get(CONF_PAN_ID)
+    if pan_id is None:
+        return
+    group = registry.group(pan_id)
+    if group is None or group.gateway_serial is None:
+        _LOGGER.debug(
+            "Skipping tank revalidation for %r -- no gateway currently elected", entry.title,
+        )
+        return
+
+    try:
+        mdevice = await group.gateway_connection.ensure_connected()
+        peers = await mdevice.discover_mesh_peers_auto()
+    except Exception as err:
+        _LOGGER.debug(
+            "Tank revalidation for %r failed (will retry at the next scheduled "
+            "check, in %s): %s", entry.title, TANK_REVALIDATION_INTERVAL, err,
+        )
+        return
+
+    # Local import -- avoids config_flow.py (and everything IT imports:
+    # voluptuous, the bluetooth component's own discovery helpers, etc.)
+    # being eagerly loaded every time this integration itself loads, the
+    # same reasoning discovery.py's own discover_tank() already gives for
+    # its own local imports elsewhere in this project.
+    from .config_flow import (
+        _find_entry_containing_serial, _merge_device_into_entry, _remove_device_from_entry,
+    )
+
+    known_serials = {d[CONF_SERIAL] for d in entry.data.get(CONF_DEVICES, [])}
+    for peer in peers:
+        if peer.serial in known_serials:
+            continue  # already tracked here -- nothing to do
+        other_entry = _find_entry_containing_serial(hass, peer.serial)
+        if other_entry is None or other_entry.entry_id == entry.entry_id:
+            # Either a genuinely new device this task doesn't handle, or
+            # (shouldn't normally happen, since known_serials already
+            # excludes it) already tracked right here.
+            continue
+        _LOGGER.info(
+            "Device %s found on %r's mesh but was tracked under %r -- migrating it",
+            peer.serial, entry.title, other_entry.title,
+        )
+        await _remove_device_from_entry(hass, other_entry, peer.serial)
+        await _merge_device_into_entry(hass, entry, peer.serial)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -220,6 +312,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinators[serial] = coordinator
 
     entry.runtime_data = MobiusRuntimeData(coordinators=coordinators)
+
+    # Periodic membership re-check -- see _async_revalidate_tank()'s own
+    # docstring for the full reasoning. async_on_unload() means this
+    # gets cleanly canceled on unload/reload without any separate
+    # bookkeeping here -- Home Assistant calls the returned unsub
+    # callback automatically.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            lambda now: hass.async_create_task(_async_revalidate_tank(hass, entry, now)),
+            TANK_REVALIDATION_INTERVAL,
+        )
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

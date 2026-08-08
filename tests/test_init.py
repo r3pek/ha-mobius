@@ -27,6 +27,29 @@ PAN_ID = 0x3D0F
 MLPREFIX_HEX = "fd1c5ec780e35c01"
 
 
+@pytest.fixture(autouse=True)
+def _stub_periodic_tank_revalidation():
+    """
+    Every test in this file exercises async_setup_entry() directly
+    (not via hass.config_entries.async_setup(), which would properly
+    track and unload the entry at test teardown) -- meaning the real
+    periodic timer async_setup_entry() registers via
+    entry.async_on_unload()/async_track_time_interval() never gets its
+    own unsub called, and the test harness (correctly) flags that as a
+    lingering timer. This isn't a real bug: in actual Home Assistant
+    usage, entry.async_on_unload() fires normally on unload/reload --
+    it's specifically these tests' own shortcut of calling
+    async_setup_entry() directly, bypassing that lifecycle, that leaves
+    the timer dangling. Stubbing the registration itself out here is
+    simpler and more robust than adding proper teardown to all 8+
+    affected tests individually, and doesn't test anything about the
+    periodic-revalidation feature itself, which has its own dedicated
+    tests elsewhere.
+    """
+    with patch("custom_components.mobius.async_track_time_interval", return_value=lambda: None):
+        yield
+
+
 async def test_async_setup_creates_shared_gateway_registry(hass):
     assert await async_setup(hass, {})
     assert isinstance(hass.data[DOMAIN]["gateway_registry"], GatewayRegistry)
@@ -540,3 +563,208 @@ def test_config_schema_allows_no_mobius_key_at_all():
     # simply isn't a key, is exactly what's expected for a config-entry-
     # only integration.
     CONFIG_SCHEMA({})
+
+
+# --------------------------------------------------------------------------
+# _async_revalidate_tank() -- the periodic per-tank membership check. See
+# its own docstring for the full reasoning; these tests confirm each of
+# its three real outcomes (auto-migrate a device found on a different,
+# already-tracked tank's mesh; never auto-remove one that's simply
+# missing; ignore a genuinely new, untracked device) plus its fail-soft
+# behavior.
+# --------------------------------------------------------------------------
+
+from custom_components.mobius import _async_revalidate_tank
+from custom_components.mobius.const import CONF_MLPREFIX
+from custom_components.mobius.coordinator import MobiusConnectionManager
+from custom_components.mobius.gateway_registry import PanGroup, MemberState
+from mobius import MeshPeer, Model
+
+OTHER_PAN_ID = 0x1234
+OTHER_MLPREFIX_HEX = "aabbccddeeff0011"
+
+
+def _make_registry_with_gateway(hass, pan_id, gateway_serial, peers_to_return):
+    """A GatewayRegistry with one already-elected group, whose gateway
+    connection is mocked to return a controlled peer list from
+    discover_mesh_peers_auto() -- avoids any real BLE connection."""
+    semaphore = asyncio.Semaphore(2)
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    hass.data[DOMAIN]["connection_semaphore"] = semaphore
+
+    connection = MobiusConnectionManager(hass, gateway_serial, semaphore)
+    fake_device = MagicMock()
+    fake_device.discover_mesh_peers_auto = AsyncMock(return_value=peers_to_return)
+    connection.ensure_connected = AsyncMock(return_value=fake_device)
+
+    group = PanGroup(pan_id=pan_id, gateway_serial=gateway_serial, gateway_connection=connection)
+    group.members[gateway_serial] = MemberState(serial=gateway_serial)
+    registry._groups[pan_id] = group
+    return registry, group
+
+
+def _fake_peer(serial: str) -> MeshPeer:
+    return MeshPeer(
+        serial=serial, model_raw=42, model=Model.VorTechMP40wG3QD,
+        short_address=0x1234, address=b"\x00" * 16,
+    )
+
+
+async def test_revalidate_skips_cleanly_if_no_gateway_elected(hass):
+    """No group at all, or a group with no elected gateway yet -- both
+    just skip this run quietly, nothing to check against."""
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["gateway_registry"] = GatewayRegistry(hass, asyncio.Semaphore(2))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_revalidate_tank(hass, entry)  # must not raise
+
+
+async def test_revalidate_skips_cleanly_on_connection_failure(hass):
+    """A failed check (gateway unreachable, read timeout) is logged and
+    skipped, not raised -- the next scheduled run is its own retry."""
+    from custom_components.mobius.gateway_registry import MemberState
+
+    semaphore = asyncio.Semaphore(2)
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    connection = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+    connection.ensure_connected = AsyncMock(side_effect=Exception("boom"))
+    group = PanGroup(pan_id=PAN_ID, gateway_serial=PUMP_SERIAL, gateway_connection=connection)
+    group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL)
+    registry._groups[PAN_ID] = group
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_revalidate_tank(hass, entry)  # must not raise
+
+
+async def test_revalidate_ignores_genuinely_new_untracked_device(hass):
+    """A peer reported on this mesh that isn't tracked ANYWHERE (not
+    this entry, not any other) is left alone entirely -- discovering
+    brand-new devices is config_flow.py's own job, not this one's."""
+    registry, group = _make_registry_with_gateway(
+        hass, PAN_ID, PUMP_SERIAL, [_fake_peer("unrelated-untracked-serial")],
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch("homeassistant.config_entries.ConfigEntries.async_reload", AsyncMock()) as mock_reload:
+        await _async_revalidate_tank(hass, entry)
+
+    mock_reload.assert_not_called()
+    assert entry.data[CONF_DEVICES] == [{CONF_SERIAL: PUMP_SERIAL}]  # untouched
+
+
+async def test_revalidate_never_removes_a_missing_device(hass):
+    """The actual core guarantee from this feature's own design
+    decision: a tracked device that simply isn't reported by this scan
+    is left exactly where it is, permanently -- never auto-removed."""
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])  # empty: nothing reported
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
+        },
+        unique_id=PAN_ID,
+    )
+    entry.add_to_hass(hass)
+
+    with patch("homeassistant.config_entries.ConfigEntries.async_reload", AsyncMock()) as mock_reload:
+        await _async_revalidate_tank(hass, entry)
+
+    mock_reload.assert_not_called()
+    stored_serials = {d[CONF_SERIAL] for d in entry.data[CONF_DEVICES]}
+    assert stored_serials == {PUMP_SERIAL, LIGHT_SERIAL}  # both still there
+
+
+async def test_revalidate_auto_migrates_device_found_on_different_tracked_tank(hass):
+    """The actual core new behavior: a device tracked under one entry,
+    now reported on a DIFFERENT, already-tracked entry's own mesh, gets
+    silently moved -- removed from the old entry, added to the new one,
+    both reloaded. No prompt, matching the same "merge, don't
+    re-prompt" philosophy discovery-time merging already uses."""
+    # LIGHT_SERIAL is reported on PUMP's own tank's mesh now, despite
+    # being tracked under a completely separate, pre-existing entry.
+    registry, group = _make_registry_with_gateway(
+        hass, PAN_ID, PUMP_SERIAL, [_fake_peer(LIGHT_SERIAL)],
+    )
+    this_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=MLPREFIX_HEX,
+        title="Tank A",
+    )
+    this_entry.add_to_hass(hass)
+    other_entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: OTHER_PAN_ID, CONF_MLPREFIX: OTHER_MLPREFIX_HEX, CONF_DEVICES: [{CONF_SERIAL: LIGHT_SERIAL}]},
+        unique_id=OTHER_MLPREFIX_HEX,
+        title="Tank B",
+    )
+    other_entry.add_to_hass(hass)
+
+    with patch("homeassistant.config_entries.ConfigEntries.async_reload", AsyncMock()) as mock_reload:
+        await _async_revalidate_tank(hass, this_entry)
+
+    # Removed from the old entry, added to the new one.
+    assert {d[CONF_SERIAL] for d in other_entry.data[CONF_DEVICES]} == set()
+    assert {d[CONF_SERIAL] for d in this_entry.data[CONF_DEVICES]} == {PUMP_SERIAL, LIGHT_SERIAL}
+    # Both entries got reloaded -- confirms neither side is left stale.
+    reloaded_ids = {call.args[0] for call in mock_reload.call_args_list}
+    assert reloaded_ids == {this_entry.entry_id, other_entry.entry_id}
+
+
+async def test_setup_entry_registers_periodic_revalidation(hass):
+    """Confirms async_setup_entry() actually registers the periodic
+    callback with the correct interval -- not just that
+    _async_revalidate_tank() itself works in isolation."""
+    from custom_components.mobius.const import TANK_REVALIDATION_INTERVAL
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+    address = bytes.fromhex("fd11223344556677000000fffe001234")
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        "custom_components.mobius.async_track_time_interval",
+    ) as mock_track_interval:
+        mock_track_interval.return_value = lambda: None
+        await async_setup_entry(hass, entry)
+
+    assert mock_track_interval.call_count == 1
+    call_args = mock_track_interval.call_args
+    assert call_args[0][0] is hass
+    assert call_args[0][2] == TANK_REVALIDATION_INTERVAL

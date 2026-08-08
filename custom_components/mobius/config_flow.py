@@ -154,16 +154,45 @@ def _find_entry_for_pan_id(hass: HomeAssistant, pan_id: int) -> ConfigEntry | No
 
 
 async def _merge_device_into_entry(
-    hass: HomeAssistant, entry: ConfigEntry, serial: str, address: str,
+    hass: HomeAssistant, entry: ConfigEntry, serial: str, address: str | None = None,
 ) -> None:
     """Adds one more device to an already-configured tank entry and
     reloads it -- the whole entry, not just the new device (a simpler,
     if slightly less surgical, approach than trying to hot-add just the
     new device's own coordinator without disturbing the others; there's
     normally no entity actively "in use" mid-merge for this brief
-    reconnect to matter in practice)."""
+    reconnect to matter in practice).
+
+    address is optional -- present for the original discovery-time merge
+    case (a fresh BLE advertisement always carries one), absent for the
+    periodic tank-revalidation case (see __init__.py's own
+    _async_revalidate_tank()), which learns about a migrated device via
+    a mesh-level peer report, not a BLE advertisement, so there's no BLE
+    MAC to store -- matches how a tank peer discovered via
+    discover_tank() already never stores CONF_ADDRESS either way."""
     devices = list(entry.data.get(CONF_DEVICES, []))
-    devices.append({CONF_SERIAL: serial, CONF_ADDRESS: address})
+    device = {CONF_SERIAL: serial}
+    if address is not None:
+        device[CONF_ADDRESS] = address
+    devices.append(device)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_DEVICES: devices})
+    hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
+
+
+async def _remove_device_from_entry(hass: HomeAssistant, entry: ConfigEntry, serial: str) -> None:
+    """The other half of a migration (see __init__.py's own
+    _async_revalidate_tank()) -- removes one device from a tank entry
+    and reloads it, the same "reload the whole entry" approach
+    _merge_device_into_entry() already uses for the same reasons. Not
+    used for discovery-time merging at all (that only ever adds) --
+    exists purely so a device that's since moved to a different,
+    already-tracked tank can be cleanly taken out of its old one as
+    part of that confirmed move, never on its own (see
+    _async_revalidate_tank()'s own docstring for why a device simply
+    going unreported is never, by itself, a reason to remove it)."""
+    devices = [
+        d for d in entry.data.get(CONF_DEVICES, []) if d.get(CONF_SERIAL) != serial
+    ]
     hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_DEVICES: devices})
     hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
 

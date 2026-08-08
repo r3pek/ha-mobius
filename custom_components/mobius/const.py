@@ -91,6 +91,21 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # this for an entire group at once.
 MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 
+# How often each tank re-checks who's actually on its own Thread mesh,
+# reusing its existing gateway connection rather than opening a new one
+# -- catches a device that's since moved to a DIFFERENT, already-tracked
+# tank (auto-migrated -- see __init__.py's own periodic revalidation
+# logic) and re-anchors CONF_DISCOVERED_AT/CONF_AGE for any device that's
+# still there. Deliberately infrequent: tank membership changes are rare,
+# deliberate, physical events (someone moving a pump to a different
+# aquarium), not something that needs near-real-time detection the way
+# a device's own status does -- and each check costs a real, if usually
+# already-open, BLE connection. A single failed check isn't itself
+# actionable (see the same reasoning GATEWAY_FAILURE_THRESHOLD's own
+# docstring gives for why one bad read shouldn't trigger anything) --
+# it's just skipped, with the next scheduled run acting as its own retry.
+TANK_REVALIDATION_INTERVAL = timedelta(hours=12)
+
 # --------------------------------------------------------------------------
 # Tank-level config entries -- one config entry per Thread mesh/"tank"
 # (see gateway_registry.py's own docstring for why pan_id is the

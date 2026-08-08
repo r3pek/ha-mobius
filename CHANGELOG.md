@@ -11,6 +11,11 @@
   you name the tank right there.
 - A newly found device that belongs to a tank you've already set up
   gets added to it automatically -- no need to set it up separately.
+- Mobius now periodically double-checks which devices are actually on
+  each tank. If a device turns up on a different tank you've already
+  set up (for example, after moving it to another aquarium), it gets
+  moved there automatically. A device that just goes quiet is left
+  alone, though -- it's not removed.
 - Added Mesh address, Age (at discovery), and Mesh prefix diagnostic
   sensors.
 - Various reliability and under-the-hood fixes.
