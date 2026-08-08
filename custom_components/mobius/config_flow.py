@@ -300,6 +300,26 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Re-fetch whatever HA's Bluetooth manager currently has cached for
         this address, which by the time the confirm screen renders is
         usually more complete, and use it if it's actually better.
+
+        A REAL, CONFIRMED bug lived here: an earlier version of this
+        function computed old_has_data/new_has_data purely to decide
+        whether to log a debug message, then unconditionally overwrote
+        self._discovery_info with the new snapshot regardless of that
+        comparison -- meaning a perfectly good initial snapshot (WITH
+        manufacturer data) could get silently downgraded to a WORSE one
+        (WITHOUT it), if HA's Bluetooth cache happened to have a more
+        recent, but data-less, advertisement/scan-response packet for
+        that same address at that exact moment (real BLE devices often
+        rotate between several different advertisement payloads, not
+        all of which necessarily carry the same data every time). This
+        directly explains a real screenshot showing "Mobius device"/
+        "Mobius" instead of a real model/serial: the confirm screen ran
+        AFTER a connection attempt (which itself takes real time,
+        giving the device's advertisement plenty of opportunity to
+        rotate to a different payload in the meantime), then this
+        function threw away the still-perfectly-good original snapshot
+        for a worse one. Now only overwrites when the new snapshot is
+        actually at least as good.
         """
         assert self._discovery_info is not None
         latest = async_last_service_info(self.hass, self._discovery_info.address, connectable=True)
@@ -307,7 +327,11 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return
         old_has_data = bool(self._discovery_info.manufacturer_data.get(MOBIUS_COMPANY_ID))
         new_has_data = bool(latest.manufacturer_data.get(MOBIUS_COMPANY_ID))
-        if new_has_data and not old_has_data:
+        if not new_has_data:
+            # Never downgrade -- whatever we already have (even if it
+            # also lacks data) is at least as good as this one.
+            return
+        if not old_has_data:
             _LOGGER.debug(
                 "Refreshed discovery info for %s: initial snapshot had no "
                 "manufacturer data, cached snapshot does",

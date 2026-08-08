@@ -323,6 +323,50 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
         assert "VorTechMP40wG3QD" in result2["title"]
 
 
+async def test_confirm_refresh_never_downgrades_a_good_initial_snapshot(hass):
+    """
+    The actual real-hardware bug this guards against, the reverse
+    direction of the test above: async_step_bluetooth() already
+    guaranteed the initial self._discovery_info has real, parseable
+    manufacturer data before ever reaching the confirm screen. But by
+    the time that screen renders, a connection attempt to check for a
+    tank has already happened (see async_step_scan_tank()), giving the
+    device's own advertisement real time to rotate to a DIFFERENT
+    payload -- and a real BLE device can legitimately send several
+    different advertisement/scan-response payloads in rotation, not all
+    of which necessarily carry manufacturer data every time. An earlier
+    version of _refresh_discovery_info() would blindly overwrite
+    self._discovery_info with whatever HA's Bluetooth cache most
+    recently had for that address, even if that happened to be a
+    worse, data-less snapshot -- silently downgrading a perfectly good
+    title to the generic "Mobius device" fallback. A real screenshot
+    showed exactly this: a discovered card and confirm dialog both
+    showing bare "Mobius"/"Mobius device" for a device whose real model
+    and serial were already known moments earlier.
+    """
+    complete_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
+    # What HA's Bluetooth cache happens to have most recently for this
+    # same address by the time the confirm screen renders -- a real,
+    # legitimate advertisement from the same device, just one of its
+    # other payload variants that doesn't carry manufacturer data.
+    later_but_worse_info = _make_discovery_info(PUMP_ADDRESS, b"")
+
+    with patch(
+        "custom_components.mobius.config_flow.async_last_service_info",
+        return_value=later_but_worse_info,
+    ), _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=complete_info
+        )
+        # The actual point: still shows the real model, not "Mobius device".
+        assert "VorTechMP40wG3QD" in result["description_placeholders"]["name"]
+
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+        assert result2["type"] == FlowResultType.CREATE_ENTRY
+        assert "VorTechMP40wG3QD" in result2["title"]
+        assert result2["result"].unique_id == PUMP_SERIAL
+
+
 # --------------------------------------------------------------------------
 # Tank-aware discovery -- see config_flow.py's own module docstring for
 # the full merge/tank/ad-hoc decision tree these tests confirm.
