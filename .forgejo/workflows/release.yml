@@ -129,9 +129,32 @@ jobs:
       #
       # Reuses the same release_notes.md this job already built for the
       # Forgejo release -- one changelog extraction, used for both.
+      #
+      # Confirmed via a real failure on this exact step ("token is
+      # malformed: token contains an invalid number of segments" /
+      # "authorized integration: parse JWT error" -- a combined,
+      # multi-method auth-failure response, which is Forgejo/Gitea's own
+      # error format, not a real GitHub API error like "Bad
+      # credentials") that this action was silently sending its request
+      # to the FORGEJO instance itself, not github.com, and Forgejo's
+      # own auth system rejected the real GitHub PAT because it doesn't
+      # match any token format Forgejo recognizes. Root cause: this
+      # action's underlying @actions/github client resolves its API
+      # base URL from the GITHUB_API_URL/GITHUB_GRAPHQL_URL environment
+      # variables when not told otherwise (a real, documented feature,
+      # added upstream specifically for GitHub Enterprise Server
+      # support) -- and Forgejo's own runner sets those to point at
+      # itself by default, for its own native actions' convenience, not
+      # realizing a real, non-Forgejo-aware GitHub Action would trust
+      # them too. Explicitly overriding both here forces the actual
+      # api.github.com / api.github.com/graphql endpoints regardless of
+      # whatever the runner's own environment already set.
       - name: Create GitHub release
         if: github.event_name == 'push'
         uses: https://github.com/softprops/action-gh-release@v2
+        env:
+          GITHUB_API_URL: https://api.github.com
+          GITHUB_GRAPHQL_URL: https://api.github.com/graphql
         with:
           repository: r3pek/ha-mobius
           token: ${{ secrets.GH_MIRROR_TOKEN }}
