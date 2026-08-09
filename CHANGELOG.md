@@ -26,6 +26,8 @@
   connection instead. Faster setup, less Bluetooth traffic.
 - Added Mesh address, Age (at discovery), and Mesh prefix diagnostic
   sensors.
+- Added a "Gateway device" sensor showing which device is currently
+  relaying for the rest of a tank, by name.
 - Various reliability and under-the-hood fixes.
 
 **After upgrading**: your existing Mobius devices will show as failed.

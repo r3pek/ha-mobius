@@ -66,6 +66,9 @@
       },
       "mesh_prefix": {
         "name": "Mesh prefix"
+      },
+      "gateway_device": {
+        "name": "Gateway device"
       }
     }
   }

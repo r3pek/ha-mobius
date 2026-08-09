@@ -223,6 +223,11 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
 
     # No synthetic tank device for a single, ad-hoc entry.
     assert device.via_device_id is None
+    # No gateway-device sensor either -- there's no synthetic tank
+    # device for it to attach to, and "which device is the gateway"
+    # isn't a meaningful question for a single, ad-hoc device anyway.
+    gateway_states = [s for s in hass.states.async_all("sensor") if "gateway_device" in s.entity_id]
+    assert gateway_states == []
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
@@ -412,6 +417,18 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     assert len(prefix_states) == 1
     assert prefix_states[0].state == MLPREFIX_HEX
 
+    # The gateway device sensor, also on the tank device -- shows the
+    # actual gateway's own configured name (from _fake_pump_device()'s
+    # own get_device_info() mock, since PUMP_SERIAL -- processed first,
+    # no RSSI signal available in this test -- becomes the gateway).
+    gateway_states = [
+        s for s in hass.states.async_all("sensor")
+        if s.attributes.get("device_class") is None and "gateway_device" in s.entity_id
+    ]
+    assert len(gateway_states) == 1
+    assert gateway_states[0].state == "MP40QD Right"
+    assert gateway_states[0].attributes["serial"] == PUMP_SERIAL
+
 
 def test_identical_model_devices_get_distinct_names_via_serial():
     """The actual scenario this was built for: two identical-model devices
@@ -435,6 +452,78 @@ def test_identical_model_devices_get_distinct_names_via_serial():
     assert info_a["name"] != info_b["name"]
     assert "7V4Z00F149RBF3" in info_a["name"]
     assert "7V4Z00F143RBED" in info_b["name"]
+
+
+class TestGatewayDeviceSensor:
+    """Unit-level tests for GatewayDeviceSensor's own logic --
+    instantiated directly (bypassing full config-entry setup) since
+    what's actually being tested is the fallback-naming chain and
+    reacting to a changed gateway_serial, not the full setup flow
+    (already covered separately by the end-to-end multi-device test
+    above)."""
+
+    def _make_sensor(self, gateway_serial, coordinators):
+        from unittest.mock import MagicMock
+        from custom_components.mobius.sensor import GatewayDeviceSensor
+
+        sensor = object.__new__(GatewayDeviceSensor)
+        sensor._pan_id = 0x3D0F
+        sensor._coordinators = coordinators
+        registry = MagicMock()
+        group = MagicMock()
+        group.gateway_serial = gateway_serial
+        registry.group.return_value = group
+        sensor._registry = registry
+        return sensor
+
+    def test_shows_the_gateway_devices_own_configured_name(self):
+        coordinator = MagicMock()
+        coordinator.data = {"name": "Living Room Pump", "model": "VorTechMP40wG3QD"}
+        sensor = self._make_sensor("SERIAL1", {"SERIAL1": coordinator})
+        assert sensor.native_value == "Living Room Pump"
+        assert sensor.extra_state_attributes == {"serial": "SERIAL1"}
+
+    def test_falls_back_to_model_and_serial_when_no_configured_name(self):
+        """Matches _device_info()'s own fallback chain -- a blank
+        configured name (confirmed real on actual hardware, see
+        _fake_light_device()'s own fixture comment elsewhere in this
+        file) shouldn't show as a blank sensor value."""
+        coordinator = MagicMock()
+        coordinator.data = {"name": "", "model": "RadionXR15wG6Pro"}
+        sensor = self._make_sensor("SERIAL2", {"SERIAL2": coordinator})
+        assert sensor.native_value == "RadionXR15wG6Pro (SERIAL2)"
+
+    def test_falls_back_to_bare_serial_when_no_data_at_all(self):
+        """Shouldn't normally happen (every device in CONF_DEVICES
+        always gets its own coordinator), but must not crash if this
+        integration genuinely has nothing for the reported gateway yet
+        (e.g. right at startup, before that device's own first poll)."""
+        sensor = self._make_sensor("SERIAL3", {})
+        assert sensor.native_value == "SERIAL3"
+
+    def test_none_when_no_gateway_elected_yet(self):
+        sensor = self._make_sensor(None, {})
+        assert sensor.native_value is None
+        assert sensor.extra_state_attributes is None
+
+    def test_reflects_a_changed_gateway_serial(self):
+        """The actual point of listening to every coordinator, not just
+        one -- confirms the sensor's own value follows gateway_serial
+        live, not a value captured once at creation time."""
+        coordinator_a = MagicMock()
+        coordinator_a.data = {"name": "Pump A"}
+        coordinator_b = MagicMock()
+        coordinator_b.data = {"name": "Pump B"}
+        sensor = self._make_sensor("SERIAL_A", {"SERIAL_A": coordinator_a, "SERIAL_B": coordinator_b})
+        assert sensor.native_value == "Pump A"
+
+        # Simulates a failover -- the registry's own gateway_serial
+        # changes; the sensor is a plain property read, so it reflects
+        # this the very next time anything reads it (which is exactly
+        # what its own coordinator-update listeners trigger in real use
+        # -- see async_added_to_hass()).
+        sensor._registry.group.return_value.gateway_serial = "SERIAL_B"
+        assert sensor.native_value == "Pump B"
 
 
 class TestLightChannelIntensitySensorRounding:

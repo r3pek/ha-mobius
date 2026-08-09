@@ -26,7 +26,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData, tank_device_identifier
-from .const import DOMAIN, CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
 
 _LOGGER = logging.getLogger(__name__)
 from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
@@ -564,6 +564,97 @@ class MeshPrefixSensor(SensorEntity):
         return self._mlprefix_hex
 
 
+class GatewayDeviceSensor(SensorEntity):
+    """
+    Diagnostic: which of this tank's devices currently holds the actual
+    BLE connection and relays for the others -- attached to the
+    synthetic TANK device itself (see MeshPrefixSensor's own docstring
+    for why), since which device this is can change over the tank's
+    lifetime (gateway failover -- see gateway_registry.py's own
+    GATEWAY_FAILURE_THRESHOLD) and isn't a property of any one real
+    device.
+
+    Shows the gateway device's own configured NAME, not its serial --
+    that name is already fetched fresh on every single poll cycle (see
+    coordinator.py's own _fetch_all(), which always calls
+    get_device_info()), so a rename in the Mobius app itself shows up
+    here within one normal poll interval, same as everywhere else in
+    this integration -- no separate polling needed for this specifically.
+    Falls back to "{model} ({serial})" if the device has no configured
+    name (matching _device_info()'s own fallback chain), or to the bare
+    serial if this integration doesn't have any data for that device at
+    all yet (shouldn't normally happen, since every device in
+    CONF_DEVICES always gets its own coordinator).
+
+    Not a MobiusEntity/CoordinatorEntity tied to one single coordinator
+    -- the gateway can be reported by whichever of the tank's devices
+    happens to poll next, not always the same one, so this listens to
+    ALL of the tank's own coordinators (via each one's own
+    async_add_listener(), the same "notify on any update" mechanism
+    DataUpdateCoordinator already exposes) rather than just one.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+
+    def __init__(
+        self, entry: ConfigEntry, pan_id: int, registry, coordinators: dict[str, MobiusDeviceCoordinator],
+        tank_identifier: tuple[str, str],
+    ) -> None:
+        self.entity_description = SensorEntityDescription(
+            key="gateway_device", translation_key="gateway_device",
+        )
+        self._attr_unique_id = f"{entry.entry_id}_gateway_device"
+        self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
+        self._pan_id = pan_id
+        self._registry = registry
+        self._coordinators = coordinators
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        for coordinator in self._coordinators.values():
+            self.async_on_remove(coordinator.async_add_listener(self._handle_any_coordinator_update))
+        # Written once immediately, rather than waiting for the first of
+        # potentially several devices' own next poll cycle to complete --
+        # the gateway is very likely already known right after setup
+        # (registry.join() runs before any of this platform's own entities
+        # are even created), so there's no reason to show unavailable
+        # until then.
+        self.async_write_ha_state()
+
+    def _handle_any_coordinator_update(self) -> None:
+        self.async_write_ha_state()
+
+    def _gateway_serial(self) -> str | None:
+        group = self._registry.group(self._pan_id)
+        if group is None:
+            return None
+        return group.gateway_serial
+
+    @property
+    def native_value(self):
+        serial = self._gateway_serial()
+        if serial is None:
+            return None
+        coordinator = self._coordinators.get(serial)
+        data = (coordinator.data if coordinator else None) or {}
+        name = data.get("name")
+        if name:
+            return name
+        model = data.get("model")
+        if model:
+            return f"{model} ({serial})"
+        return serial
+
+    @property
+    def extra_state_attributes(self):
+        serial = self._gateway_serial()
+        if serial is None:
+            return None
+        return {"serial": serial}
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -572,7 +663,9 @@ async def async_setup_entry(
     shape this mirrors), not always exactly one the way it used to be."""
     runtime: MobiusRuntimeData = entry.runtime_data
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
+    pan_id = entry.data.get(CONF_PAN_ID)
     device_records = entry.data.get(CONF_DEVICES, [])
+    registry = hass.data.get(DOMAIN, {}).get("gateway_registry")
 
     # via_device grouping only applies to a genuine multi-device tank --
     # matches __init__.py's own _register_tank_device() condition exactly
@@ -664,6 +757,8 @@ async def async_setup_entry(
     # __init__.py's own _register_tank_device()).
     if tank_identifier is not None and len(device_records) > 1:
         entities.append(MeshPrefixSensor(entry, mlprefix_hex, tank_identifier))
+        if registry is not None and pan_id is not None:
+            entities.append(GatewayDeviceSensor(entry, pan_id, registry, runtime.coordinators, tank_identifier))
 
     async_add_entities(entities)
 
