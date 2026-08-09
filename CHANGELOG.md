@@ -21,6 +21,9 @@
   Now the tank loads as long as at least one device responds; a
   device that's still unreachable just shows unavailable instead of
   blocking the whole tank.
+- Setting up a tank now only needs to connect to one device, not one
+  per device -- Mobius learns where the rest are from that single
+  connection instead. Faster setup, less Bluetooth traffic.
 - Added Mesh address, Age (at discovery), and Mesh prefix diagnostic
   sensors.
 - Various reliability and under-the-hood fixes.

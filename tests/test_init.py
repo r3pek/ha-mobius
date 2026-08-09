@@ -18,6 +18,33 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
+from mobius import MeshPeer, Model, Tank
+
+MLPREFIX_BYTES = bytes.fromhex("fd1c5ec780e35c01")
+
+
+def _fake_tank_for(serial: str, *other_serials: str) -> Tank:
+    """A Tank as discover_tank_for_serial() would return for a real
+    multi-device mesh -- own_peer (matching serial) first, then one
+    MeshPeer per other_serials, each with a real, distinct 16-byte
+    mesh address (not just a placeholder), matching what a real
+    NetworkedThreadDevices-based discover_tank() call returns."""
+    def _peer(s: str, suffix: int) -> MeshPeer:
+        return MeshPeer(
+            serial=s, model_raw=42, model=Model.VorTechMP40wG3QD,
+            short_address=suffix, address=MLPREFIX_BYTES + suffix.to_bytes(8, "big"),
+        )
+    peers = [_peer(serial, 1)] + [_peer(s, i + 2) for i, s in enumerate(other_serials)]
+    return Tank(prefix=MLPREFIX_BYTES, peers=peers)
+
+
+def _fake_no_tank() -> Tank:
+    """What discover_tank_for_serial() returns for a device that's
+    reachable but not currently part of any provisioned Thread network
+    -- the normal, expected case for a genuinely ad-hoc, single-device
+    entry."""
+    return Tank(prefix=None, peers=[])
+
 from custom_components.mobius.gateway_registry import GatewayRegistry
 
 PUMP_ADDRESS = "E4:67:D8:17:84:83"
@@ -140,7 +167,9 @@ async def test_setup_entry_joins_registry_with_current_rssi(hass):
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
     ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
         AsyncMock(),
@@ -184,10 +213,10 @@ async def test_gateway_device_also_gets_proactive_discovery(hass):
     entry.add_to_hass(hass)
 
     fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
 
     with patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL)),
     ) as mock_discover, patch(
         "custom_components.mobius._current_rssi", return_value=-40,
     ), patch(
@@ -200,7 +229,7 @@ async def test_gateway_device_also_gets_proactive_discovery(hass):
 
     mock_discover.assert_called_once_with(hass, PUMP_SERIAL, hass.data[DOMAIN]["connection_semaphore"])
     registry = hass.data[DOMAIN]["gateway_registry"]
-    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == address
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == MLPREFIX_BYTES + (1).to_bytes(8, "big")
 
 
 async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
@@ -229,6 +258,8 @@ async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
     fake_relayed_device = _fake_pump_device()
 
     with patch(
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
         "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
     ) as mock_discover, patch(
         "custom_components.mobius._current_rssi", return_value=-80,
@@ -269,7 +300,7 @@ async def test_secondary_device_proactive_discovery_failure_does_not_break_setup
                 {CONF_SERIAL: LIGHT_SERIAL},
             ],
         },
-        unique_id=PAN_ID,
+        unique_id="fake-unique-id-secondary-failure-test",
     )
     entry.add_to_hass(hass)
 
@@ -283,6 +314,9 @@ async def test_secondary_device_proactive_discovery_failure_does_not_break_setup
         return working_address if serial == PUMP_SERIAL else None
 
     with patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL)),
+    ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(side_effect=fake_discover_mesh_address),
     ) as mock_discover, patch(
@@ -304,8 +338,11 @@ async def test_secondary_device_proactive_discovery_failure_does_not_break_setup
     light_calls = [c for c in mock_discover.call_args_list if c[0][1] == LIGHT_SERIAL]
     assert len(light_calls) == 1
     assert registry.group(PAN_ID).members[LIGHT_SERIAL].mesh_address is None
-    # And PUMP_SERIAL -- the one the probe phase found working -- IS cached.
-    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == working_address
+    # PUMP_SERIAL's address came from the probe itself (the tank's own
+    # peer report), not a separate discover_mesh_address() call.
+    pump_calls = [c for c in mock_discover.call_args_list if c[0][1] == PUMP_SERIAL]
+    assert len(pump_calls) == 0
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == MLPREFIX_BYTES + (1).to_bytes(8, "big")
 
 
 async def test_secondary_device_skips_redundant_discovery_when_already_cached(hass):
@@ -351,17 +388,12 @@ async def test_secondary_device_skips_redundant_discovery_when_already_cached(ha
     entry.add_to_hass(hass)
 
     fake_pump_device = _fake_pump_device()
-    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
-
-    async def fake_discover_mesh_address(hass, serial, semaphore):
-        # Only PUMP_SERIAL's own discovery should ever be called at all
-        # -- once, for the probe phase.
-        assert serial == PUMP_SERIAL
-        return working_address
 
     with patch(
-        "custom_components.mobius.discover_mesh_address",
-        AsyncMock(side_effect=fake_discover_mesh_address),
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL)),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(),
     ) as mock_discover, patch(
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
@@ -375,11 +407,11 @@ async def test_secondary_device_skips_redundant_discovery_when_already_cached(ha
     ):
         await async_setup_entry(hass, entry)
 
-    # discover_mesh_address was called exactly once -- for PUMP_SERIAL's
-    # own probe -- never for LIGHT_SERIAL, whose address was already
-    # cached.
-    assert mock_discover.call_count == 1
-    assert mock_discover.call_args[0][1] == PUMP_SERIAL
+    # discover_mesh_address is never called at all: PUMP_SERIAL's address
+    # came from the probe's own tank report, LIGHT_SERIAL's was already
+    # cached in the registry.
+    mock_discover.assert_not_called()
+    assert prebuilt_group.members[PUMP_SERIAL].mesh_address == MLPREFIX_BYTES + (1).to_bytes(8, "big")
     assert prebuilt_group.members[LIGHT_SERIAL].mesh_address == cached_address
 
 
@@ -432,6 +464,16 @@ async def test_one_unreachable_device_does_not_block_the_whole_tank(hass):
         raise Exception("LIGHT_SERIAL is unreachable")
 
     with patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        # Only PUMP_SERIAL's own probe succeeds -- it's the only
+        # candidate ever tried, since it has the stronger RSSI and the
+        # probe stops at the first success. Its own tank report doesn't
+        # include LIGHT_SERIAL as a peer, so LIGHT_SERIAL's own address
+        # still needs (and gets) the direct fallback below.
+        AsyncMock(side_effect=lambda hass, serial, semaphore: (
+            _fake_tank_for(PUMP_SERIAL) if serial == PUMP_SERIAL else None
+        )),
+    ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(side_effect=fake_discover_mesh_address),
     ), patch(
@@ -477,19 +519,20 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
     entry.add_to_hass(hass)
 
     fake_pump_device = _fake_pump_device()
-    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
     probed_order = []
 
-    async def fake_discover_mesh_address(hass, serial, semaphore):
+    async def fake_discover_tank_for_serial(hass, serial, semaphore):
         probed_order.append(serial)
-        return working_address if serial == PUMP_SERIAL else None
+        return _fake_tank_for(PUMP_SERIAL) if serial == PUMP_SERIAL else None
 
     async def fake_ensure_connected(self):
         return fake_pump_device
 
     with patch(
-        "custom_components.mobius.discover_mesh_address",
-        AsyncMock(side_effect=fake_discover_mesh_address),
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(side_effect=fake_discover_tank_for_serial),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
     ), patch(
         "custom_components.mobius._current_rssi",
         # PUMP_SERIAL has the much stronger signal, despite being listed second.
@@ -507,6 +550,11 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
     # PUMP_SERIAL (stronger RSSI) was probed FIRST, despite being listed
     # second in CONF_DEVICES.
     assert probed_order[0] == PUMP_SERIAL
+    # And it actually becomes the registry's gateway -- confirms
+    # prefer_as_gateway is passed for the probe-winning device, not
+    # whichever one happens to be first in CONF_DEVICES.
+    registry = hass.data[DOMAIN]["gateway_registry"]
+    assert registry.group(PAN_ID).gateway_serial == PUMP_SERIAL
 
 
 async def test_setup_raises_not_ready_only_if_every_device_is_unreachable(hass):
@@ -541,6 +589,63 @@ async def test_setup_raises_not_ready_only_if_every_device_is_unreachable(hass):
 # synthetic tank device for via_device grouping.
 # --------------------------------------------------------------------------
 
+async def test_multi_device_tank_setup_makes_only_one_connection_not_n_plus_one(hass):
+    """The actual core point of this whole change: for a genuine
+    multi-device tank where the probed device's own tank report already
+    includes every OTHER device's mesh address too (a real
+    NetworkedThreadDevices/CoAP read, the same Thread mesh data this
+    integration's own relay reads already depend on), NO per-device
+    discover_mesh_address() fallback connection should happen at all --
+    just the one probe connection for the whole tank. An earlier version
+    of this code opened a SEPARATE, direct BLE connection to every
+    device individually just to learn each one's address, even though
+    the one connection already made to establish the gateway had
+    already reported all of them for free -- on a brand-new N-device
+    tank, that meant N+1 total connections during setup instead of just
+    1."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [
+                {CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL},
+            ],
+        },
+        unique_id=MLPREFIX_HEX,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL, LIGHT_SERIAL)),
+    ) as mock_discover_tank, patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(),
+    ) as mock_discover_address, patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_device,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await async_setup_entry(hass, entry)
+
+    # Exactly ONE connection for the whole tank -- the probe itself.
+    assert mock_discover_tank.call_count == 1
+    # And NOT ONE, direct, per-device connection for the other device --
+    # its address came from the probe's own tank report instead.
+    mock_discover_address.assert_not_called()
+
+    registry = hass.data[DOMAIN]["gateway_registry"]
+    group = registry.group(PAN_ID)
+    assert group.members[PUMP_SERIAL].mesh_address == MLPREFIX_BYTES + (1).to_bytes(8, "big")
+    assert group.members[LIGHT_SERIAL].mesh_address == MLPREFIX_BYTES + (2).to_bytes(8, "big")
+
+
 async def test_multi_device_tank_creates_one_coordinator_per_device(hass):
     """The core point of tank-aware entries: a single entry with N
     devices ends up with N coordinators in runtime.coordinators, not
@@ -558,13 +663,13 @@ async def test_multi_device_tank_creates_one_coordinator_per_device(hass):
     entry.add_to_hass(hass)
 
     fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
 
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
     ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL, LIGHT_SERIAL)),
     ), patch(
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
@@ -576,47 +681,6 @@ async def test_multi_device_tank_creates_one_coordinator_per_device(hass):
 
     assert set(entry.runtime_data.coordinators.keys()) == {PUMP_SERIAL, LIGHT_SERIAL}
 
-
-async def test_first_device_in_list_is_preferred_as_gateway(hass):
-    """The first device in CONF_DEVICES is always the one the config
-    flow actually connected to (see __init__.py's own async_setup_entry()
-    docstring) -- confirms it actually becomes gateway, not whichever
-    device happens to have the best RSSI."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
-            CONF_DEVICES: [
-                {CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL},
-            ],
-        },
-        unique_id=MLPREFIX_HEX,
-    )
-    entry.add_to_hass(hass)
-
-    fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
-
-    with patch(
-        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
-        AsyncMock(return_value=fake_device),
-    ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
-    ), patch(
-        # LIGHT_SERIAL has the stronger RSSI -- if prefer_as_gateway
-        # weren't working, plain RSSI-based election would pick it
-        # instead of PUMP_SERIAL (the first-listed device).
-        "custom_components.mobius._current_rssi",
-        side_effect=lambda hass, serial: -10 if serial == LIGHT_SERIAL else -80,
-    ), patch(
-        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_device,
-    ), patch(
-        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
-    ):
-        await async_setup_entry(hass, entry)
-
-    registry = hass.data[DOMAIN]["gateway_registry"]
-    assert registry.group(PAN_ID).gateway_serial == PUMP_SERIAL
 
 
 async def test_multi_device_tank_registers_synthetic_tank_device(hass):
@@ -639,13 +703,13 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
     entry.add_to_hass(hass)
 
     fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
 
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
     ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL, LIGHT_SERIAL)),
     ), patch(
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
@@ -684,13 +748,14 @@ async def test_single_device_ad_hoc_entry_skips_synthetic_tank_device(hass):
     entry.add_to_hass(hass)
 
     fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
 
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
     ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
     ), patch(
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
@@ -932,13 +997,14 @@ async def test_setup_entry_registers_periodic_revalidation(hass):
     entry.add_to_hass(hass)
 
     fake_device = _fake_pump_device()
-    address = bytes.fromhex("fd11223344556677000000fffe001234")
 
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
     ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=address),
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
     ), patch(
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(

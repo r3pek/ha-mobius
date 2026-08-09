@@ -21,7 +21,7 @@ from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
     TANK_REVALIDATION_INTERVAL,
 )
-from .coordinator import MobiusDeviceCoordinator, discover_mesh_address
+from .coordinator import MobiusDeviceCoordinator, discover_mesh_address, discover_tank_for_serial
 from .gateway_registry import GatewayRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -285,28 +285,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # it can never block the rest of the tank. That device's own
     # entities simply start unavailable and retry on the normal poll
     # cycle, exactly like any other transient failure after setup.
+    #
+    # Uses discover_tank_for_serial() for the probe, not the narrower
+    # discover_mesh_address() an earlier version of this used -- a real,
+    # unnecessary inefficiency: that one connection already learns the
+    # WHOLE tank's peer list, with every peer's own mesh address
+    # (discover_tank_for_serial() calls python-mobius's own
+    # discover_tank(), which reads NetworkedThreadDevices over the
+    # Thread mesh -- the same CoAP-relayed mechanism this integration's
+    # own relay reads already depend on), not just the probed device's
+    # own address. An earlier version of this function ignored that and
+    # went on to open a SEPARATE, direct BLE connection to every OTHER
+    # device in the tank too, just to learn each one's address
+    # individually -- on a brand-new tank, that meant N+1 total
+    # connections during setup for an N-device tank, when the mesh
+    # already handed us N-1 of those addresses for free from the first
+    # one. Now only a genuinely MISSING peer (not reported at all by the
+    # probed device's own mesh view, however that happened) falls back
+    # to a direct per-device connection.
     rssi_by_serial = {d[CONF_SERIAL]: _current_rssi(hass, d[CONF_SERIAL]) for d in devices}
     devices_by_rssi = sorted(
         devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
     )
     working_serial: str | None = None
-    working_address: bytes | None = None
+    addresses_by_serial: dict[str, bytes] = {}
     last_probe_error: Exception | None = None
     for device in devices_by_rssi:
         candidate_serial = device[CONF_SERIAL]
         try:
-            address = await discover_mesh_address(hass, candidate_serial, semaphore)
-        except Exception as err:  # pragma: no cover -- discover_mesh_address is already defensive
+            tank = await discover_tank_for_serial(hass, candidate_serial, semaphore)
+        except Exception as err:  # pragma: no cover -- discover_tank_for_serial is already defensive
             last_probe_error = err
-            address = None
-        if address is None:
+            tank = None
+        if tank is None:
+            # Genuinely couldn't reach this candidate at all -- try the
+            # next one. Deliberately NOT also checking tank.prefix here:
+            # a non-None Tank with prefix=None means "reached this
+            # device fine, it just isn't currently part of any
+            # provisioned Thread network" -- completely normal and
+            # expected for an ad-hoc, single-device entry (the entire
+            # reason it's ad-hoc rather than a tank in the first place),
+            # and even for a genuine tank entry, this device is still
+            # BLE-reachable regardless -- which is what actually matters
+            # for committing to it below. If it turns out it can't
+            # relay to its peers because of this, that surfaces as
+            # those peers' own coordinators failing softly (see below),
+            # not as this whole probe failing.
             _LOGGER.debug(
                 "Could not reach %s while looking for a working device to set up "
                 "%r with -- trying the next one", candidate_serial, entry.title,
             )
             continue
         working_serial = candidate_serial
-        working_address = address
+        addresses_by_serial = {peer.serial: peer.address for peer in tank.peers}
         break
 
     if working_serial is None:
@@ -316,17 +347,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     coordinators: dict[str, MobiusDeviceCoordinator] = {}
-    for device in devices:
+    # working_serial's own device is processed FIRST, regardless of its
+    # position in CONF_DEVICES -- a REAL, subtle bug lived in processing
+    # devices in plain CONF_DEVICES order: if a different, non-working
+    # device happened to be listed first, ITS join() call (without
+    # prefer_as_gateway) would trigger the normal RSSI-based election
+    # before working_serial's own preferred join() ever ran -- by the
+    # time that one arrived, group._electing was already true, so
+    # prefer_as_gateway got silently ignored, racing against (and
+    # sometimes losing to) the settle-window election instead of
+    # reliably using the device this whole probe just confirmed working.
+    ordered_devices = sorted(devices, key=lambda d: d[CONF_SERIAL] != working_serial)
+    for device in ordered_devices:
         serial = device[CONF_SERIAL]
         rssi = rssi_by_serial[serial]
         group = await registry.join(pan_id, serial, rssi, prefer_as_gateway=(serial == working_serial))
 
         if group.members[serial].mesh_address is None:
-            if serial == working_serial:
-                # Already resolved by the probe above -- no need to
-                # connect a second time just to learn the same thing.
-                registry.update_mesh_address(pan_id, serial, working_address)
+            address = addresses_by_serial.get(serial)
+            if address is not None:
+                # Already known -- either the probed device's own
+                # address, or one of its peers' addresses the same
+                # single connection already reported. No extra
+                # connection needed either way.
+                registry.update_mesh_address(pan_id, serial, address)
             else:
+                # Genuinely not reported by the probe -- fall back to a
+                # direct connection for this one device specifically.
                 address = await discover_mesh_address(hass, serial, semaphore)
                 if address is not None:
                     registry.update_mesh_address(pan_id, serial, address)

@@ -12,7 +12,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType
+from mobius import PrimitiveType, Tank
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
@@ -133,6 +133,9 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=_fake_pump_device()),
     ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
     ):
@@ -237,6 +240,9 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=_fake_light_device()),
     ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe005678")),
     ):
@@ -308,6 +314,9 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
         "custom_components.mobius.coordinator.MobiusConnectionManager.disconnect",
         AsyncMock(),
     ) as mock_disconnect, patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
     ):
@@ -360,6 +369,9 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     ), patch(
         "custom_components.mobius.coordinator.RelayedMobiusDevice",
         return_value=_fake_pump_device(),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=bytes.fromhex(MLPREFIX_HEX), peers=[])),
     ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
