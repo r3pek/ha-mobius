@@ -16,6 +16,11 @@
   set up (for example, after moving it to another aquarium), it gets
   moved there automatically. A device that just goes quiet is left
   alone, though -- it's not removed.
+- Fixed a real bug where a tank could fail to load at all if even one
+  of its devices was temporarily unreachable, even after a restart.
+  Now the tank loads as long as at least one device responds; a
+  device that's still unreachable just shows unavailable instead of
+  blocking the whole tank.
 - Added Mesh address, Age (at discovery), and Mesh prefix diagnostic
   sensors.
 - Various reliability and under-the-hood fixes.

@@ -10,7 +10,7 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
@@ -255,60 +255,92 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mlprefix_hex is not None and len(devices) > 1:
         _register_tank_device(hass, entry, mlprefix_hex, len(devices))
 
-    coordinators: dict[str, MobiusDeviceCoordinator] = {}
-    for index, device in enumerate(devices):
-        serial = device[CONF_SERIAL]
-        rssi = _current_rssi(hass, serial)
-        # The FIRST device in CONF_DEVICES is always the one the config
-        # flow actually connected to, to run discover_tank() in the
-        # first place (python-mobius's own discover_tank() always
-        # returns the connected device's own info first in its peers
-        # list -- see its docstring -- and _async_create_tank_entry()
-        # in config_flow.py builds CONF_DEVICES straight from that same
-        # order) -- so it's the one with direct, fresh proof of
-        # reachability, worth preferring as gateway over an untested
-        # peer purely by RSSI (see GatewayRegistry.join()'s own
-        # docstring for prefer_as_gateway's full reasoning). Only
-        # matters for a genuinely brand-new group; harmless no-op
-        # (ignored) for an already-established one, or for an ad-hoc
-        # single-device entry (trivially becomes gateway either way).
-        group = await registry.join(pan_id, serial, rssi, prefer_as_gateway=(index == 0))
+    # A REAL, CONFIRMED PRODUCTION BUG lived in an earlier version of
+    # this function: coordinator.async_config_entry_first_refresh() was
+    # awaited in a loop, once per device. That method's whole contract
+    # is "raise ConfigEntryNotReady if this fails" -- fine for the ONE
+    # coordinator a typical integration has, but here it meant ANY
+    # single device out of several failing (even the very last one)
+    # raised out of this function entirely, aborting the WHOLE entry's
+    # setup -- discarding every other device that had already
+    # succeeded moments earlier. Confirmed via a real log: a tank with
+    # 4 devices repeatedly failed to load at all, a DIFFERENT device
+    # timing out on each retry, because every retry re-ran this same
+    # loop from the very start.
+    #
+    # Fixed with a two-phase setup: first, PROBE devices (strongest
+    # RSSI first, not just CONF_DEVICES' own stored order, so a single
+    # consistently-unreachable device is never retried forever while a
+    # perfectly reachable one sits right there unused) via
+    # discover_mesh_address() -- a real, minimal connect-and-read, not
+    # just registry bookkeeping -- until one actually succeeds. Only
+    # THAT device is committed as gateway and gated on
+    # async_config_entry_first_refresh() -- the one case this entry's
+    # own readiness legitimately SHOULD depend on: if literally nothing
+    # in the tank is reachable, there's genuinely nothing to set up
+    # yet. Every other device uses the soft async_refresh() (per Home
+    # Assistant's own developer docs: "If you do not want to retry
+    # setup on failure, use coordinator.async_refresh() instead") --
+    # its own failure, even on its very first read, does not raise, so
+    # it can never block the rest of the tank. That device's own
+    # entities simply start unavailable and retry on the normal poll
+    # cycle, exactly like any other transient failure after setup.
+    rssi_by_serial = {d[CONF_SERIAL]: _current_rssi(hass, d[CONF_SERIAL]) for d in devices}
+    devices_by_rssi = sorted(
+        devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
+    )
+    working_serial: str | None = None
+    working_address: bytes | None = None
+    last_probe_error: Exception | None = None
+    for device in devices_by_rssi:
+        candidate_serial = device[CONF_SERIAL]
+        try:
+            address = await discover_mesh_address(hass, candidate_serial, semaphore)
+        except Exception as err:  # pragma: no cover -- discover_mesh_address is already defensive
+            last_probe_error = err
+            address = None
+        if address is None:
+            _LOGGER.debug(
+                "Could not reach %s while looking for a working device to set up "
+                "%r with -- trying the next one", candidate_serial, entry.title,
+            )
+            continue
+        working_serial = candidate_serial
+        working_address = address
+        break
 
-        # Proactively discover and cache this device's own mesh address
-        # BEFORE its coordinator's first refresh -- runs every time this
-        # entry is set up, which covers both a brand-new device AND
-        # every existing device on every Home Assistant restart, not
-        # just first-ever setup. Avoids the first poll cycle having to
-        # pay for both address discovery and the actual relay read
-        # together. A failure here isn't fatal: it's just treated as
-        # "will retry via the coordinator's own on-demand fallback," not
-        # raised.
-        #
-        # Deliberately NOT gated on "only if relayed, not this group's
-        # gateway" the way an earlier version of this was -- the new
-        # MeshAddressSensor (see sensor.py) needs this cached for EVERY
-        # device, including the gateway, which otherwise never gets its
-        # own address populated into the registry at all (nothing else
-        # ever calls update_mesh_address() for a group's own gateway,
-        # since relay itself has no need to know the gateway's address).
-        # A real, accepted trade-off: this costs the gateway device an
-        # extra brief connect/disconnect here, separate from the direct
-        # connection its own coordinator will make moments later for its
-        # first real poll -- happens once at setup/restart, not on every
-        # poll cycle, so the redundant connection is bounded, not
-        # ongoing.
+    if working_serial is None:
+        raise ConfigEntryNotReady(
+            f"Could not connect to any of {len(devices)} device(s) in {entry.title!r}"
+            + (f": {last_probe_error}" if last_probe_error else "")
+        )
+
+    coordinators: dict[str, MobiusDeviceCoordinator] = {}
+    for device in devices:
+        serial = device[CONF_SERIAL]
+        rssi = rssi_by_serial[serial]
+        group = await registry.join(pan_id, serial, rssi, prefer_as_gateway=(serial == working_serial))
+
         if group.members[serial].mesh_address is None:
-            address = await discover_mesh_address(hass, serial, semaphore)
-            if address is not None:
-                registry.update_mesh_address(pan_id, serial, address)
+            if serial == working_serial:
+                # Already resolved by the probe above -- no need to
+                # connect a second time just to learn the same thing.
+                registry.update_mesh_address(pan_id, serial, working_address)
             else:
-                _LOGGER.debug(
-                    "Could not proactively discover mesh address for %s at setup -- "
-                    "will retry on the next poll cycle", serial,
-                )
+                address = await discover_mesh_address(hass, serial, semaphore)
+                if address is not None:
+                    registry.update_mesh_address(pan_id, serial, address)
+                else:
+                    _LOGGER.debug(
+                        "Could not proactively discover mesh address for %s at setup -- "
+                        "will retry on the next poll cycle", serial,
+                    )
 
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
-        await coordinator.async_config_entry_first_refresh()
+        if serial == working_serial:
+            await coordinator.async_config_entry_first_refresh()
+        else:
+            await coordinator.async_refresh()
         coordinators[serial] = coordinator
 
     entry.runtime_data = MobiusRuntimeData(coordinators=coordinators)

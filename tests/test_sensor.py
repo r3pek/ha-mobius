@@ -236,6 +236,9 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=_fake_light_device()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe005678")),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -304,7 +307,10 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
     ), patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.disconnect",
         AsyncMock(),
-    ) as mock_disconnect:
+    ) as mock_disconnect, patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
+    ):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 

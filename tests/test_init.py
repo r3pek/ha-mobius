@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS
-from homeassistant.exceptions import ConfigEntryError
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
@@ -247,63 +247,77 @@ async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
     assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == address
 
 
-async def test_proactive_discovery_failure_does_not_break_setup_flow(hass):
-    """A None result (device not currently reachable) from the proactive
-    discovery step itself must not raise or otherwise derail setup --
-    the coordinator's own on-demand fallback covers it on a later poll.
-    Setup DOES still fail overall here (ConfigEntryNotReady), but for the
-    ordinary reason (the coordinator's own first read also has nothing to
-    connect to in this scenario) -- not because of anything specific to
-    the discovery step failing."""
-    from homeassistant.exceptions import ConfigEntryNotReady
-
+async def test_secondary_device_proactive_discovery_failure_does_not_break_setup(hass):
+    """A None result (device not currently reachable for its OWN
+    proactive mesh-address caching -- distinct from the probe phase
+    that already found a different, working device) must not raise or
+    otherwise derail setup -- the coordinator's own on-demand fallback
+    covers it on a later poll, and this device's own soft
+    coordinator.async_refresh() (see async_setup_entry()'s own
+    docstring) doesn't propagate failure upward regardless."""
     hass.data.setdefault(DOMAIN, {})
     semaphore = hass.data[DOMAIN].setdefault("connection_semaphore", asyncio.Semaphore(2))
     registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
     hass.data[DOMAIN]["gateway_registry"] = registry
-    await registry.join(PAN_ID, "existing-gateway-serial", rssi=-30)
 
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
             CONF_PAN_ID: PAN_ID,
-            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+            CONF_DEVICES: [
+                {CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS},
+                {CONF_SERIAL: LIGHT_SERIAL},
+            ],
         },
-        unique_id=PUMP_SERIAL,
+        unique_id=PAN_ID,
     )
     entry.add_to_hass(hass)
-    entry.mock_state(hass, entry.state.SETUP_IN_PROGRESS)
+
+    fake_device = _fake_pump_device()
+    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
+
+    async def fake_discover_mesh_address(hass, serial, semaphore):
+        # PUMP_SERIAL is the one the probe phase finds working; LIGHT_SERIAL
+        # can't be reached at all, for its own proactive caching in the
+        # main loop specifically.
+        return working_address if serial == PUMP_SERIAL else None
 
     with patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(side_effect=fake_discover_mesh_address),
     ) as mock_discover, patch(
-        "custom_components.mobius._current_rssi", return_value=-80,
-    ), patch.object(
-        registry.group(PAN_ID).gateway_connection, "ensure_connected", AsyncMock(side_effect=Exception("boom")),
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice",
+        return_value=fake_device,
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        with pytest.raises(ConfigEntryNotReady):
-            await async_setup_entry(hass, entry)
+        result = await async_setup_entry(hass, entry)
 
-    # The discovery step itself ran and returned None cleanly -- the
-    # failure came from the coordinator's own first read, not from
-    # mishandling a None discovery result.
-    mock_discover.assert_called_once()
-    assert mock_discover.call_args[0][0] is hass
-    assert mock_discover.call_args[0][1] == PUMP_SERIAL
-    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address is None
+    assert result is True
+    # LIGHT_SERIAL's own proactive discovery genuinely ran and failed --
+    # this isn't testing a call that never happened.
+    light_calls = [c for c in mock_discover.call_args_list if c[0][1] == LIGHT_SERIAL]
+    assert len(light_calls) == 1
+    assert registry.group(PAN_ID).members[LIGHT_SERIAL].mesh_address is None
+    # And PUMP_SERIAL -- the one the probe phase found working -- IS cached.
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].mesh_address == working_address
 
 
-async def test_proactive_discovery_skipped_when_already_cached(hass):
-    """Avoids redundant work -- if a mesh address is already cached by
-    the time join() returns, don't re-discover it. Mocks join() directly
-    (rather than pre-populating through a real join() call first) since a
-    second join() for the same serial would legitimately overwrite
-    whatever was there before -- this is testing __init__.py's own check
-    of the returned group's state, not the registry's join() semantics
-    themselves (covered separately in test_gateway_registry.py)."""
+async def test_secondary_device_skips_redundant_discovery_when_already_cached(hass):
+    """Avoids redundant work for the MAIN loop's secondary devices (not
+    the probe phase, which always freshly tests each candidate's CURRENT
+    reachability before committing to a gateway -- see async_setup_entry()'s
+    own docstring for why that must never trust a possibly-stale cached
+    address instead). If a non-probe-winning device's own mesh address is
+    already cached (e.g. a pre-existing group from a sibling entry or an
+    earlier partial setup), don't re-discover it in the main loop."""
     from custom_components.mobius.gateway_registry import PanGroup, MemberState
+    from custom_components.mobius.coordinator import MobiusConnectionManager
 
     hass.data.setdefault(DOMAIN, {})
     semaphore = hass.data[DOMAIN].setdefault("connection_semaphore", asyncio.Semaphore(2))
@@ -311,44 +325,215 @@ async def test_proactive_discovery_skipped_when_already_cached(hass):
     hass.data[DOMAIN]["gateway_registry"] = registry
 
     cached_address = bytes.fromhex("fd11223344556677000000fffe005678")
-    from custom_components.mobius.coordinator import MobiusConnectionManager
     prebuilt_group = PanGroup(
-        pan_id=PAN_ID, gateway_serial="existing-gateway-serial",
-        gateway_connection=MobiusConnectionManager(hass, "existing-gateway-serial", semaphore),
+        pan_id=PAN_ID, gateway_serial=PUMP_SERIAL,
+        gateway_connection=MobiusConnectionManager(hass, PUMP_SERIAL, semaphore),
     )
-    prebuilt_group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL, mesh_address=cached_address)
+    prebuilt_group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL)
+    # LIGHT_SERIAL (the secondary device) already has a cached address --
+    # this is what must NOT trigger a redundant discover_mesh_address()
+    # call in the main loop.
+    prebuilt_group.members[LIGHT_SERIAL] = MemberState(serial=LIGHT_SERIAL, mesh_address=cached_address)
+    prebuilt_group._gateway_elected.set()
     registry._groups[PAN_ID] = prebuilt_group
 
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
             CONF_PAN_ID: PAN_ID,
-            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+            CONF_DEVICES: [
+                {CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS},
+                {CONF_SERIAL: LIGHT_SERIAL},
+            ],
         },
-        unique_id=PUMP_SERIAL,
+        unique_id="fake-unique-id-for-secondary-cache-test",
     )
     entry.add_to_hass(hass)
 
-    fake_gateway_device = object()
-    fake_relayed_device = _fake_pump_device()
+    fake_pump_device = _fake_pump_device()
+    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
 
-    with patch.object(
-        registry, "join", AsyncMock(return_value=prebuilt_group),
-    ), patch(
-        "custom_components.mobius.discover_mesh_address", AsyncMock(),
+    async def fake_discover_mesh_address(hass, serial, semaphore):
+        # Only PUMP_SERIAL's own discovery should ever be called at all
+        # -- once, for the probe phase.
+        assert serial == PUMP_SERIAL
+        return working_address
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(side_effect=fake_discover_mesh_address),
     ) as mock_discover, patch(
-        "custom_components.mobius._current_rssi", return_value=-80,
-    ), patch.object(
-        prebuilt_group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+        "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
-        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_pump_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice",
+        return_value=_fake_pump_device(),
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
         await async_setup_entry(hass, entry)
 
-    mock_discover.assert_not_called()
-    assert prebuilt_group.members[PUMP_SERIAL].mesh_address == cached_address
+    # discover_mesh_address was called exactly once -- for PUMP_SERIAL's
+    # own probe -- never for LIGHT_SERIAL, whose address was already
+    # cached.
+    assert mock_discover.call_count == 1
+    assert mock_discover.call_args[0][1] == PUMP_SERIAL
+    assert prebuilt_group.members[LIGHT_SERIAL].mesh_address == cached_address
+
+
+# --------------------------------------------------------------------------
+# The core setup-reliability fix: ONE unreachable device must never block
+# the whole entry's setup. A REAL, CONFIRMED production bug lived here --
+# coordinator.async_config_entry_first_refresh() (raises ConfigEntryNotReady
+# on failure) was awaited once per device in a loop, so ANY single device
+# out of several failing -- even the last of many, even on a retry after
+# every other device had already succeeded -- aborted the ENTIRE entry's
+# setup. Every subsequent retry re-ran the whole loop from scratch,
+# discarding devices that had already succeeded. A tank with one
+# consistently-unreachable device (poor relay range to that one target,
+# mid-reboot, etc) could never fully set up at all -- confirmed via a real
+# log showing a different device failing on each retry, with the entry
+# stuck in "not ready yet" indefinitely.
+# --------------------------------------------------------------------------
+
+async def test_one_unreachable_device_does_not_block_the_whole_tank(hass):
+    """The actual bug fix, end to end: LIGHT_SERIAL can't be reached at
+    all (its own discover_mesh_address AND its own coordinator refresh
+    both fail), but PUMP_SERIAL is reachable -- the entry must still
+    set up successfully, with LIGHT_SERIAL's own coordinator simply
+    starting in a failed (not blocking) state."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [
+                {CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL},
+            ],
+        },
+        unique_id=MLPREFIX_HEX,
+    )
+    entry.add_to_hass(hass)
+
+    fake_pump_device = _fake_pump_device()
+    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
+
+    async def fake_discover_mesh_address(hass, serial, semaphore):
+        if serial == PUMP_SERIAL:
+            return working_address
+        return None  # LIGHT_SERIAL is completely unreachable
+
+    async def fake_ensure_connected(self):
+        # The gateway connection manager's own serial tells us which
+        # device this is for.
+        if self.serial == PUMP_SERIAL:
+            return fake_pump_device
+        raise Exception("LIGHT_SERIAL is unreachable")
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(side_effect=fake_discover_mesh_address),
+    ), patch(
+        "custom_components.mobius._current_rssi",
+        side_effect=lambda hass, serial: -40 if serial == PUMP_SERIAL else -90,
+    ), patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        fake_ensure_connected,
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice",
+        side_effect=Exception("LIGHT_SERIAL cannot be relayed to either"),
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        result = await async_setup_entry(hass, entry)
+
+    # The entry itself sets up successfully -- the core point of this fix.
+    assert result is True
+    assert set(entry.runtime_data.coordinators.keys()) == {PUMP_SERIAL, LIGHT_SERIAL}
+    # PUMP_SERIAL (the one that's actually reachable) succeeded.
+    assert entry.runtime_data.coordinators[PUMP_SERIAL].last_update_success is True
+    # LIGHT_SERIAL's own coordinator exists (its entities will simply show
+    # unavailable) but its failure never propagated up to block setup.
+    assert entry.runtime_data.coordinators[LIGHT_SERIAL].last_update_success is False
+
+
+async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
+    """The probe phase tries the STRONGEST-signal device first, not just
+    whichever happens to be first in CONF_DEVICES -- confirms a
+    consistently-unreachable device listed first doesn't get retried
+    forever while a perfectly reachable one (listed later) sits unused."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [
+                {CONF_SERIAL: LIGHT_SERIAL},  # listed FIRST, but weak/unreachable
+                {CONF_SERIAL: PUMP_SERIAL},   # listed second, but strong/reachable
+            ],
+        },
+        unique_id=MLPREFIX_HEX,
+    )
+    entry.add_to_hass(hass)
+
+    fake_pump_device = _fake_pump_device()
+    working_address = bytes.fromhex("fd11223344556677000000fffe001234")
+    probed_order = []
+
+    async def fake_discover_mesh_address(hass, serial, semaphore):
+        probed_order.append(serial)
+        return working_address if serial == PUMP_SERIAL else None
+
+    async def fake_ensure_connected(self):
+        return fake_pump_device
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(side_effect=fake_discover_mesh_address),
+    ), patch(
+        "custom_components.mobius._current_rssi",
+        # PUMP_SERIAL has the much stronger signal, despite being listed second.
+        side_effect=lambda hass, serial: -30 if serial == PUMP_SERIAL else -95,
+    ), patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        fake_ensure_connected,
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_pump_device,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await async_setup_entry(hass, entry)
+
+    # PUMP_SERIAL (stronger RSSI) was probed FIRST, despite being listed
+    # second in CONF_DEVICES.
+    assert probed_order[0] == PUMP_SERIAL
+
+
+async def test_setup_raises_not_ready_only_if_every_device_is_unreachable(hass):
+    """The one case this entry's own readiness legitimately SHOULD
+    depend on: if truly nothing in the tank can be reached at all,
+    there's genuinely nothing to set up yet."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
+        },
+        unique_id=MLPREFIX_HEX,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-90,
+    ):
+        with pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry)
+
+    # No coordinators were ever committed to -- this entry has nothing
+    # usable at all yet.
+    assert not hasattr(entry, "runtime_data") or entry.runtime_data is None
 
 
 # --------------------------------------------------------------------------

@@ -156,7 +156,23 @@ class GatewayRegistry:
         """
         group = self._group_for(pan_id)
         async with group.lock:
-            group.members[serial] = MemberState(serial=serial, rssi=rssi)
+            existing = group.members.get(serial)
+            if existing is not None:
+                # Update rssi in place rather than replacing the whole
+                # MemberState -- a fresh MemberState() would silently
+                # reset mesh_address back to None on every join(),
+                # including a normal Home Assistant restart (which
+                # re-joins every already-known device), forcing a
+                # redundant rediscovery connection for something that
+                # was almost certainly still accurate. Confirmed via a
+                # real test exposing this: the "skip rediscovery if
+                # already cached" optimization in __init__.py's own
+                # async_setup_entry() never actually took effect,
+                # because join() itself had already thrown the cached
+                # value away by the time that check ran.
+                existing.rssi = rssi
+            else:
+                group.members[serial] = MemberState(serial=serial, rssi=rssi)
             if group.gateway_serial is None and not group._electing:
                 if prefer_as_gateway:
                     self._assign_gateway(group, serial)
