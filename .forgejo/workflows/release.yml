@@ -28,9 +28,27 @@ jobs:
         uses: https://code.forgejo.org/actions/checkout@v4
 
       - name: Set up Python
+        # cache: "pip" -- confirmed via a real job log that this step's
+        # own pip install was responsible for the overwhelming majority
+        # of this job's total runtime: 12m17s spent installing test
+        # dependencies (pytest-homeassistant-custom-component pulls in
+        # the full homeassistant package, whose own dependency tree is
+        # 100+ packages -- numpy, cryptography, sqlalchemy, boto3, etc,
+        # all re-downloaded from scratch on every single run) out of a
+        # ~14 minute total job, versus the actual pytest run itself
+        # taking only 43 seconds. Confirmed via the same log that this
+        # genuinely wasn't compilation-bound (the handful of wheels this
+        # environment builds from source finish in well under 2 seconds
+        # combined) -- it's pure download/resolution time, exactly what
+        # dependency caching is for. Requires the runner itself to
+        # already be configured with a cache backend, or this step
+        # fails outright rather than degrading gracefully -- confirmed
+        # this repo's own runner already has one.
         uses: https://code.forgejo.org/actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements_test.txt
 
       - name: Install test dependencies
         run: |
