@@ -28,6 +28,9 @@
   sensors.
 - Added a "Gateway device" sensor showing which device is currently
   relaying for the rest of a tank, by name.
+- Added support for Home Assistant's built-in diagnostics download
+  (Settings > Devices & Services > Mobius > your tank > Download
+  diagnostics), useful if you ever need to report an issue.
 - Various reliability and under-the-hood fixes.
 
 **After upgrading**: your existing Mobius devices will show as failed.
