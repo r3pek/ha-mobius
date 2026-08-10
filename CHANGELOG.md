@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - Devices can now be added as a full tank instead of one at a time.
   When a new device is found, Mobius checks whether it's part of a
