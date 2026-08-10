@@ -24,7 +24,7 @@
 - Setting up a tank now only needs to connect to one device, not one
   per device -- Mobius learns where the rest are from that single
   connection instead. Faster setup, less Bluetooth traffic.
-- Added Mesh address, Age (at discovery), and Mesh prefix diagnostic
+- Added Mesh address, Discovered at, and Mesh prefix diagnostic
   sensors.
 - Added a "Gateway device" sensor showing which device is currently
   relaying for the rest of a tank, by name.

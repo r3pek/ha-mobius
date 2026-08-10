@@ -61,8 +61,8 @@
       "mesh_address": {
         "name": "Mesh address"
       },
-      "discovery_age": {
-        "name": "Age (at discovery)"
+      "discovered_at": {
+        "name": "Discovered at"
       },
       "mesh_prefix": {
         "name": "Mesh prefix"

@@ -203,10 +203,10 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert mesh_address is not None
     assert mesh_address.state == "fd1c:5ec7:80e3:5c01:0:ff:fe00:1234"
 
-    # No discovery-age sensor -- this is an ad-hoc entry (no CONF_AGE on
-    # its device record), which never successfully calls discover_tank()
-    # in the first place.
-    assert hass.states.get("sensor.mp40qd_right_age_at_discovery") is None
+    # No "discovered at" sensor -- this is an ad-hoc entry (no
+    # CONF_DISCOVERED_AT at all), which never successfully calls
+    # discover_tank() in the first place.
+    assert hass.states.get("sensor.mp40qd_right_discovered_at") is None
 
     # The actual new behavior: sw_version comes from the confirmed "Product
     # OS" label, and pumps don't support calibration (get_calibration_info()
@@ -352,7 +352,12 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
         data={
             CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
             CONF_DEVICES: [
-                {CONF_SERIAL: PUMP_SERIAL, CONF_AGE: 373},
+                # PUMP_SERIAL deliberately has NO CONF_AGE -- matches the
+                # real scenario this whole fix is for: the connected/
+                # probed device's own MeshPeer entry never carries an
+                # age (see DiscoveredAtSensor's own docstring), unlike
+                # LIGHT_SERIAL (a regular peer, which does get one).
+                {CONF_SERIAL: PUMP_SERIAL},
                 {CONF_SERIAL: LIGHT_SERIAL, CONF_AGE: 8490},
             ],
             CONF_DISCOVERED_AT: "2026-08-01T12:00:00+00:00",
@@ -397,16 +402,31 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     assert pump_device.via_device_id == tank_device.id
     assert light_device.via_device_id == tank_device.id
 
-    # Both devices got their own discovery-age sensor, from their own
-    # CONF_AGE entry -- confirms the per-device age doesn't get mixed up
-    # between the two.
-    pump_age = hass.states.get("sensor.mp40qd_right_age_at_discovery")
-    assert pump_age is not None
-    assert pump_age.state == "373"
-    # The actual point of the new attribute: a bare age number has no
-    # anchor point on its own -- confirms the shared, tank-level
-    # discovery timestamp is attached, not just the number itself.
-    assert pump_age.attributes["discovered_at"] == "2026-08-01T12:00:00+00:00"
+    # Both devices got the same, shared discovered_at value -- the
+    # actual core point: this sensor now exists for EVERY device in the
+    # tank uniformly, including PUMP_SERIAL, which has NO CONF_AGE of
+    # its own (the real scenario this whole fix is for -- see the
+    # fixture's own comment above and DiscoveredAtSensor's own
+    # docstring for why).
+    from homeassistant.util import dt as dt_util
+
+    pump_state = hass.states.get("sensor.mp40qd_right_discovered_at")
+    assert pump_state is not None
+    assert dt_util.parse_datetime(pump_state.state) == dt_util.parse_datetime("2026-08-01T12:00:00+00:00")
+    # No raw_age attribute at all for PUMP_SERIAL -- it never had one.
+    assert "raw_age" not in pump_state.attributes
+
+    # LIGHT_SERIAL shows the exact same discovered_at, PLUS its own
+    # raw_age as an attribute (it did have one, unlike PUMP_SERIAL) --
+    # confirms per-device age doesn't get mixed up between the two.
+    # Both devices share the same mocked device info in this test (see
+    # _fake_connect's own comment above), so HA disambiguates their
+    # identical names with a "_2" suffix -- not a separate, distinct
+    # entity ID based on a different model name.
+    light_state = hass.states.get("sensor.mp40qd_right_discovered_at_2")
+    assert light_state is not None
+    assert dt_util.parse_datetime(light_state.state) == dt_util.parse_datetime("2026-08-01T12:00:00+00:00")
+    assert light_state.attributes["raw_age"] == 8490
 
     # The prefix sensor is on the tank device, not any per-device entity
     # -- shared, tank-level data.
