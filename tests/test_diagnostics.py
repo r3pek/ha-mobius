@@ -16,10 +16,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES, CONF_AGE, CONF_DISCOVERED_AT
 from custom_components.mobius.diagnostics import async_get_config_entry_diagnostics, _json_safe
 
-PUMP_SERIAL = "76517731952041"
-LIGHT_SERIAL = "7V4Z00F143RBED"
+PUMP_SERIAL = "00000000000001"
+LIGHT_SERIAL = "FAKESERIAL0001"
 PAN_ID = 0x3D0F
-MLPREFIX_HEX = "fd1c5ec780e35c01"
+MLPREFIX_HEX = "fdaaaaaaaaaaaaaa"
 
 
 def _fake_pump_device():

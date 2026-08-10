@@ -20,7 +20,7 @@ from custom_components.mobius import async_setup, async_setup_entry, tank_device
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 from mobius import MeshPeer, Model, Tank
 
-MLPREFIX_BYTES = bytes.fromhex("fd1c5ec780e35c01")
+MLPREFIX_BYTES = bytes.fromhex("fdaaaaaaaaaaaaaa")
 
 
 def _fake_tank_for(serial: str, *other_serials: str) -> Tank:
@@ -47,11 +47,11 @@ def _fake_no_tank() -> Tank:
 
 from custom_components.mobius.gateway_registry import GatewayRegistry
 
-PUMP_ADDRESS = "E4:67:D8:17:84:83"
-PUMP_SERIAL = "76517731952041"
-LIGHT_SERIAL = "7V4Z00F143RBED"
+PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
+PUMP_SERIAL = "00000000000001"
+LIGHT_SERIAL = "FAKESERIAL0001"
 PAN_ID = 0x3D0F
-MLPREFIX_HEX = "fd1c5ec780e35c01"
+MLPREFIX_HEX = "fdaaaaaaaaaaaaaa"
 
 
 @pytest.fixture(autouse=True)

@@ -16,25 +16,30 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
 from mobius import Tank, MeshPeer, Model
 
-# Real captured payload for a VorTech MP40QD pump (see python-mobius tests).
-REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736343935323231303539303139")
-REAL_LIGHT_PAYLOAD = bytes.fromhex("b30001000000000f3d3756345a30304631343352424544")
+# Payload shaped after a real captured VorTech MP40QD pump advertisement
+# (see python-mobius tests) -- model/flags/pan_id bytes are the genuine,
+# validated wire format; the embedded serial itself has been swapped for
+# an obviously-fake placeholder of the same byte length.
+REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3030303030303030303030303032")
+REAL_LIGHT_PAYLOAD = bytes.fromhex("b30001000000000f3d46414b4553455249414c30303031")
 MOBIUS_COMPANY_ID = 0x0202
-PUMP_ADDRESS = "E4:89:1D:3C:C5:F1"
-LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
+PUMP_ADDRESS = "AA:AA:AA:AA:AA:02"
+LIGHT_ADDRESS = "AA:AA:AA:AA:AA:03"
 # Serials decoded from the payloads above -- confirms unique_id ends up
 # serial-based, not address-based.
-PUMP_SERIAL = "76495221059019"
-LIGHT_SERIAL = "7V4Z00F143RBED"
+PUMP_SERIAL = "00000000000002"
+LIGHT_SERIAL = "FAKESERIAL0001"
 # Decoded pan_id from REAL_PUMP_PAYLOAD/REAL_LIGHT_PAYLOAD above -- both
-# real captures share the same pan_id (same physical tank) -- deliberately
-# reused for the multi-device tank tests below, not a coincidence.
+# payloads share the same real, unmodified pan_id (same physical tank
+# during the original capture) -- deliberately reused for the
+# multi-device tank tests below, not a coincidence.
 PAN_ID = 0x3D0F
 
-# A confirmed real 8-byte Thread mesh-local prefix (see python-mobius's own
-# NetworkedThreadDevices real-hardware capture) -- used as this tank's
-# CONF_MLPREFIX/unique_id in the tests below.
-MLPREFIX = bytes.fromhex("fd1c5ec780e35c01")
+# An 8-byte Thread mesh-local prefix, format-accurate (see python-mobius's
+# own NetworkedThreadDevices real-hardware capture for the genuine wire
+# structure this is shaped after) but with an obviously-fake placeholder
+# value -- used as this tank's CONF_MLPREFIX/unique_id in the tests below.
+MLPREFIX = bytes.fromhex("fdaaaaaaaaaaaaaa")
 
 
 def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBleak:
@@ -121,7 +126,7 @@ async def test_bluetooth_discovery_creates_entry(hass):
     # The actual point of the serial-based identity fix: unique_id is the
     # serial, not the address.
     assert result2["result"].unique_id == PUMP_SERIAL
-    # Real model decoded from the real captured payload -- confirms the
+    # Real model byte decoded from the payload -- confirms the
     # config flow's use of mobius.parse_manufacturer_data() actually works.
     assert "VorTechMP40wG3QD" in result2["title"]
     # The actual point of this test: title uses serial for disambiguation,
@@ -304,7 +309,8 @@ async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
     instead of the real model. Confirms the confirm-step refresh picks up
     fuller data once it's available in HA's Bluetooth manager cache."""
     incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")  # no usable payload yet
-    # Real captured payload becomes available by the time we check again.
+    # The format-realistic payload (see REAL_PUMP_PAYLOAD's own comment)
+    # becomes available by the time we check again.
     complete_info = _make_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)
 
     with patch(

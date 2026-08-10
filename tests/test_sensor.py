@@ -18,11 +18,11 @@ from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
 
 PAN_ID = 0x3D0F
-MLPREFIX_HEX = "fd1c5ec780e35c01"
-PUMP_ADDRESS = "E4:67:D8:17:84:83"
-PUMP_SERIAL = "76517731952041"
-LIGHT_ADDRESS = "84:25:3F:AF:F0:C2"
-LIGHT_SERIAL = "7V4Z00F143RBED"
+MLPREFIX_HEX = "fdaaaaaaaaaaaaaa"
+PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
+PUMP_SERIAL = "00000000000001"
+LIGHT_ADDRESS = "AA:AA:AA:AA:AA:03"
+LIGHT_SERIAL = "FAKESERIAL0001"
 
 # Real 13-channel set and a subset of real interpolated intensities,
 # captured live from an actual Radion XR15 G6 Pro during development.
@@ -42,7 +42,7 @@ def _fake_pump_device():
     device = MagicMock()
     device.get_device_info = AsyncMock(return_value={
         "model_raw": 42, "model": "VorTechMP40wG3QD", "manufacturer": "EcoTech Marine",
-        "name": "MP40QD Right", "serial": "76517731952041",
+        "name": "MP40QD Right", "serial": "00000000000001",
         "primitive_type": "VorTechV1", "error_state": "NoError", "mac_address": None,
     })
     device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
@@ -63,7 +63,7 @@ def _fake_pump_device():
         "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
     })
     device.get_own_mesh_address = AsyncMock(
-        return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")
+        return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")
     )
     return device
 
@@ -72,7 +72,7 @@ def _fake_light_device():
     device = MagicMock()
     device.get_device_info = AsyncMock(return_value={
         "model_raw": 179, "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
-        "name": "", "serial": "7V4Z00F143RBED",
+        "name": "", "serial": "FAKESERIAL0001",
         "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
     })
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VisualV1)
@@ -113,7 +113,7 @@ def _fake_light_device():
     calibration.upper_bound = None
     device.get_calibration_info = AsyncMock(return_value=calibration)
     device.get_own_mesh_address = AsyncMock(
-        return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe005678")
+        return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")
     )
     return device
 
@@ -137,7 +137,7 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
         AsyncMock(return_value=Tank(prefix=None, peers=[])),
     ), patch(
         "custom_components.mobius.discover_mesh_address",
-        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -201,7 +201,7 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # this proactively discovered too, not just relayed ones.
     mesh_address = hass.states.get("sensor.mp40qd_right_mesh_address")
     assert mesh_address is not None
-    assert mesh_address.state == "fd1c:5ec7:80e3:5c01:0:ff:fe00:1234"
+    assert mesh_address.state == "fdaa:aaaa:aaaa:aaaa:0:ff:fe00:1234"
 
     # No "discovered at" sensor -- this is an ad-hoc entry (no
     # CONF_DISCOVERED_AT at all), which never successfully calls
@@ -249,22 +249,22 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
         AsyncMock(return_value=Tank(prefix=None, peers=[])),
     ), patch(
         "custom_components.mobius.discover_mesh_address",
-        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe005678")),
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
     assert entry.state.value == "loaded"
 
-    royal_blue = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_royalblue_intensity")
+    royal_blue = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_royalblue_intensity")
     assert royal_blue is not None
     assert royal_blue.state == "100"  # 1000 permille / 10 = 100% (whole number, not 100.0)
 
-    cool_white = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_coolwhite_intensity")
+    cool_white = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_coolwhite_intensity")
     assert cool_white is not None
     assert cool_white.state == "24"  # 240 permille / 10 = 24% (whole number, not 24.0)
 
-    support = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_support_tier")
+    support = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_support_tier")
     assert support is not None
     assert support.state == "light"
 
@@ -280,7 +280,7 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     assert device is not None
     assert device.sw_version == "1.5.103"
 
-    calibration = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_calibration")
+    calibration = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_calibration")
     assert calibration is not None
     assert calibration.state == "True"
     assert "lower_bound" not in calibration.attributes  # fixture sets it to None -> omitted
@@ -290,13 +290,13 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     # at all) -- confirms the full breakdown sensor surfaces the
     # fallback-derived value too, plus every other reported component as
     # an attribute.
-    firmware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_firmware_version")
+    firmware = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_firmware_version")
     assert firmware is not None
     assert firmware.state == "1.5.103"
     assert firmware.attributes["Filesystem"] == "1.1.0"
     assert firmware.attributes["WLAN"] == "3.1.0"
 
-    hardware = hass.states.get("sensor.radionxr15wg6pro_7v4z00f143rbed_hardware_revision")
+    hardware = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_hardware_revision")
     assert hardware is not None
     assert hardware.state == "1"
 
@@ -323,7 +323,7 @@ async def test_entry_unload_removes_entities_and_disconnects(hass):
         AsyncMock(return_value=Tank(prefix=None, peers=[])),
     ), patch(
         "custom_components.mobius.discover_mesh_address",
-        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
     ):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -384,7 +384,7 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
         AsyncMock(return_value=Tank(prefix=bytes.fromhex(MLPREFIX_HEX), peers=[])),
     ), patch(
         "custom_components.mobius.discover_mesh_address",
-        AsyncMock(return_value=bytes.fromhex("fd1c5ec780e35c01000000fffe001234")),
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -466,12 +466,12 @@ def test_identical_model_devices_get_distinct_names_via_serial():
     # dict -- see _device_info()'s own docstring for why (a tank peer
     # has no stored address, so serial had to become the one thing every
     # device is guaranteed to provide).
-    info_a = _device_info("7V4Z00F149RBF3", status_a)
-    info_b = _device_info("7V4Z00F143RBED", status_b)
+    info_a = _device_info("FAKESERIAL0002", status_a)
+    info_b = _device_info("FAKESERIAL0001", status_b)
 
     assert info_a["name"] != info_b["name"]
-    assert "7V4Z00F149RBF3" in info_a["name"]
-    assert "7V4Z00F143RBED" in info_b["name"]
+    assert "FAKESERIAL0002" in info_a["name"]
+    assert "FAKESERIAL0001" in info_b["name"]
 
 
 class TestGatewayDeviceSensor:

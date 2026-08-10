@@ -26,12 +26,14 @@ from custom_components.mobius.coordinator import (
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from mobius import PrimitiveType, Tank, MeshPeer, Model
 
-PUMP_SERIAL = "76517731952041"
-PUMP_ADDRESS = "E4:67:D8:17:84:83"
+PUMP_SERIAL = "00000000000001"
+PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
 PAN_ID = 0x3D0F
 
-# Real captured payload for this pump (see python-mobius's own tests).
-REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3736353137373331393532303431")
+# Payload shaped after a real captured advertisement for this pump (see
+# python-mobius's own tests) -- serial replaced with an obviously-fake
+# placeholder of the same byte length.
+REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3030303030303030303030303031")
 MOBIUS_COMPANY_ID = 0x0202
 
 
@@ -84,7 +86,7 @@ async def test_resolve_current_ble_device_matches_by_serial(hass):
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
 
-    other_payload = bytes.fromhex("2a0001000000000f3d3736343935323231303539303139")  # different serial
+    other_payload = bytes.fromhex("2a0001000000000f3d3030303030303030303030303032")  # different serial
     discovered = [
         _fake_discovery_info("AA:AA:AA:AA:AA:AA", other_payload),
         _fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD),
