@@ -28,6 +28,7 @@ from mobius import PrimitiveType, Tank, MeshPeer, Model
 
 PUMP_SERIAL = "00000000000001"
 PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
+LIGHT_SERIAL = "FAKESERIAL0001"
 PAN_ID = 0x3D0F
 
 # Payload shaped after a real captured advertisement for this pump (see
@@ -924,3 +925,100 @@ class TestDiscoverTankForSerial:
             ])
 
         assert concurrent_count["max_seen"] == 1
+
+
+# --------------------------------------------------------------------------
+# Mesh last-seen refresh (MobiusDeviceCoordinator._refresh_mesh_last_seen)
+# --------------------------------------------------------------------------
+
+async def test_gateway_coordinator_refreshes_mesh_last_seen_for_every_member(hass):
+    """The core point: ONE extra read on the gateway's own poll cycle
+    populates the registry's own mesh_last_seen_at for EVERY tank
+    member, not just the gateway's own -- including a member whose own
+    coordinator never ran this cycle at all."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-60)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    fake_device.discover_networked_thread_devices = AsyncMock(return_value=[
+        MeshPeer(
+            serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+            short_address=0x1234, address=b"\x00" * 16, age=5000,  # 5 real seconds ago
+        ),
+        MeshPeer(
+            serial=LIGHT_SERIAL, model_raw=179, model=Model.RadionXR15wG6Pro,
+            short_address=0x5678, address=b"\x00" * 16, age=120000,  # 2 real minutes ago
+        ),
+    ])
+
+    group = registry.group(PAN_ID)
+    frozen_now = dt_util.utcnow()
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device),
+    ), patch("custom_components.mobius.coordinator.dt_util.utcnow", return_value=frozen_now):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    # The gateway's own coordinator data carries its own value.
+    assert coordinator.data["mesh_last_seen_at"] == frozen_now - timedelta(milliseconds=5000)
+    # AND the OTHER member's own registry entry was updated too, from
+    # this SAME single read -- even though LIGHT_SERIAL's own
+    # coordinator was never involved in this refresh at all.
+    assert group.members[LIGHT_SERIAL].mesh_last_seen_at == frozen_now - timedelta(milliseconds=120000)
+
+
+async def test_relayed_coordinator_picks_up_mesh_last_seen_from_registry(hass):
+    """A relayed device's own coordinator does NOT do the extra read
+    itself -- it just reads whatever the gateway's own last poll already
+    wrote to the shared registry."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)  # becomes gateway
+    await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-90)
+    group = registry.group(PAN_ID)
+    known_last_seen = dt_util.utcnow() - timedelta(seconds=42)
+    registry.update_mesh_last_seen(PAN_ID, LIGHT_SERIAL, known_last_seen)
+    registry.update_mesh_address(PAN_ID, LIGHT_SERIAL, b"\xfd" + b"\x00" * 15)
+
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+    fake_gateway_device = _make_fake_pump_device()
+    # No discover_networked_thread_devices call expected for a relayed
+    # device's own coordinator -- deliberately not mocked, so a call
+    # would raise and get caught by the non-fatal handling, but the
+    # assertion below confirms it wasn't even needed.
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_gateway_device,
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert coordinator.data["mesh_last_seen_at"] == known_last_seen
+
+
+async def test_mesh_last_seen_refresh_failure_is_non_fatal(hass):
+    """Supplementary data layered on top of an already-successful status
+    read -- a failure here must not undo that success."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    fake_device.discover_networked_thread_devices = AsyncMock(
+        side_effect=Exception("mesh peer read failed this cycle"),
+    )
+
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    # The main status read still succeeded.
+    assert coordinator.last_update_success
+    assert coordinator.data["support"] == "pump"
+    # Just no mesh_last_seen_at this cycle.
+    assert coordinator.data["mesh_last_seen_at"] is None

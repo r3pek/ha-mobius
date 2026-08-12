@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from homeassistant.core import HomeAssistant
@@ -77,6 +78,19 @@ class MemberState:
     # background task) -- this device's own Thread mesh-local IPv6
     # address, needed to construct a RelayedMobiusDevice targeting it.
     mesh_address: Optional[bytes] = None
+    # Refreshed on every one of the gateway's own poll cycles (every
+    # POLL_INTERVAL -- see coordinator.py's own _fetch()), not a one-time
+    # snapshot -- confirmed via reverse engineering the app's own
+    # network-troubleshooting screen that the underlying value this is
+    # computed from (each peer's own "how long since last heard from on
+    # the mesh" duration) is itself a live, continuously-changing value,
+    # not something meaningful to capture once and treat as static. An
+    # absolute, already-computed timestamp (this device was last heard
+    # from AT this moment), not the raw duration -- computed once, right
+    # when the underlying duration is freshest, rather than a raw
+    # duration paired with a separate poll timestamp for every consumer
+    # to redo that subtraction itself.
+    mesh_last_seen_at: Optional[datetime] = None
 
 
 @dataclass
@@ -320,3 +334,14 @@ class GatewayRegistry:
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
             group.members[serial].mesh_address = address
+
+    def update_mesh_last_seen(self, pan_id: int, serial: str, last_seen_at: datetime) -> None:
+        """Caches a member's own, freshly-computed "last heard from on
+        the mesh" timestamp -- see coordinator.py's own _fetch(), which
+        calls this for every peer in one shot on each of the gateway's
+        own poll cycles, not per-member. Same reasoning as
+        update_mesh_address() for not gating this by the group lock: only
+        ever read for display, never during gateway selection itself."""
+        group = self._groups.get(pan_id)
+        if group is not None and serial in group.members:
+            group.members[serial].mesh_last_seen_at = last_seen_at

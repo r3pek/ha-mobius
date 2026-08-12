@@ -61,6 +61,9 @@
       "mesh_address": {
         "name": "Mesh address"
       },
+      "mesh_last_seen": {
+        "name": "Mesh last seen"
+      },
       "mesh_prefix": {
         "name": "Mesh prefix"
       },

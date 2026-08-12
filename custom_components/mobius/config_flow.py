@@ -542,20 +542,13 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         coordinator layer resolves and reconnects by serial regardless).
 
         Does NOT store each peer's own "age" value (python-mobius's
-        MeshPeer.age) at all -- an earlier version of this integration
-        did, and surfaced it as a diagnostic sensor, but real hardware
-        testing disproved the "age" name's own implied meaning: two
-        consecutive discover_tank() scans against the SAME gateway, with
-        nothing else changing, showed values that both increased AND
-        decreased between runs for the same physical device -- something
-        genuinely impossible for any kind of time-since-last-seen
-        counter. Combined with no actual Java/smali evidence anywhere
-        (in python-mobius's own reverse-engineering documentation) for
-        what this field really represents -- the name itself was always
-        just a plausible-sounding guess, never confirmed -- there's
-        nothing honest to display here. Removed rather than kept around
-        unused, since storing data now known to be unreliable isn't
-        worth the upkeep.
+        MeshPeer.age) at all -- confirmed via reverse engineering the
+        app's own network-troubleshooting screen to be a live, constantly-
+        changing duration (time since that peer was last heard from on
+        the mesh), not a fixed value there's any point capturing once at
+        setup time and keeping around unrefreshed. See sensor.py's own
+        MeshLastSeenSensor for where this now actually lives instead --
+        refreshed on every regular poll cycle, not stored here at all.
 
         title comes from what was actually typed/kept on the
         tank_confirm form (see async_step_tank_confirm()) -- not always

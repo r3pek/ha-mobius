@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any, Optional
 
 from homeassistant.components import bluetooth
@@ -391,12 +392,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device = await group.gateway_connection.ensure_connected()
                 data = await _fetch_all(device)
                 self.registry.record_gateway_success(self.pan_id)
-                return data
+                await self._refresh_mesh_last_seen(group, device)
             else:
                 gateway_device = await group.gateway_connection.ensure_connected()
                 peer = await self._resolve_own_mesh_peer(group)
                 relayed = RelayedMobiusDevice(gateway_device, peer)
-                return await _fetch_all(relayed)
+                data = await _fetch_all(relayed)
         except Exception:
             # A READ can fail even after ensure_connected() reported
             # success (the connection can drop in between) -- this needs
@@ -416,6 +417,46 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 group.gateway_connection.mark_disconnected()
                 await self.registry.record_gateway_failure(self.pan_id)
             raise
+
+        # Every device -- gateway and relayed alike -- picks up its own,
+        # most-recently-known value here, on every single poll cycle
+        # (not just the gateway's own). Only the gateway itself actually
+        # does the extra read above; a relayed device just reads
+        # whatever the gateway's own last poll (up to one POLL_INTERVAL
+        # old) already wrote to the shared registry -- avoids every
+        # device in an N-device tank independently repeating the exact
+        # same mesh-wide read every cycle for data that's identical
+        # regardless of which device asks for it.
+        member = group.members.get(self.serial)
+        data["mesh_last_seen_at"] = member.mesh_last_seen_at if member else None
+        return data
+
+    async def _refresh_mesh_last_seen(self, group: PanGroup, device: MobiusDevice) -> None:
+        """Refreshes every tank member's own "last heard from on the
+        mesh" timestamp, from the SAME connection _fetch() just used for
+        this device's own regular status read -- one extra attribute
+        read, reused for every device in the tank, not one read per
+        device. Deliberately non-fatal: this is supplementary
+        information layered on top of a status read that already
+        succeeded, so a failure here (a device that doesn't support this
+        attribute, or a transient read error) must not undo that
+        success or fail the whole poll cycle over it -- just leaves
+        every member's own value at whatever it was already."""
+        try:
+            peers = await device.discover_networked_thread_devices()
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not refresh mesh last-seen data via gateway %s this cycle: %s",
+                self.serial, err,
+            )
+            return
+        now = dt_util.utcnow()
+        for peer in peers:
+            if peer.age is None:
+                continue
+            self.registry.update_mesh_last_seen(
+                self.pan_id, peer.serial, now - timedelta(milliseconds=peer.age),
+            )
 
     async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
         """Returns a MeshPeer for THIS coordinator's own device, using a

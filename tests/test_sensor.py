@@ -6,13 +6,15 @@ canned data reuses real values captured from actual hardware during this
 project's development, for both a pump and a light.
 """
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank
+from mobius import PrimitiveType, Tank, MeshPeer, Model
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -223,6 +225,56 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # isn't a meaningful question for a single, ad-hoc device anyway.
     gateway_states = [s for s in hass.states.async_all("sensor") if "gateway_device" in s.entity_id]
     assert gateway_states == []
+
+
+async def test_mesh_last_seen_sensor_reflects_the_gateways_own_fresh_read(hass):
+    """End-to-end confirmation that the mesh-last-seen sensor is wired
+    up and shows a real, freshly-computed timestamp, not the raw
+    duration -- and that it's on THIS device's own coordinator data,
+    refreshed on every regular poll cycle rather than a one-time
+    snapshot captured at setup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+    fake_device.discover_networked_thread_devices = AsyncMock(return_value=[
+        MeshPeer(
+            serial=PUMP_SERIAL, model_raw=42, model=Model.VorTechMP40wG3QD,
+            short_address=0x1234, address=b"\x00" * 16, age=10000,  # 10 real seconds ago
+        ),
+    ])
+
+    frozen_now = dt_util.utcnow()
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ), patch(
+        "custom_components.mobius.coordinator.dt_util.utcnow", return_value=frozen_now,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.mp40qd_right_mesh_last_seen")
+    assert state is not None
+    # A tolerance, not exact equality -- HA's own timestamp state string
+    # serialization truncates to whole seconds, while frozen_now itself
+    # has microsecond precision.
+    actual = dt_util.parse_datetime(state.state)
+    expected = frozen_now - timedelta(seconds=10)
+    assert abs((actual - expected).total_seconds()) < 1
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):
