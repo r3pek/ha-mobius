@@ -2,20 +2,9 @@
 
 ## Unreleased
 
-- Removed the "Discovered at" diagnostic sensor added in 0.3.0. Testing
-  against real hardware showed the underlying value it was based on
-  doesn't actually behave as a timestamp -- checking it twice in a row
-  gave numbers that went both up and down, with nothing to explain why.
-  Since there's no reliable way to turn it into a real date, it's gone
-  rather than show something misleading. If you added this sensor to a
-  dashboard or automation, it'll simply disappear after upgrading.
-- Added it back, correctly this time, as "Mesh last seen". Further
-  testing found what that underlying value actually is: how long ago a
-  device was last heard from on the mesh, which resets whenever fresh
-  activity comes in -- not a fixed point in time, which is exactly why
-  the numbers seemed to jump around before. This new sensor is kept
-  current with every regular device check (about every 30 seconds), not
-  a one-time snapshot.
+- Fixed the "Discovered at" sensor, which could show confusing,
+  out-of-order values. Renamed to "Mesh last seen" and now updates
+  about every 30 seconds instead of being a one-time snapshot.
 
 ## 0.3.0
 
