@@ -5,6 +5,13 @@
 - Fixed the "Discovered at" sensor, which could show confusing,
   out-of-order values. Renamed to "Mesh last seen" and now updates
   about every 30 seconds instead of being a one-time snapshot.
+- Fixed gateway failover getting stuck bouncing between the same two
+  devices forever on a tank with more than two, never trying the
+  others.
+- A tank now checks and refreshes its own connection info (which
+  device to reconnect through, addresses) about once a minute instead
+  of every 12 hours, so a device that couldn't be reached comes back
+  much sooner once it's reachable again.
 
 ## 0.3.0
 

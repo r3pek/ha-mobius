@@ -9,11 +9,13 @@ including the gateway, synthetic tank device registration).
 """
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
@@ -862,9 +864,12 @@ def _fake_peer(serial: str) -> MeshPeer:
     )
 
 
-async def test_revalidate_skips_cleanly_if_no_gateway_elected(hass):
-    """No group at all, or a group with no elected gateway yet -- both
-    just skip this run quietly, nothing to check against."""
+async def test_revalidate_skips_cleanly_if_no_group_exists_at_all(hass):
+    """No group at all (nobody has ever called join() for this pan_id)
+    -- skips this run quietly, nothing to check against or recover.
+    Different from "a group exists but has no gateway right now" -- see
+    test_revalidate_recovers_a_gatewayless_tank below for that case,
+    which actively tries to recover rather than just skipping."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["gateway_registry"] = GatewayRegistry(hass, asyncio.Semaphore(2))
     entry = MockConfigEntry(
@@ -981,6 +986,96 @@ async def test_revalidate_auto_migrates_device_found_on_different_tracked_tank(h
     # Both entries got reloaded -- confirms neither side is left stale.
     reloaded_ids = {call.args[0] for call in mock_reload.call_args_list}
     assert reloaded_ids == {this_entry.entry_id, other_entry.entry_id}
+
+
+async def test_revalidate_recovers_a_gatewayless_tank(hass):
+    """The other real, confirmed production issue this now addresses: a
+    tank that's lost its gateway entirely (every candidate previously
+    exhausted, or a single-device tank whose only member kept failing)
+    used to just sit there forever, since nothing ever re-triggered
+    election for an existing, already-gatewayless group. Confirms
+    _async_revalidate_tank() actually recovers it now, via join()'s own
+    already-tested re-election logic rather than reimplementing it."""
+    semaphore = asyncio.Semaphore(2)
+    registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    hass.data[DOMAIN]["connection_semaphore"] = semaphore
+    # A group that exists (has a member) but currently has NO gateway --
+    # the exact state left behind by, e.g., every candidate in a tank
+    # exhausting itself.
+    group = PanGroup(pan_id=PAN_ID, gateway_serial=None)
+    group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL, rssi=-50)
+    registry._groups[PAN_ID] = group
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_revalidate_tank(hass, entry)
+
+    # A gateway now exists again -- the only possible candidate, since
+    # this group only ever had one member.
+    assert registry.group(PAN_ID).gateway_serial == PUMP_SERIAL
+
+
+async def test_revalidate_refreshes_known_members_mesh_address_and_last_seen(hass):
+    """The actual core new maintenance behavior: every known member's
+    own mesh address and mesh-last-seen data gets refreshed from this
+    same read, not just checked for migration -- confirms a device
+    whose address was never successfully discovered at setup (or went
+    stale) gets a real, repeated chance to be found again."""
+    frozen_now = dt_util.utcnow()
+    peer = _fake_peer(LIGHT_SERIAL)
+    peer.address = b"\xfd" + b"\x11" * 15
+    peer.age = 5000  # 5 real seconds ago
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [peer])
+    group.members[LIGHT_SERIAL] = MemberState(serial=LIGHT_SERIAL)  # no address cached yet
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
+        },
+        unique_id=PAN_ID,
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.mobius.dt_util.utcnow", return_value=frozen_now):
+        await _async_revalidate_tank(hass, entry)
+
+    member = registry.group(PAN_ID).members[LIGHT_SERIAL]
+    assert member.mesh_address == peer.address
+    assert member.mesh_last_seen_at == frozen_now - timedelta(milliseconds=5000)
+
+
+async def test_revalidate_refresh_is_best_effort_leaves_unreported_member_alone(hass):
+    """A known member simply not reported in this particular round (a
+    real, expected outcome -- BLE info isn't always available every
+    single check) keeps whatever was already cached, rather than being
+    wiped or treated as an error -- matches this function's own
+    established "one round proves nothing" philosophy."""
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])  # nothing reported at all
+    existing_address = b"\xfd" + b"\x22" * 15
+    group.members[LIGHT_SERIAL] = MemberState(serial=LIGHT_SERIAL, mesh_address=existing_address)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
+        },
+        unique_id=PAN_ID,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_revalidate_tank(hass, entry)
+
+    assert registry.group(PAN_ID).members[LIGHT_SERIAL].mesh_address == existing_address
 
 
 async def test_setup_entry_registers_periodic_revalidation(hass):

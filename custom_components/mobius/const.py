@@ -91,19 +91,29 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # this for an entire group at once.
 MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 
-# How often each tank re-checks who's actually on its own Thread mesh,
-# reusing its existing gateway connection rather than opening a new one
-# -- catches a device that's since moved to a DIFFERENT, already-tracked
-# tank (auto-migrated -- see __init__.py's own periodic revalidation
-# logic). Deliberately infrequent: tank membership changes are rare,
-# deliberate, physical events (someone moving a pump to a different
-# aquarium), not something that needs near-real-time detection the way
-# a device's own status does -- and each check costs a real, if usually
-# already-open, BLE connection. A single failed check isn't itself
-# actionable (see the same reasoning GATEWAY_FAILURE_THRESHOLD's own
-# docstring gives for why one bad read shouldn't trigger anything) --
-# it's just skipped, with the next scheduled run acting as its own retry.
-TANK_REVALIDATION_INTERVAL = timedelta(hours=12)
+# How often each tank re-checks who's actually on its own Thread mesh
+# AND refreshes what every member's own connection info looks like right
+# now (mesh address, mesh last-seen -- see __init__.py's own
+# _async_revalidate_tank()) -- reusing its existing gateway connection
+# rather than opening a new one where one's already open. Used to be
+# much less frequent and purely about migration detection -- confirmed
+# via a real production issue that a much shorter interval matters for a
+# second, at-least-as-important reason: a device whose own mesh address
+# was never successfully discovered (or a tank that's lost its gateway
+# entirely) has no way back in without this task actively retrying, and
+# the whole reason a device relays through a gateway at all is to
+# recover from exactly this kind of connectivity hiccup -- a recovery
+# path that only checks once every 12 hours isn't really a recovery path
+# in practice. Still can't be arbitrarily fast (each check costs a real,
+# if usually already-open, BLE connection, and gateway migration itself
+# is a rare, deliberate, physical event), so this is a floor: frequent
+# enough that "stuck for hours" isn't a realistic outcome, without
+# hammering the connection on every single poll cycle. A single failed
+# check isn't itself actionable (see the same reasoning
+# GATEWAY_FAILURE_THRESHOLD's own docstring gives for why one bad read
+# shouldn't trigger anything) -- it's just skipped, with the next
+# scheduled run acting as its own retry, same as before.
+TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 
 # --------------------------------------------------------------------------
 # Tank-level config entries -- one config entry per Thread mesh/"tank"

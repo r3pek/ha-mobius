@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
@@ -116,14 +118,38 @@ def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex:
 
 async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
     """
-    Periodic per-entry membership check, run every TANK_REVALIDATION_INTERVAL
-    (see that constant's own docstring for why this is deliberately
-    infrequent) -- reuses the entry's existing gateway connection (no new
-    BLE connect/disconnect cycle in the common case, since the gateway is
-    already connected most of the time for its own regular polling) to
-    ask what else is currently on its Thread mesh.
+    Periodic per-entry check, run every TANK_REVALIDATION_INTERVAL (see
+    that constant's own docstring for the full reasoning behind its
+    current value) -- reuses the entry's existing gateway connection (no
+    new BLE connect/disconnect cycle in the common case, since the
+    gateway is already connected most of the time for its own regular
+    polling) to ask what else is currently on its Thread mesh, AND to
+    keep every known member's own connection info current.
 
-    Three real, considered outcomes:
+    Two real jobs, not one:
+
+    1. RECOVERY, if there's currently no gateway at all for this tank
+       (every candidate previously exhausted -- see gateway_registry.py's
+       own PanGroup.recently_failed_gateways docstring -- or a single-
+       device tank whose only member kept failing). registry.join() is
+       reused rather than reimplementing election here: its own
+       gateway_serial-is-None check already re-triggers a normal election
+       for an EXISTING group exactly the same way it does for a brand-new
+       one, so this just needs to call it, not duplicate its logic.
+    2. MAINTENANCE, once a gateway does exist: every known member's own
+       mesh address and mesh-last-seen data gets refreshed from this
+       same read, opportunistically -- not just the migration check this
+       used to be limited to. A REAL, CONFIRMED production issue is what
+       this addresses: a device whose own address was never successfully
+       discovered had no way back in on its own, since nothing kept
+       retrying it. Deliberately best-effort per member (a peer simply
+       not reported this particular round is left as whatever was
+       already cached, not treated as an error) -- matching the rest of
+       this function's own "one bad round proves nothing, the next
+       scheduled run is the retry" philosophy, not something that needs
+       every member to succeed at once to be worth doing at all.
+
+    Migration detection itself is unchanged from before:
 
     - A tracked device now reported on a DIFFERENT, already-known entry's
       own mesh is auto-migrated: removed from THIS entry, added to that
@@ -159,9 +185,26 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     if pan_id is None:
         return
     group = registry.group(pan_id)
-    if group is None or group.gateway_serial is None:
+    if group is None:
+        return
+
+    known_devices = entry.data.get(CONF_DEVICES, [])
+    if group.gateway_serial is None:
+        if not known_devices:
+            return
+        # Any one known member is enough -- the election this triggers
+        # considers every current member of the group regardless of
+        # which one's own join() call happened to be the one that
+        # re-triggered it (see gateway_registry.py's own join(), which
+        # only looks at group.members as a whole).
+        recovery_serial = known_devices[0][CONF_SERIAL]
+        recovery_rssi = (
+            group.members[recovery_serial].rssi if recovery_serial in group.members else None
+        )
+        await registry.join(pan_id, recovery_serial, rssi=recovery_rssi)
         _LOGGER.debug(
-            "Skipping tank revalidation for %r -- no gateway currently elected", entry.title,
+            "Tank %r had no gateway at all -- re-triggered election (result "
+            "picked up by that device's own next regular poll cycle)", entry.title,
         )
         return
 
@@ -175,6 +218,18 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         )
         return
 
+    known_serials = {d[CONF_SERIAL] for d in known_devices}
+    now_utc = dt_util.utcnow()
+    for peer in peers:
+        if peer.serial not in known_serials:
+            continue  # migration candidate, not a maintenance target -- handled below
+        if peer.address is not None:
+            registry.update_mesh_address(pan_id, peer.serial, peer.address)
+        if peer.age is not None:
+            registry.update_mesh_last_seen(
+                pan_id, peer.serial, now_utc - timedelta(milliseconds=peer.age),
+            )
+
     # Local import -- avoids config_flow.py (and everything IT imports:
     # voluptuous, the bluetooth component's own discovery helpers, etc.)
     # being eagerly loaded every time this integration itself loads, the
@@ -184,7 +239,6 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         _find_entry_containing_serial, _merge_device_into_entry, _remove_device_from_entry,
     )
 
-    known_serials = {d[CONF_SERIAL] for d in entry.data.get(CONF_DEVICES, [])}
     for peer in peers:
         if peer.serial in known_serials:
             continue  # already tracked here -- nothing to do
