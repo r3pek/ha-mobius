@@ -162,6 +162,69 @@ async def test_diagnostics_handles_missing_registry_gracefully(hass):
     json.dumps(diagnostics)
 
 
+async def test_diagnostics_shows_device_currently_visible_in_bluetooth_cache(hass):
+    """The actual point of this whole addition: distinguishing "Home
+    Assistant's own Bluetooth stack currently sees this device" from
+    this integration's own, separately-tracked registry/coordinator
+    state -- the direct way to tell "our cached state is stale" apart
+    from "Home Assistant itself hasn't seen this device", which are
+    different problems with different fixes."""
+    entry = await _setup_multi_device_tank_entry(hass)
+
+    fake_info = MagicMock()
+    fake_info.address = "AA:BB:CC:DD:EE:FF"
+    fake_info.rssi = -55
+    fake_info.connectable = True
+    fake_info.time = 1000.0
+    fake_info.manufacturer_data = {
+        0x0202: bytes.fromhex("2a0001000000000f3d") + PUMP_SERIAL.encode("ascii"),
+    }
+
+    with patch(
+        "custom_components.mobius.diagnostics.bluetooth.async_discovered_service_info",
+        return_value=[fake_info],
+    ), patch("custom_components.mobius.diagnostics.time.time", return_value=1042.5):
+        diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+
+    devices_by_serial = {d["serial"]: d for d in diagnostics["devices"]}
+    pump_cache = devices_by_serial[PUMP_SERIAL]["bluetooth_cache"]
+    assert pump_cache["found_by_serial"] is True
+    assert pump_cache["rssi"] == -55
+    assert pump_cache["seconds_since_last_advertisement"] == 42.5
+    # LIGHT_SERIAL wasn't in the fake cache at all.
+    assert devices_by_serial[LIGHT_SERIAL]["bluetooth_cache"] == {"found_by_serial": False}
+    # The whole-cache sanity count reflects what was actually there.
+    assert diagnostics["bluetooth_cache_total_connectable_devices"] == 1
+
+
+async def test_diagnostics_redacts_the_bluetooth_cache_address_too(hass):
+    """The address surfaced in bluetooth_cache is just as much a real
+    BLE MAC as anything else this dump already redacts -- confirms it
+    doesn't slip through as a new, separate field the existing
+    redaction policy doesn't know about."""
+    entry = await _setup_multi_device_tank_entry(hass)
+
+    fake_info = MagicMock()
+    fake_info.address = "AA:BB:CC:DD:EE:FF"
+    fake_info.rssi = -55
+    fake_info.connectable = True
+    fake_info.time = 1000.0
+    fake_info.manufacturer_data = {
+        0x0202: bytes.fromhex("2a0001000000000f3d") + PUMP_SERIAL.encode("ascii"),
+    }
+
+    with patch(
+        "custom_components.mobius.diagnostics.bluetooth.async_discovered_service_info",
+        return_value=[fake_info],
+    ):
+        diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+        serialized = json.dumps(diagnostics)
+
+    assert "AA:BB:CC:DD:EE:FF" not in serialized
+    devices_by_serial = {d["serial"]: d for d in diagnostics["devices"]}
+    assert devices_by_serial[PUMP_SERIAL]["bluetooth_cache"]["address"] == "**REDACTED**"
+
+
 def test_json_safe_converts_bytes_to_hex():
     assert _json_safe(b"\x01\x02\xff") == "0102ff"
 

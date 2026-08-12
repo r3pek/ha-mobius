@@ -23,6 +23,11 @@
   gateway elections and failovers, and mesh scans are all covered now,
   to make it much easier to see what's going on if something isn't
   connecting.
+- The diagnostics download now also shows whether Home Assistant
+  itself currently sees each device over Bluetooth, separately from
+  what Mobius has cached -- useful for telling "Mobius's own cached
+  info is stale" apart from "Home Assistant hasn't seen this device
+  recently" when nothing's connecting.
 
 ## 0.3.0
 

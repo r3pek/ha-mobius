@@ -5,22 +5,29 @@ three-dot menu > Download diagnostics) covering exactly the state
 that's mattered most for real debugging of this integration's own
 issues so far: which device currently holds the gateway connection,
 each member's own registry-tracked health (rssi, mesh address,
-consecutive gateway failures), and each device's own latest
-coordinator data/error. A user attaching this to a bug report replaces
-having to manually describe (or a maintainer having to manually ask
-for) exactly this information turn by turn.
+consecutive gateway failures), each device's own latest coordinator
+data/error, AND -- critically for a "can't connect to anything at all"
+report -- a live snapshot of whether Home Assistant's own Bluetooth
+stack currently sees each configured device at all, independent of
+anything this integration itself has cached. A user attaching this to
+a bug report replaces having to manually describe (or a maintainer
+having to manually ask for) exactly this information turn by turn.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import ipaddress
+import time
 from typing import Any
 
+from homeassistant.components import bluetooth
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
+
+from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
 from .gateway_registry import GatewayRegistry
@@ -77,6 +84,47 @@ def _mesh_address_str(address: bytes | None) -> str | None:
     return str(ipaddress.IPv6Address(address))
 
 
+def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> dict[str, Any]:
+    """
+    A live snapshot of whether Home Assistant's OWN Bluetooth stack
+    currently has anything for this device at all -- independent of
+    this integration's own registry/coordinator state entirely, which
+    is the whole point: this is the direct way to tell "our own cached
+    state is stale" apart from "Home Assistant itself has never seen
+    this device (recently, or ever)" -- two very different problems
+    with very different fixes. Matches by serial (parsing manufacturer
+    data the same way coordinator.py's own _resolve_current_ble_device()
+    does), not any address this integration might have stored, since a
+    tank peer never has one stored in the first place (see const.py's
+    own CONF_ADDRESS docstring) and even an ad-hoc entry's own stored
+    address could itself be stale.
+
+    Honest limitation, stated here rather than silently implied away:
+    a real device that splits its own info across multiple, rotating
+    advertisement packets (confirmed real -- see config_flow.py's own
+    async_step_bluetooth()) could be genuinely visible to Home
+    Assistant's Bluetooth stack RIGHT NOW, just under a packet that
+    doesn't carry manufacturer data at this exact moment -- there's no
+    way to identify THAT packet as belonging to this serial at all, so
+    "not found here" means "not found identifiable by serial", not
+    "definitely not broadcasting anything".
+    """
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+        if not payload:
+            continue
+        parsed = parse_manufacturer_data(payload)
+        if parsed and parsed.serial == serial:
+            return {
+                "found_by_serial": True,
+                "address": info.address,
+                "rssi": info.rssi,
+                "connectable": info.connectable,
+                "seconds_since_last_advertisement": round(now - info.time, 1),
+            }
+    return {"found_by_serial": False}
+
+
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Return diagnostics for one Mobius config entry (a tank, or a
     single ad-hoc device -- the exact same shape either way, just with
@@ -88,6 +136,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     runtime = getattr(entry, "runtime_data", None)
     coordinators = runtime.coordinators if runtime is not None else {}
 
+    now = time.time()
     devices_diag = []
     for device_record in entry.data.get(CONF_DEVICES, []):
         serial = device_record.get(CONF_SERIAL)
@@ -108,8 +157,20 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "is_current_gateway": (group.gateway_serial == serial) if group is not None else None,
             "registry_rssi": member.rssi if member is not None else None,
             "registry_mesh_address": _mesh_address_str(member.mesh_address) if member is not None else None,
+            "bluetooth_cache": _bluetooth_cache_snapshot(hass, serial, now),
             "coordinator": coordinator_diag,
         })
+
+    # A rough, whole-cache sanity check, independent of any specific
+    # device -- if this is zero (or unexpectedly low), Bluetooth
+    # scanning itself isn't working right now, which points at
+    # something well outside this integration entirely (adapter/proxy
+    # trouble) rather than anything Mobius-specific; if it's healthy but
+    # none of the devices above were found_by_serial, that narrows the
+    # problem down to these specific devices instead.
+    connectable_count = sum(
+        1 for _ in bluetooth.async_discovered_service_info(hass, connectable=True)
+    )
 
     diagnostics = {
         "entry_data": dict(entry.data),
@@ -119,6 +180,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "gateway_serial": group.gateway_serial if group is not None else None,
             "consecutive_gateway_failures": group.consecutive_gateway_failures if group is not None else None,
         } if group is not None else None,
+        "bluetooth_cache_total_connectable_devices": connectable_count,
         "devices": devices_diag,
     }
     return async_redact_data(diagnostics, TO_REDACT)
