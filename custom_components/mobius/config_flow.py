@@ -175,7 +175,13 @@ async def _merge_device_into_entry(
         device[CONF_ADDRESS] = address
     devices.append(device)
     hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_DEVICES: devices})
-    hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
+    # hass.create_task, not hass.async_create_task -- this runs from
+    # more than one context (a fresh discovery-time config flow step,
+    # always event-loop-safe, but also __init__.py's own periodic
+    # revalidation timer, which a real, confirmed warning showed isn't
+    # always guaranteed to be), so the version safe from any thread is
+    # the right one here regardless of which caller this is.
+    hass.create_task(hass.config_entries.async_reload(entry.entry_id))
 
 
 async def _remove_device_from_entry(hass: HomeAssistant, entry: ConfigEntry, serial: str) -> None:
@@ -193,7 +199,9 @@ async def _remove_device_from_entry(hass: HomeAssistant, entry: ConfigEntry, ser
         d for d in entry.data.get(CONF_DEVICES, []) if d.get(CONF_SERIAL) != serial
     ]
     hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_DEVICES: devices})
-    hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
+    # See _merge_device_into_entry()'s own comment just above for why
+    # create_task, not async_create_task -- same reasoning applies here.
+    hass.create_task(hass.config_entries.async_reload(entry.entry_id))
 
 
 class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

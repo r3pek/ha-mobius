@@ -397,10 +397,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # gets cleanly canceled on unload/reload without any separate
     # bookkeeping here -- Home Assistant calls the returned unsub
     # callback automatically.
+    #
+    # hass.create_task, NOT hass.async_create_task -- confirmed via a
+    # real warning Home Assistant itself raises for this exact pattern,
+    # pointing at Home Assistant's own thread-safety documentation:
+    # async_create_task is only safe to call from the event loop thread
+    # itself; create_task is the version safe to call from any thread,
+    # which this lambda -- run by async_track_time_interval, not always
+    # guaranteed to be on the event loop thread depending on Home
+    # Assistant's own internal scheduling -- needs.
     entry.async_on_unload(
         async_track_time_interval(
             hass,
-            lambda now: hass.async_create_task(_async_revalidate_tank(hass, entry, now)),
+            lambda now: hass.create_task(_async_revalidate_tank(hass, entry, now)),
             TANK_REVALIDATION_INTERVAL,
         )
     )
