@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES, CONF_AGE, CONF_DISCOVERED_AT
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
 from custom_components.mobius.diagnostics import async_get_config_entry_diagnostics, _json_safe
 
 PUMP_SERIAL = "00000000000001"
@@ -47,11 +47,7 @@ async def _setup_multi_device_tank_entry(hass):
         domain=DOMAIN,
         data={
             CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
-            CONF_DEVICES: [
-                {CONF_SERIAL: PUMP_SERIAL},
-                {CONF_SERIAL: LIGHT_SERIAL, CONF_AGE: 8490},
-            ],
-            CONF_DISCOVERED_AT: "2026-08-01T12:00:00+00:00",
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
         },
         unique_id=MLPREFIX_HEX,
         title="Living Room Reef",
@@ -111,11 +107,6 @@ async def test_diagnostics_includes_gateway_and_member_state(hass):
     devices_by_serial = {d["serial"]: d for d in diagnostics["devices"]}
     assert devices_by_serial[PUMP_SERIAL]["is_current_gateway"] is True
     assert devices_by_serial[LIGHT_SERIAL]["is_current_gateway"] is False
-    assert devices_by_serial[LIGHT_SERIAL]["stored_age"] == 8490
-    # PUMP_SERIAL never has a stored age (see DiscoveredAtSensor's own
-    # docstring for the full explanation) -- confirms this dump doesn't
-    # invent one.
-    assert devices_by_serial[PUMP_SERIAL]["stored_age"] is None
 
 
 async def test_diagnostics_redacts_mac_addresses(hass):

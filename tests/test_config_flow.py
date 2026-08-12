@@ -13,7 +13,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 from mobius import Tank, MeshPeer, Model
 
 # Payload shaped after a real captured VorTech MP40QD pump advertisement
@@ -459,11 +459,14 @@ async def test_tank_confirm_creates_multi_device_entry(hass):
     assert result2["title"] == "Mobius Tank (2 devices)"
 
 
-async def test_tank_confirm_stores_age_per_peer_when_present(hass):
-    """Each peer's own discovery-time age snapshot (see const.py's own
-    CONF_AGE docstring) is stored alongside its serial when the
-    underlying MeshPeer actually had one -- confirms the age isn't
-    dropped, and isn't accidentally shared/mixed up between peers."""
+async def test_tank_confirm_does_not_store_peer_age(hass):
+    """Deliberately does NOT store each peer's own MeshPeer.age -- real
+    hardware testing disproved any time-since-last-seen interpretation
+    of that field (two consecutive scans of the same gateway showed
+    values both increasing and decreasing for the same device), and
+    there was never any actual evidence for what it really represents.
+    Confirms this data is dropped entirely at storage time, not just
+    hidden from display somewhere downstream."""
     tank_with_ages = Tank(
         prefix=MLPREFIX,
         peers=[
@@ -487,9 +490,10 @@ async def test_tank_confirm_stores_age_per_peer_when_present(hass):
         )
         result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
 
-    ages_by_serial = {d[CONF_SERIAL]: d.get(CONF_AGE) for d in result2["data"][CONF_DEVICES]}
-    assert ages_by_serial[PUMP_SERIAL] == 373
-    assert ages_by_serial[LIGHT_SERIAL] == 8490
+    # Every device record has only CONF_SERIAL -- no age key at all,
+    # even though the underlying MeshPeer objects had one.
+    for device in result2["data"][CONF_DEVICES]:
+        assert set(device.keys()) == {CONF_SERIAL}
 
 
 async def test_single_peer_tank_falls_back_to_adhoc(hass):

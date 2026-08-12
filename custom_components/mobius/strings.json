@@ -61,9 +61,6 @@
       "mesh_address": {
         "name": "Mesh address"
       },
-      "discovered_at": {
-        "name": "Discovered at"
-      },
       "mesh_prefix": {
         "name": "Mesh prefix"
       },

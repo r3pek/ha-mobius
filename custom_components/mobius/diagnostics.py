@@ -22,7 +22,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES, CONF_AGE, CONF_DISCOVERED_AT
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
 from .gateway_registry import GatewayRegistry
 
 # BLE MAC addresses -- both the top-level CONF_ADDRESS an ad-hoc device's
@@ -105,7 +105,6 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
 
         devices_diag.append({
             "serial": serial,
-            "stored_age": device_record.get(CONF_AGE),
             "is_current_gateway": (group.gateway_serial == serial) if group is not None else None,
             "registry_rssi": member.rssi if member is not None else None,
             "registry_mesh_address": _mesh_address_str(member.mesh_address) if member is not None else None,
@@ -116,7 +115,6 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
         "entry_data": dict(entry.data),
         "pan_id_hex": f"0x{pan_id:04X}" if pan_id is not None else None,
         "mlprefix": entry.data.get(CONF_MLPREFIX),
-        "discovered_at": entry.data.get(CONF_DISCOVERED_AT),
         "registry": {
             "gateway_serial": group.gateway_serial if group is not None else None,
             "consecutive_gateway_failures": group.consecutive_gateway_failures if group is not None else None,

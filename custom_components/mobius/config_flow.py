@@ -55,11 +55,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.util import dt as dt_util
 
 from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data, Tank
 
-from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT, MAX_CONCURRENT_CONNECTIONS
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, MAX_CONCURRENT_CONNECTIONS
 from .coordinator import discover_tank_for_serial
 
 _LOGGER = logging.getLogger(__name__)
@@ -541,14 +540,22 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         tank peers the way it is for an ad-hoc entry's own device
         (display/debugging only, per const.py's own docstring; the
         coordinator layer resolves and reconnects by serial regardless).
-        Each peer's CONF_AGE (if the underlying MeshPeer had one -- see
-        that field's own docstring for the important caveat that it's a
-        one-time discovery snapshot, not live data) is stored too, for
-        display -- see const.py's own CONF_AGE docstring. CONF_DISCOVERED_AT
-        records exactly when this happened (a single, shared timestamp for
-        the whole tank, not per-device -- see its own docstring for why
-        that's accurate, not just simpler), so CONF_AGE has an anchor point
-        to be displayed against rather than an ever-more-stale bare number.
+
+        Does NOT store each peer's own "age" value (python-mobius's
+        MeshPeer.age) at all -- an earlier version of this integration
+        did, and surfaced it as a diagnostic sensor, but real hardware
+        testing disproved the "age" name's own implied meaning: two
+        consecutive discover_tank() scans against the SAME gateway, with
+        nothing else changing, showed values that both increased AND
+        decreased between runs for the same physical device -- something
+        genuinely impossible for any kind of time-since-last-seen
+        counter. Combined with no actual Java/smali evidence anywhere
+        (in python-mobius's own reverse-engineering documentation) for
+        what this field really represents -- the name itself was always
+        just a plausible-sounding guess, never confirmed -- there's
+        nothing honest to display here. Removed rather than kept around
+        unused, since storing data now known to be unreliable isn't
+        worth the upkeep.
 
         title comes from what was actually typed/kept on the
         tank_confirm form (see async_step_tank_confirm()) -- not always
@@ -558,18 +565,12 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         afterward."""
         assert tank.prefix is not None
         assert self._pending_pan_id is not None
-        devices = []
-        for peer in tank.peers:
-            device = {CONF_SERIAL: peer.serial}
-            if peer.age is not None:
-                device[CONF_AGE] = peer.age
-            devices.append(device)
+        devices = [{CONF_SERIAL: peer.serial} for peer in tank.peers]
         return self.async_create_entry(
             title=title,
             data={
                 CONF_PAN_ID: self._pending_pan_id,
                 CONF_MLPREFIX: tank.prefix.hex(),
                 CONF_DEVICES: devices,
-                CONF_DISCOVERED_AT: dt_util.utcnow().isoformat(),
             },
         )

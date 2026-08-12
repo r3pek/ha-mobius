@@ -95,8 +95,7 @@ MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 # reusing its existing gateway connection rather than opening a new one
 # -- catches a device that's since moved to a DIFFERENT, already-tracked
 # tank (auto-migrated -- see __init__.py's own periodic revalidation
-# logic) and re-anchors CONF_DISCOVERED_AT/CONF_AGE for any device that's
-# still there. Deliberately infrequent: tank membership changes are rare,
+# logic). Deliberately infrequent: tank membership changes are rare,
 # deliberate, physical events (someone moving a pump to a different
 # aquarium), not something that needs near-real-time detection the way
 # a device's own status does -- and each check costs a real, if usually
@@ -121,36 +120,17 @@ TANK_REVALIDATION_INTERVAL = timedelta(hours=12)
 # Not a standard homeassistant.const constant -- each entry in
 # CONF_DEVICES is itself a dict with CONF_SERIAL/CONF_ADDRESS keys (reuses
 # the same two constants a single device's own data already used before
-# this integration moved to tank-level entries), plus an optional
-# CONF_AGE for tank peers (see its own docstring below).
+# this integration moved to tank-level entries). Deliberately does NOT
+# carry python-mobius's own MeshPeer.age -- an earlier version of this
+# integration stored and displayed it, but real hardware testing (two
+# consecutive discover_tank() scans against the same gateway, nothing
+# else changing) showed values that both increased AND decreased between
+# runs for the same physical device, disproving any time-since-last-seen
+# interpretation. Combined with no actual evidence anywhere for what the
+# field really represents (the name itself was always just a plausible
+# guess, never confirmed against real app/decompiled source), there was
+# nothing honest left to display -- removed rather than kept unused.
 CONF_DEVICES = "devices"
-
-# Not a standard homeassistant.const constant -- each tank peer's "age"
-# value AS OF THE ORIGINAL discover_tank() CALL THAT FOUND IT (see
-# python-mobius's MeshPeer -- confirmed present in the wire format, but
-# its exact meaning isn't independently confirmed against real hardware,
-# so this is surfaced as a one-time discovery-time snapshot, not implied
-# to be live/continuously refreshed -- there's currently no ongoing way
-# to refresh it short of a fresh discover_tank() scan). Only present for
-# tank peers (discovered via discover_tank()), never for an ad-hoc
-# device (single-device entries never call discover_tank() successfully
-# -- see config_flow.py's own docstring for why).
-CONF_AGE = "age"
-
-# Not a standard homeassistant.const constant -- ISO 8601 timestamp of
-# the ORIGINAL discover_tank() call that populated CONF_AGE for every
-# peer in this tank (a single, shared value for the whole tank, not
-# per-device -- confirmed accurate since discover_tank() fetches
-# NetworkedThreadDevices as one atomic read, so every peer's own
-# CONF_AGE necessarily comes from that exact same moment regardless of
-# which peer it's attached to). Exists purely to contextualize CONF_AGE
-# for display (see DiscoveryAgeSensor in sensor.py) -- "age" alone, with
-# no anchor point, becomes progressively less meaningful the longer a
-# tank has been set up, for a value whose own exact meaning isn't even
-# independently confirmed to begin with (see CONF_AGE's own docstring
-# above). None (not present in entry.data at all) for an ad-hoc,
-# tank-less entry, for the same reason CONF_MLPREFIX is absent there.
-CONF_DISCOVERED_AT = "discovered_at"
 
 # Not a standard homeassistant.const constant -- the tank's own confirmed,
 # stable identity (see python-mobius's mobius.discovery.discover_tank()):

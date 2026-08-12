@@ -26,7 +26,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData, tank_device_identifier
-from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, CONF_AGE, CONF_DISCOVERED_AT
+from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 
 _LOGGER = logging.getLogger(__name__)
 from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
@@ -484,75 +484,6 @@ class MeshAddressSensor(MobiusEntity):
         return self.native_value is not None
 
 
-class DiscoveredAtSensor(MobiusEntity):
-    """
-    Diagnostic: WHEN this device was found as part of its tank -- a
-    single, shared timestamp for the WHOLE tank (see const.py's own
-    CONF_DISCOVERED_AT docstring: one atomic discover_tank() read
-    necessarily times every peer's own info at once), not a per-device
-    value, so every device in a tank shows the exact same value here --
-    including whichever device happened to be the one actually
-    connected to during discovery.
-
-    That last part matters, and is the whole reason this shows
-    discovered_at as its own PRIMARY value rather than each device's own
-    raw CONF_AGE: the connected/probed device's own MeshPeer entry is
-    built directly from get_own_mesh_address()/get_device_info() (see
-    python-mobius's own discover_tank()), which never carries an age
-    field the way its PEERS' entries do (those come from a completely
-    different read, discover_mesh_peers_auto()/NetworkedThreadDevices).
-    An earlier version of this sensor used raw age as its own value and
-    was gated on that device having one -- meaning the connected device
-    silently had NO sensor here at all, while every other device in the
-    exact same tank did. That's a real, confusing inconsistency: WHICH
-    device is the one that was actually connected to isn't fixed --
-    gateway failover, or simply a different device being probed on a
-    later re-setup, can change it entirely. A sensor only some devices
-    have, for a reason that has nothing to do with the device itself,
-    doesn't make sense. Every device in a multi-device tank gets this
-    sensor now, uniformly, all showing the identical, real timestamp.
-
-    A device's own raw CONF_AGE (if it happened to have one -- most
-    peers do, the connected device itself never does) is still exposed
-    as an attribute, for anyone curious about the underlying wire data
-    -- but it's no longer the sensor's own value, since its exact
-    meaning isn't independently confirmed (see CONF_AGE's own docstring)
-    and "when was this discovered" is the more useful, unambiguous thing
-    to actually show.
-    """
-
-    def __init__(self, coordinator, serial, device_info, discovered_at: str, age: int | None = None):
-        super().__init__(
-            coordinator, serial, "discovered_at",
-            SensorEntityDescription(
-                key="discovered_at", translation_key="discovered_at",
-                device_class=SensorDeviceClass.TIMESTAMP,
-            ),
-            device_info,
-        )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        self._discovered_at = discovered_at
-        self._age = age
-
-    @property
-    def native_value(self):
-        return dt_util.parse_datetime(self._discovered_at)
-
-    @property
-    def extra_state_attributes(self):
-        if self._age is None:
-            return None
-        return {"raw_age": self._age}
-
-    @property
-    def available(self) -> bool:
-        # A static, one-time snapshot -- always available once created,
-        # regardless of the coordinator's own current poll health (unlike
-        # every other sensor here, which IS tied to live poll data via
-        # the base class's own available property).
-        return True
-
-
 class MeshPrefixSensor(SensorEntity):
     """
     Diagnostic: the tank's own shared 8-byte Thread mesh-local prefix
@@ -686,10 +617,6 @@ async def async_setup_entry(
     pan_id = entry.data.get(CONF_PAN_ID)
     device_records = entry.data.get(CONF_DEVICES, [])
     registry = hass.data.get(DOMAIN, {}).get("gateway_registry")
-    # A single, tank-wide value (see const.py's own CONF_DISCOVERED_AT
-    # docstring) -- read once here, then used identically for every
-    # device's own DiscoveredAtSensor below, not re-read per device.
-    discovered_at = entry.data.get(CONF_DISCOVERED_AT)
 
     # via_device grouping only applies to a genuine multi-device tank --
     # matches __init__.py's own _register_tank_device() condition exactly
@@ -745,22 +672,6 @@ async def async_setup_entry(
             HardwareRevisionSensor(coordinator, serial, device_info),
             MeshAddressSensor(coordinator, serial, device_info),
         ]
-
-        # Created for EVERY device in a genuine tank (gated on the
-        # tank's own shared discovered_at, not this specific device's
-        # own CONF_AGE -- see DiscoveredAtSensor's own docstring for
-        # why that distinction matters: the connected/probed device
-        # never has a CONF_AGE of its own, but it was still discovered
-        # at the exact same moment as every other device in the same
-        # tank). An ad-hoc device never has a discovered_at at all (see
-        # config_flow.py's own module docstring for why it never
-        # successfully calls discover_tank() in the first place), so
-        # this naturally never applies there.
-        if discovered_at is not None:
-            entities.append(DiscoveredAtSensor(
-                coordinator, serial, device_info, discovered_at,
-                age=device_record.get(CONF_AGE),
-            ))
 
         if support.startswith("pump"):
             entities += [
