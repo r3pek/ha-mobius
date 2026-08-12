@@ -107,13 +107,31 @@ class PanGroup:
     # CURRENT gateway's connection health, not a property of any device
     # in the abstract.
     consecutive_gateway_failures: int = 0
+    # Every serial that's been promoted to gateway and then itself gone
+    # on to fail GATEWAY_FAILURE_THRESHOLD times, since the last time
+    # ANY gateway actually succeeded (see record_gateway_success(), which
+    # clears this) or since this set grew to cover every member (see
+    # _best_candidate()'s own handling of that case). A REAL, CONFIRMED
+    # production bug lived here before this field existed: promotion
+    # always just picked the single best-RSSI member excluding only the
+    # one CURRENTLY failing -- for a tank where two devices both have
+    # much better RSSI than the other two, that meant failures ping-
+    # ponged forever between exactly those two best-RSSI devices (fail,
+    # promote the other; it fails too, promote back to the first one,
+    # since excluding only "the one failing right now" doesn't stop it
+    # being immediately re-eligible) -- the other two members were never
+    # tried even once, however many hours this went on for. This set is
+    # what actually breaks that cycle: every member gets a real turn
+    # before anyone is reconsidered.
+    recently_failed_gateways: set[str] = field(default_factory=set)
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def member_rssi_items(self, exclude_serial: Optional[str] = None):
+    def member_rssi_items(self, exclude_serials: Optional[set[str]] = None):
+        exclude_serials = exclude_serials or set()
         return [
             (serial, m.rssi) for serial, m in self.members.items()
-            if serial != exclude_serial
+            if serial not in exclude_serials
         ]
 
 
@@ -208,11 +226,11 @@ class GatewayRegistry:
             self._assign_gateway(group, self._best_candidate(group))
             group._gateway_elected.set()
 
-    def _best_candidate(self, group: PanGroup, exclude_serial: Optional[str] = None) -> Optional[str]:
+    def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:
         """Highest known RSSI among current members (excluding
-        exclude_serial); falls back to "first available" (dict insertion
+        exclude_serials); falls back to "first available" (dict insertion
         order) if no member has RSSI info at all."""
-        candidates = group.member_rssi_items(exclude_serial=exclude_serial)
+        candidates = group.member_rssi_items(exclude_serials=exclude_serials)
         if not candidates:
             return None
         with_rssi = [c for c in candidates if c[1] is not None]
@@ -250,7 +268,7 @@ class GatewayRegistry:
             group.members.pop(serial, None)
             if group.gateway_serial == serial:
                 old_connection = group.gateway_connection
-                new_gateway = self._best_candidate(group)
+                new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
                 self._assign_gateway(group, new_gateway)
                 if old_connection is not None:
                     await old_connection.disconnect()
@@ -279,10 +297,16 @@ class GatewayRegistry:
 
     def record_gateway_success(self, pan_id: int) -> None:
         """Call on every successful gateway read -- resets the
-        consecutive-failure counter."""
+        consecutive-failure counter, and clears recently_failed_gateways
+        (see PanGroup's own docstring for why that set exists at all):
+        a real, successful read means the tank's back to healthy, so
+        there's no reason to keep excluding devices that failed during
+        whatever earlier trouble just ended -- they get a clean slate to
+        be considered again if this gateway ever fails in the future."""
         group = self._groups.get(pan_id)
         if group is not None:
             group.consecutive_gateway_failures = 0
+            group.recently_failed_gateways.clear()
 
     async def record_gateway_failure(self, pan_id: int) -> bool:
         """
@@ -303,7 +327,22 @@ class GatewayRegistry:
 
             failing_serial = group.gateway_serial
             old_connection = group.gateway_connection
-            new_gateway = self._best_candidate(group, exclude_serial=failing_serial)
+            if failing_serial is not None:
+                group.recently_failed_gateways.add(failing_serial)
+
+            new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
+            if new_gateway is None:
+                # Every member has now failed at least once since the
+                # last success (see PanGroup's own docstring) -- rather
+                # than getting stuck with nothing left to promote at
+                # all, give everyone a clean slate and try again,
+                # excluding only the one that JUST failed (no sense
+                # immediately re-picking that one specifically, but
+                # everyone else deserves a fresh look after a full
+                # round).
+                group.recently_failed_gateways = {failing_serial} if failing_serial is not None else set()
+                new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
+
             self._assign_gateway(group, new_gateway)
             _LOGGER.warning(
                 "Gateway %r for pan_id %#06x failed %d consecutive times; promoted %r",

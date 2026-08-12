@@ -133,6 +133,99 @@ class TestGatewayFailover:
         assert registry.group(PAN_A).gateway_serial == "strong_backup"
 
     @pytest.mark.asyncio
+    async def test_does_not_ping_pong_between_the_two_best_rssi_members(self, registry):
+        """The real, confirmed production bug this whole mechanism
+        exists to fix: a tank with two much-stronger-RSSI members and
+        two weaker ones. Before this fix, repeated failures ping-ponged
+        forever between exactly the two strong members -- the weak ones
+        were never tried even once, however long this went on for,
+        because promotion only ever excluded whichever member was
+        CURRENTLY failing, not any of its own prior failures."""
+        await registry.join(PAN_A, "strong_a", rssi=-30)
+        await registry.join(PAN_A, "strong_b", rssi=-35)
+        await registry.join(PAN_A, "weak_c", rssi=-90)
+        await registry.join(PAN_A, "weak_d", rssi=-95)
+
+        # strong_a is the initial pick (best RSSI overall).
+        assert registry.group(PAN_A).gateway_serial == "strong_a"
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_A)
+        # strong_b is the next-best remaining candidate -- expected,
+        # same as the existing by-RSSI test above.
+        assert registry.group(PAN_A).gateway_serial == "strong_b"
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_A)
+        # The actual point: NOT strong_a again (the old, buggy
+        # behavior) -- both strong members have now failed since the
+        # last success, so a weak one gets a real turn.
+        assert registry.group(PAN_A).gateway_serial in ("weak_c", "weak_d")
+
+    @pytest.mark.asyncio
+    async def test_round_robin_eventually_tries_every_member(self, registry):
+        """Continues the scenario above through a full cycle -- confirms
+        every one of 4 members gets an actual turn before any of them is
+        reconsidered a second time."""
+        await registry.join(PAN_A, "a", rssi=-30)
+        await registry.join(PAN_A, "b", rssi=-35)
+        await registry.join(PAN_A, "c", rssi=-90)
+        await registry.join(PAN_A, "d", rssi=-95)
+
+        seen_as_gateway = {registry.group(PAN_A).gateway_serial}
+        for _ in range(3):  # 3 more promotions covers the remaining 3 members
+            for _ in range(GATEWAY_FAILURE_THRESHOLD):
+                await registry.record_gateway_failure(PAN_A)
+            seen_as_gateway.add(registry.group(PAN_A).gateway_serial)
+
+        assert seen_as_gateway == {"a", "b", "c", "d"}
+
+    @pytest.mark.asyncio
+    async def test_success_clears_recently_failed_gateways(self, registry):
+        """A real, successful read means the tank is healthy again --
+        confirms a device that failed earlier gets a clean slate rather
+        than being permanently excluded from ever being promoted again."""
+        await registry.join(PAN_A, "a", rssi=-30)
+        await registry.join(PAN_A, "b", rssi=-35)
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_A)
+        assert registry.group(PAN_A).gateway_serial == "b"
+        assert "a" in registry.group(PAN_A).recently_failed_gateways
+
+        registry.record_gateway_success(PAN_A)
+        assert registry.group(PAN_A).recently_failed_gateways == set()
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_A)
+        # "a" is eligible again -- it's the only other member, so if it
+        # weren't, this would have to fall back to gatewayless instead.
+        assert registry.group(PAN_A).gateway_serial == "a"
+
+    @pytest.mark.asyncio
+    async def test_round_robin_resets_rather_than_getting_stuck_when_everyone_has_failed(self, registry):
+        """If every member has failed since the last success (no
+        candidates left to exclude-and-pick-from), the whole tank
+        keeps cycling rather than getting permanently stuck -- confirmed
+        by running well past one full cycle and seeing every member
+        promoted again, not just the first time around."""
+        await registry.join(PAN_A, "a", rssi=-30)
+        await registry.join(PAN_A, "b", rssi=-35)
+
+        promotions = []
+        for _ in range(6):  # 3 full ping-pong cycles between the only 2 members
+            for _ in range(GATEWAY_FAILURE_THRESHOLD):
+                await registry.record_gateway_failure(PAN_A)
+            promotions.append(registry.group(PAN_A).gateway_serial)
+
+        # Never gatewayless, never stuck -- alternates cleanly between
+        # the only 2 members that exist, same as the pre-fix behavior
+        # would for exactly 2 members (this case was never broken --
+        # confirms the fix doesn't regress the simple case).
+        assert None not in promotions
+        assert set(promotions) == {"a", "b"}
+
+    @pytest.mark.asyncio
     async def test_success_resets_failure_counter(self, registry):
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "backup", rssi=-40)
