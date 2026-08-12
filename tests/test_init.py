@@ -1114,3 +1114,126 @@ async def test_setup_entry_registers_periodic_revalidation(hass):
     call_args = mock_track_interval.call_args
     assert call_args[0][0] is hass
     assert call_args[0][2] == TANK_REVALIDATION_INTERVAL
+
+
+# --------------------------------------------------------------------------
+# async_remove_entry() -- triggers Bluetooth rediscovery for a permanently
+# removed entry's own devices, so re-adding the same physical device later
+# isn't silently blocked by stale match history. See __init__.py's own
+# docstring for the full reasoning (confirmed via Home Assistant's own
+# documentation, which recommends exactly this for exactly this scenario).
+# --------------------------------------------------------------------------
+
+def _fake_discovery(address: str, serial: str):
+    """A minimal stand-in for BluetoothServiceInfoBleak -- only the two
+    attributes async_remove_entry() actually reads."""
+    payload = bytes.fromhex("2a0001000000000f3d") + serial.encode("ascii")
+    info = MagicMock()
+    info.address = address
+    info.manufacturer_data = {0x0202: payload}  # MOBIUS_COMPANY_ID
+    return info
+
+
+async def test_remove_entry_triggers_rediscovery_for_currently_visible_devices(hass):
+    from custom_components.mobius import async_remove_entry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.bluetooth.async_discovered_service_info",
+        return_value=[_fake_discovery(PUMP_ADDRESS, PUMP_SERIAL)],
+    ), patch(
+        "custom_components.mobius.bluetooth.async_rediscover_address",
+    ) as mock_rediscover:
+        await async_remove_entry(hass, entry)
+
+    mock_rediscover.assert_called_once_with(hass, PUMP_ADDRESS)
+
+
+async def test_remove_entry_skips_a_device_not_currently_advertising(hass):
+    """Best-effort, not guaranteed -- a device that's powered off or out
+    of range right now simply can't have its current address resolved,
+    and that's not an error worth raising over."""
+    from custom_components.mobius import async_remove_entry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.bluetooth.async_discovered_service_info",
+        return_value=[],  # nothing currently visible at all
+    ), patch(
+        "custom_components.mobius.bluetooth.async_rediscover_address",
+    ) as mock_rediscover:
+        await async_remove_entry(hass, entry)  # must not raise
+
+    mock_rediscover.assert_not_called()
+
+
+async def test_remove_entry_only_acts_on_this_entrys_own_devices(hass):
+    """A different, unrelated device also currently visible must not get
+    its own match history touched by this entry's own removal."""
+    from custom_components.mobius import async_remove_entry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    unrelated_serial = "99999999999999"
+    with patch(
+        "custom_components.mobius.bluetooth.async_discovered_service_info",
+        return_value=[
+            _fake_discovery(PUMP_ADDRESS, PUMP_SERIAL),
+            _fake_discovery("BB:BB:BB:BB:BB:BB", unrelated_serial),
+        ],
+    ), patch(
+        "custom_components.mobius.bluetooth.async_rediscover_address",
+    ) as mock_rediscover:
+        await async_remove_entry(hass, entry)
+
+    mock_rediscover.assert_called_once_with(hass, PUMP_ADDRESS)
+
+
+async def test_unload_entry_does_not_trigger_rediscovery(hass):
+    """The critical distinction from async_remove_entry() -- an ordinary
+    unload (which also happens on every routine reload, e.g. after a
+    merge/migration) must NOT clear match history, or a device would get
+    spuriously re-offered for discovery on every single reload."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+
+    with patch(
+        "custom_components.mobius.bluetooth.async_rediscover_address",
+    ) as mock_rediscover:
+        await hass.config_entries.async_unload(entry.entry_id)
+
+    mock_rediscover.assert_not_called()

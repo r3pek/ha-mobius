@@ -14,6 +14,9 @@
   much sooner once it's reachable again.
 - Fixed newly-added devices sometimes never showing up in Home
   Assistant, even though they were clearly nearby and broadcasting.
+- Removing a device (or a whole tank) now also tells Home Assistant to
+  forget it was seen before, so re-adding the same physical device
+  later isn't silently blocked.
 - Now requires Home Assistant 2026.7.0 or newer.
 
 ## 0.3.0

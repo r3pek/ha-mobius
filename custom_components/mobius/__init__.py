@@ -487,3 +487,60 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await registry.leave(coordinator.pan_id, coordinator.serial)
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    Called once, specifically when an entry is PERMANENTLY deleted --
+    unlike async_unload_entry() above, which also fires on every ordinary
+    reload (an entry being torn down and immediately set back up again,
+    e.g. after a merge/migration), so isn't the right place for anything
+    that should only happen on an actual, deliberate removal.
+
+    Confirmed via Home Assistant's own documentation, matching this
+    exact scenario precisely: "When a configuration entry or device is
+    removed from Home Assistant, trigger rediscovery of its address to
+    make sure they are available to be set up without restarting Home
+    Assistant." Without this, re-adding the SAME physical device(s)
+    later could be silently blocked: this integration's own discovery
+    step already has to clear an address's match history the first time
+    it sees an advertisement without manufacturer data yet (see
+    config_flow.py's own async_step_bluetooth()) -- but that only runs
+    while a discovery flow is actively happening. Once a device is
+    already configured, nothing else ever revisits its match history at
+    all, so it would simply stay marked "already matched" forever,
+    invisible to a fresh discovery flow, even though the config entry
+    that used to represent it is now gone.
+
+    Best-effort per device, not guaranteed: a device that isn't
+    currently advertising (powered off, out of range) can't have its
+    CURRENT address resolved right now -- reusing the same "search
+    Home Assistant's own live Bluetooth cache by serial" approach
+    coordinator.py's own MobiusConnectionManager._resolve_current_ble_
+    device() already uses for reconnection, rather than relying on a
+    stored address that may be stale or (for a tank peer specifically)
+    was never stored at all (see const.py's own CONF_ADDRESS docstring).
+    If the device isn't visible right now, this simply does nothing for
+    it -- there's no address to act on, and no error worth raising over
+    that; the device being physically present again is required for
+    rediscovery to matter at all anyway.
+    """
+    known_serials = {d[CONF_SERIAL] for d in entry.data.get(CONF_DEVICES, [])}
+    if not known_serials:
+        return
+
+    addresses_by_serial: dict[str, str] = {}
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+        if not payload:
+            continue
+        parsed = parse_manufacturer_data(payload)
+        if parsed and parsed.serial in known_serials:
+            addresses_by_serial[parsed.serial] = info.address
+
+    for serial, address in addresses_by_serial.items():
+        bluetooth.async_rediscover_address(hass, address)
+        _LOGGER.debug(
+            "Cleared Bluetooth rediscovery for %s (%s) after its entry was removed",
+            serial, address,
+        )
