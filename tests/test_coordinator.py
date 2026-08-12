@@ -8,6 +8,7 @@ failure handling.
 """
 
 import asyncio
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -107,7 +108,12 @@ async def test_resolve_current_ble_device_matches_by_serial(hass):
     mock_from_address.assert_called_once_with(hass, PUMP_ADDRESS, connectable=True)
 
 
-async def test_resolve_current_ble_device_returns_none_when_not_found(hass):
+async def test_resolve_current_ble_device_returns_none_when_not_found(hass, caplog):
+    """Confirms both the return value AND the diagnostic log this
+    specifically exists for -- the single most useful line for
+    distinguishing "device isn't visible at all" from "visible but
+    couldn't connect" when debugging a device that's never coming up."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, "NONEXISTENT_SERIAL", semaphore)
 
@@ -118,6 +124,7 @@ async def test_resolve_current_ble_device_returns_none_when_not_found(hass):
         result = await manager._resolve_current_ble_device()
 
     assert result is None
+    assert "NONEXISTENT_SERIAL not found in Home Assistant's own Bluetooth cache" in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +150,39 @@ async def test_ensure_connected_connects_once_and_reuses(hass):
     assert first is second  # reused, not reconnected
     fake_device.connect.assert_awaited_once()  # only connected once
     mock_ctor.assert_called_once()
+
+
+async def test_ensure_connected_logs_long_semaphore_waits(hass, caplog):
+    """The direct instrument for confirming or ruling out
+    MAX_CONCURRENT_CONNECTIONS contention as the cause of a device never
+    getting a real connection attempt -- confirms this is actually
+    measured and surfaced, not just theoretically possible to reason
+    about from the semaphore's own configured size. time.monotonic() is
+    mocked to simulate a long wait deterministically, rather than
+    actually sleeping for it -- a real, slow, flaky way to test this."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+
+    # Simulates a 5.3-second wait for the semaphore specifically --
+    # monotonic() is called at exactly two points that matter here (the
+    # wait-start snapshot, and the wait-end snapshot right after
+    # acquiring the semaphore), then again for the connect-timing pair.
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ), patch(
+        "custom_components.mobius.coordinator.time.monotonic",
+        side_effect=[0.0, 5.3, 5.3, 5.4],
+    ):
+        await manager.ensure_connected()
+
+    assert "waited 5.3s for a free connection slot" in caplog.text
 
 
 async def test_ensure_connected_reconnects_after_mark_disconnected(hass):

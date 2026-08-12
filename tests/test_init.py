@@ -9,6 +9,7 @@ including the gateway, synthetic tank device registration).
 """
 
 import asyncio
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -502,11 +503,15 @@ async def test_one_unreachable_device_does_not_block_the_whole_tank(hass):
     assert entry.runtime_data.coordinators[LIGHT_SERIAL].last_update_success is False
 
 
-async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
+async def test_probe_tries_devices_in_rssi_order_not_list_order(hass, caplog):
     """The probe phase tries the STRONGEST-signal device first, not just
     whichever happens to be first in CONF_DEVICES -- confirms a
     consistently-unreachable device listed first doesn't get retried
-    forever while a perfectly reachable one (listed later) sits unused."""
+    forever while a perfectly reachable one (listed later) sits unused.
+    Also confirms the probe SEQUENCE itself is logged up front -- the
+    direct diagnostic for a report like "only some of a tank's devices
+    ever seem to get a real connection attempt"."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -557,6 +562,11 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
     # whichever one happens to be first in CONF_DEVICES.
     registry = hass.data[DOMAIN]["gateway_registry"]
     assert registry.group(PAN_ID).gateway_serial == PUMP_SERIAL
+    # The full RSSI-ordered probe sequence, logged before any connection
+    # is even attempted -- confirms this doesn't just show the winner,
+    # but the actual order/RSSI every device was considered in.
+    assert f"[('{PUMP_SERIAL}', -30), ('{LIGHT_SERIAL}', -95)]" in caplog.text
+    assert f"{PUMP_SERIAL} is the working device" in caplog.text
 
 
 async def test_setup_raises_not_ready_only_if_every_device_is_unreachable(hass):

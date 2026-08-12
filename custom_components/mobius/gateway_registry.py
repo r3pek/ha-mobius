@@ -54,6 +54,7 @@ being left, if the device leaving was that group's gateway.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -67,6 +68,22 @@ if TYPE_CHECKING:
     from .coordinator import MobiusConnectionManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _format_mesh_address(address: Optional[bytes]) -> str:
+    """Human-readable form for log messages only -- the real sensor-
+    facing formatting lives in sensor.py's own MeshAddressSensor; this
+    is deliberately a separate, simpler copy rather than a shared import,
+    since a malformed address (wrong length -- shouldn't normally happen,
+    but this is a logging path, not a data path, so it must never itself
+    raise) should degrade to the raw hex rather than blow up the very
+    debug logging meant to help diagnose a problem."""
+    if address is None:
+        return "unknown"
+    try:
+        return str(ipaddress.IPv6Address(address))
+    except ValueError:
+        return address.hex()
 
 
 @dataclass
@@ -205,8 +222,16 @@ class GatewayRegistry:
                 existing.rssi = rssi
             else:
                 group.members[serial] = MemberState(serial=serial, rssi=rssi)
+                _LOGGER.debug(
+                    "%s joined pan_id %#06x (rssi=%s, %d member(s) now)",
+                    serial, pan_id, rssi, len(group.members),
+                )
             if group.gateway_serial is None and not group._electing:
                 if prefer_as_gateway:
+                    _LOGGER.debug(
+                        "%s preferred as gateway for pan_id %#06x -- skipping RSSI election "
+                        "(direct connectivity already confirmed)", serial, pan_id,
+                    )
                     self._assign_gateway(group, serial)
                     group._gateway_elected.set()
                 else:
@@ -223,7 +248,12 @@ class GatewayRegistry:
         async with group.lock:
             if group.gateway_serial is not None:
                 return  # shouldn't happen (only one election runs per group), but defensive
-            self._assign_gateway(group, self._best_candidate(group))
+            winner = self._best_candidate(group)
+            _LOGGER.debug(
+                "Gateway election for pan_id %#06x settled: %r elected from %s",
+                group.pan_id, winner, dict(group.member_rssi_items()),
+            )
+            self._assign_gateway(group, winner)
             group._gateway_elected.set()
 
     def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:
@@ -276,6 +306,11 @@ class GatewayRegistry:
                     "Gateway for pan_id %#06x (was %r) is leaving; promoted %r",
                     pan_id, serial, new_gateway,
                 )
+            else:
+                _LOGGER.debug(
+                    "%s left pan_id %#06x (not the gateway, %d member(s) remain)",
+                    serial, pan_id, len(group.members),
+                )
             if not group.members:
                 self._groups.pop(pan_id, None)
 
@@ -305,6 +340,16 @@ class GatewayRegistry:
         be considered again if this gateway ever fails in the future."""
         group = self._groups.get(pan_id)
         if group is not None:
+            if group.consecutive_gateway_failures > 0:
+                # Only logged when this actually resets a real streak,
+                # not on every single ordinary success -- that happens
+                # every poll cycle for a healthy gateway and would be
+                # pure noise. A recovery after N failures is exactly the
+                # kind of intermittent-trouble signal worth keeping.
+                _LOGGER.debug(
+                    "Gateway %r for pan_id %#06x recovered after %d consecutive failure(s)",
+                    group.gateway_serial, pan_id, group.consecutive_gateway_failures,
+                )
             group.consecutive_gateway_failures = 0
             group.recently_failed_gateways.clear()
 
@@ -323,6 +368,18 @@ class GatewayRegistry:
         async with group.lock:
             group.consecutive_gateway_failures += 1
             if group.consecutive_gateway_failures < GATEWAY_FAILURE_THRESHOLD:
+                # Every individual failure logged, not just the one that
+                # eventually triggers promotion -- a real, confirmed gap
+                # in earlier debugging this session: without this, only
+                # the FINAL failure in a run is ever visible, making it
+                # impossible to tell from the logs alone how long trouble
+                # had actually been building, or how often it happens
+                # without quite reaching the threshold.
+                _LOGGER.debug(
+                    "Gateway %r for pan_id %#06x failed (%d/%d consecutive)",
+                    group.gateway_serial, pan_id,
+                    group.consecutive_gateway_failures, GATEWAY_FAILURE_THRESHOLD,
+                )
                 return False
 
             failing_serial = group.gateway_serial
@@ -340,6 +397,11 @@ class GatewayRegistry:
                 # immediately re-picking that one specifically, but
                 # everyone else deserves a fresh look after a full
                 # round).
+                _LOGGER.debug(
+                    "Every member of pan_id %#06x has now failed since the last success -- "
+                    "giving everyone a clean slate (excluding only %r, which just failed)",
+                    pan_id, failing_serial,
+                )
                 group.recently_failed_gateways = {failing_serial} if failing_serial is not None else set()
                 new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
 
@@ -372,7 +434,22 @@ class GatewayRegistry:
         race against a concurrent join()/leave() is harmless."""
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
-            group.members[serial].mesh_address = address
+            member = group.members[serial]
+            if member.mesh_address != address:
+                # Only logged on an actual CHANGE -- this is called every
+                # poll cycle for every member (coordinator.py's own
+                # _fetch(), plus __init__.py's own periodic
+                # revalidation), so logging every unchanged confirmation
+                # would be pure noise. A None -> known transition
+                # specifically is the "device came back" recovery signal
+                # worth surfacing -- see the real "Could not determine
+                # Thread mesh address" production error this addresses.
+                _LOGGER.debug(
+                    "Mesh address for %s (pan_id %#06x): %s -> %s",
+                    serial, pan_id,
+                    _format_mesh_address(member.mesh_address), _format_mesh_address(address),
+                )
+            member.mesh_address = address
 
     def update_mesh_last_seen(self, pan_id: int, serial: str, last_seen_at: datetime) -> None:
         """Caches a member's own, freshly-computed "last heard from on

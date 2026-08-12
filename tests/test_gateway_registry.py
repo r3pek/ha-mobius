@@ -5,6 +5,7 @@ joiners), failover/promotion, pan_id moves, and cross-group isolation.
 """
 
 import asyncio
+import logging
 
 import pytest
 from unittest.mock import MagicMock
@@ -106,6 +107,22 @@ class TestGatewayFailover:
 
         group = registry.group(PAN_A)
         assert group.gateway_serial == "gw"
+
+    @pytest.mark.asyncio
+    async def test_every_individual_failure_is_logged_not_just_the_threshold_one(self, registry, caplog):
+        """A real, confirmed gap in earlier debugging this integration:
+        only the FINAL failure in a run used to be visible in the logs
+        at all (the one that triggers promotion). Confirms every single
+        failure leading up to that point is now logged too, so the full
+        progression -- not just the outcome -- is visible with debug
+        logging enabled."""
+        caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "backup", rssi=-40)
+
+        for i in range(1, GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_A)
+            assert f"failed ({i}/{GATEWAY_FAILURE_THRESHOLD} consecutive)" in caplog.text
 
     @pytest.mark.asyncio
     async def test_promotes_at_threshold(self, registry):

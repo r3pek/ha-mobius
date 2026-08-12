@@ -259,13 +259,23 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # superficially, looks like something already seen -- get a
             # real chance to trigger this step again.
             async_clear_address_from_match_history(self.hass, discovery_info.address)
+            _LOGGER.debug(
+                "Bluetooth discovery for %s aborted: no manufacturer data yet "
+                "(cleared match history so a later advertisement can retry)",
+                discovery_info.address,
+            )
             return self.async_abort(reason="no_manufacturer_data")
 
         if _find_entry_containing_serial(self.hass, info.serial) is not None:
+            _LOGGER.debug("Bluetooth discovery for %s: already configured", info.serial)
             return self.async_abort(reason="already_configured")
 
         existing_tank_entry = _find_entry_for_pan_id(self.hass, info.pan_id)
         if existing_tank_entry is not None:
+            _LOGGER.debug(
+                "%s discovered with pan_id %#06x, matching existing tank %r -- merging",
+                info.serial, info.pan_id, existing_tank_entry.title,
+            )
             await _merge_device_into_entry(
                 self.hass, existing_tank_entry, info.serial, discovery_info.address,
             )
@@ -316,6 +326,12 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         tank = await discover_tank_for_serial(self.hass, self._pending_serial, semaphore)
         self._discovered_tank = tank
+        _LOGGER.debug(
+            "Mesh scan for %s: %s",
+            self._pending_serial,
+            "unreachable" if tank is None
+            else f"prefix={tank.prefix.hex() if tank.prefix else None}, {len(tank.peers)} peer(s)",
+        )
 
         if tank is not None and tank.prefix is not None and len(tank.peers) > 1:
             # "name" is required here for a reason that has nothing to do

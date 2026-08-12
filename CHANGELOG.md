@@ -18,6 +18,11 @@
   forget it was seen before, so re-adding the same physical device
   later isn't silently blocked.
 - Now requires Home Assistant 2026.7.0 or newer.
+- Added a lot more detail to debug logging (Settings > Devices &
+  Services > Mobius > Enable debug logging) -- connection attempts,
+  gateway elections and failovers, and mesh scans are all covered now,
+  to make it much easier to see what's going on if something isn't
+  connecting.
 
 ## 0.3.0
 

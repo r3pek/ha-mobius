@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -122,9 +123,23 @@ class MobiusConnectionManager:
                 continue
             parsed = parse_manufacturer_data(payload)
             if parsed and parsed.serial == self.serial:
+                _LOGGER.debug("%s currently advertising at %s", self.serial, info.address)
                 return bluetooth.async_ble_device_from_address(
                     self.hass, info.address, connectable=True
                 )
+        # The single most useful line for diagnosing "can't connect to
+        # any device at all" -- confirms whether this device is even
+        # visible to Home Assistant's own Bluetooth stack right now, as
+        # distinct from being visible but failing to actually connect
+        # (logged separately, in ensure_connected() below). These are
+        # different problems with different causes (out of range/
+        # powered off vs. a proxy connection-limit/timeout issue), and
+        # without this line they're indistinguishable from the logs
+        # alone.
+        _LOGGER.debug(
+            "%s not found in Home Assistant's own Bluetooth cache right now "
+            "(not currently advertising, or not connectable from here)", self.serial,
+        )
         return None
 
     def mark_disconnected(self) -> None:
@@ -151,6 +166,7 @@ class MobiusConnectionManager:
             if self._device is not None and self._device.is_connected:
                 return self._device
 
+            _LOGGER.debug("%s needs a fresh connection -- resolving its current address", self.serial)
             ble_device = await self._resolve_current_ble_device()
             if ble_device is None:
                 raise UpdateFailed(
@@ -158,26 +174,49 @@ class MobiusConnectionManager:
                     "found in Home Assistant's Bluetooth cache"
                 )
 
+            # How long THIS specific attempt actually waited for a free
+            # connection slot -- the single most direct way to confirm
+            # or rule out MAX_CONCURRENT_CONNECTIONS contention as the
+            # cause of a device never seeming to get a real connection
+            # attempt at all, rather than guessing from the semaphore's
+            # own configured size alone.
+            semaphore_wait_start = time.monotonic()
             async with self._semaphore:
+                semaphore_wait_seconds = time.monotonic() - semaphore_wait_start
+                if semaphore_wait_seconds > 1.0:
+                    _LOGGER.debug(
+                        "%s waited %.1fs for a free connection slot "
+                        "(MAX_CONCURRENT_CONNECTIONS reached)",
+                        self.serial, semaphore_wait_seconds,
+                    )
                 new_device = MobiusDevice(
                     ble_device, serial=self.serial, connect_timeout=CONNECT_TIMEOUT
                 )
+                connect_start = time.monotonic()
                 try:
                     await new_device.connect()
                 except Exception as err:
+                    _LOGGER.debug(
+                        "%s connection attempt failed after %.1fs: %s",
+                        self.serial, time.monotonic() - connect_start, err,
+                    )
                     raise UpdateFailed(
                         f"Error connecting to {self.serial}: {err}"
                     ) from err
+                _LOGGER.debug(
+                    "%s connected in %.1fs", self.serial, time.monotonic() - connect_start,
+                )
 
             self._device = new_device
             return self._device
 
     async def disconnect(self) -> None:
         if self._device is not None:
+            _LOGGER.debug("Disconnecting %s", self.serial)
             try:
                 await self._device.disconnect()
-            except Exception:
-                pass  # best-effort; we're tearing down anyway
+            except Exception as err:
+                _LOGGER.debug("Disconnecting %s raised (ignored, tearing down anyway): %s", self.serial, err)
             self._device = None
 
 
@@ -387,6 +426,9 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         is_gateway = group.gateway_serial == self.serial
+        _LOGGER.debug(
+            "%s polling as %s", self.serial, "gateway" if is_gateway else "relayed",
+        )
         try:
             if is_gateway:
                 device = await group.gateway_connection.ensure_connected()
@@ -398,7 +440,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 peer = await self._resolve_own_mesh_peer(group)
                 relayed = RelayedMobiusDevice(gateway_device, peer)
                 data = await _fetch_all(relayed)
-        except Exception:
+        except Exception as err:
             # A READ can fail even after ensure_connected() reported
             # success (the connection can drop in between) -- this needs
             # to mark the connection disconnected in that case too, not
@@ -413,6 +455,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # gateway connection itself; the gateway's own coordinator
             # independently detects and handles its own connection health
             # on its own cycle regardless).
+            _LOGGER.debug(
+                "%s poll (%s) failed: %s", self.serial,
+                "gateway" if is_gateway else "relayed", err,
+            )
             if is_gateway:
                 group.gateway_connection.mark_disconnected()
                 await self.registry.record_gateway_failure(self.pan_id)
@@ -468,6 +514,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         address = member.mesh_address if member else None
 
         if address is None:
+            _LOGGER.debug(
+                "%s has no cached mesh address yet -- discovering it on demand "
+                "via a brief direct connection", self.serial,
+            )
             address = await self._discover_own_mesh_address()
             if address is None:
                 raise UpdateFailed(
@@ -525,6 +575,17 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
             continue
         ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
         if ble_device is None:
+            # Confirmed present in Home Assistant's OWN advertisement
+            # cache (matched by serial, above), but not connectable via
+            # async_ble_device_from_address() -- a real, meaningfully
+            # different situation from never having been seen at all
+            # (the case below): the device is there, but nothing local
+            # currently has a connectable path to it (e.g. its only
+            # proxy right now is scan-only, or briefly unavailable).
+            _LOGGER.debug(
+                "%s found in Home Assistant's advertisement cache at %s, but not "
+                "currently connectable from here", serial, info.address,
+            )
             return None
         try:
             async with semaphore:
@@ -533,6 +594,10 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
         except Exception as err:
             _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
             return None
+    _LOGGER.debug(
+        "%s not found in Home Assistant's own Bluetooth cache at all -- "
+        "not currently advertising, or not visible to any scanner from here", serial,
+    )
     return None
 
 

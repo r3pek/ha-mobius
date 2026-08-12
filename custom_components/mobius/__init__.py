@@ -230,6 +230,14 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
                 pan_id, peer.serial, now_utc - timedelta(milliseconds=peer.age),
             )
 
+    reported_serials = {p.serial for p in peers}
+    _LOGGER.debug(
+        "Tank %r revalidated: %d/%d known device(s) reported by the mesh this cycle%s",
+        entry.title, len(known_serials & reported_serials), len(known_serials),
+        "" if known_serials <= reported_serials
+        else f" (missing: {sorted(known_serials - reported_serials)})",
+    )
+
     # Local import -- avoids config_flow.py (and everything IT imports:
     # voluptuous, the bluetooth component's own discovery helpers, etc.)
     # being eagerly loaded every time this integration itself loads, the
@@ -361,6 +369,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     devices_by_rssi = sorted(
         devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
     )
+    _LOGGER.debug(
+        "Probing %r's %d device(s) in RSSI order: %s",
+        entry.title, len(devices),
+        [(d[CONF_SERIAL], rssi_by_serial[d[CONF_SERIAL]]) for d in devices_by_rssi],
+    )
     working_serial: str | None = None
     addresses_by_serial: dict[str, bytes] = {}
     last_probe_error: Exception | None = None
@@ -392,6 +405,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             continue
         working_serial = candidate_serial
         addresses_by_serial = {peer.serial: peer.address for peer in tank.peers}
+        _LOGGER.debug(
+            "%s is the working device for %r -- its own mesh view reported %d peer(s): %s",
+            working_serial, entry.title, len(tank.peers), sorted(addresses_by_serial),
+        )
         break
 
     if working_serial is None:
@@ -442,9 +459,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_config_entry_first_refresh()
         else:
             await coordinator.async_refresh()
+            if not coordinator.last_update_success:
+                # async_refresh() is deliberately soft here (see this
+                # function's own docstring for why) -- it never raises,
+                # so without this, a device failing its very first read
+                # would be completely silent right up until whatever
+                # eventually looks at its own entities and finds them
+                # unavailable, with nothing in the logs explaining why.
+                _LOGGER.debug(
+                    "%s did not come up immediately (starts unavailable, "
+                    "retries on the normal poll cycle)", serial,
+                )
         coordinators[serial] = coordinator
 
     entry.runtime_data = MobiusRuntimeData(coordinators=coordinators)
+    _LOGGER.debug(
+        "%r set up: %d/%d device(s) immediately available (gateway: %s)",
+        entry.title,
+        sum(1 for c in coordinators.values() if c.last_update_success),
+        len(coordinators), working_serial,
+    )
 
     # Periodic membership re-check -- see _async_revalidate_tank()'s own
     # docstring for the full reasoning. async_on_unload() means this
