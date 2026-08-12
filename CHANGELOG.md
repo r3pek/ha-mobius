@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Fixed the "Discovered at" sensor, which could show confusing,
-  out-of-order values. Renamed to "Mesh last seen" and now updates
-  about every 30 seconds instead of being a one-time snapshot.
+  out-of-order values. It's now a "last seen" attribute on the mesh
+  address sensor instead, updating about every 30 seconds.
 - Fixed gateway failover getting stuck bouncing between the same two
   devices forever on a tank with more than two, never trying the
   others.

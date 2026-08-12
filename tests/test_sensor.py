@@ -227,12 +227,12 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert gateway_states == []
 
 
-async def test_mesh_last_seen_sensor_reflects_the_gateways_own_fresh_read(hass):
-    """End-to-end confirmation that the mesh-last-seen sensor is wired
-    up and shows a real, freshly-computed timestamp, not the raw
-    duration -- and that it's on THIS device's own coordinator data,
-    refreshed on every regular poll cycle rather than a one-time
-    snapshot captured at setup."""
+async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):
+    """End-to-end confirmation that mesh last-seen is now a plain
+    attribute of the mesh_address sensor -- not its own entity (folded
+    in, see MeshAddressSensor's own docstring for why) -- and shows a
+    real, freshly-computed timestamp, refreshed on every regular poll
+    cycle rather than a one-time snapshot captured at setup."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -267,14 +267,19 @@ async def test_mesh_last_seen_sensor_reflects_the_gateways_own_fresh_read(hass):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    state = hass.states.get("sensor.mp40qd_right_mesh_last_seen")
+    # No standalone mesh-last-seen entity at all anymore.
+    assert hass.states.get("sensor.mp40qd_right_mesh_last_seen") is None
+
+    state = hass.states.get("sensor.mp40qd_right_mesh_address")
     assert state is not None
-    # A tolerance, not exact equality -- HA's own timestamp state string
-    # serialization truncates to whole seconds, while frozen_now itself
-    # has microsecond precision.
-    actual = dt_util.parse_datetime(state.state)
+    last_seen = state.attributes["last_seen"]
+    # A tolerance, not exact equality -- last_seen is a real datetime
+    # object here (an attribute, not a TIMESTAMP-device-class sensor
+    # state string), so no truncation to account for -- still using a
+    # tolerance rather than exact equality just to keep this robust to
+    # sub-millisecond scheduling jitter in the test itself.
     expected = frozen_now - timedelta(seconds=10)
-    assert abs((actual - expected).total_seconds()) < 1
+    assert abs((last_seen - expected).total_seconds()) < 1
 
 
 async def test_light_entry_setup_creates_channel_sensors(hass):

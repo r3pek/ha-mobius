@@ -591,8 +591,9 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         changing duration (time since that peer was last heard from on
         the mesh), not a fixed value there's any point capturing once at
         setup time and keeping around unrefreshed. See sensor.py's own
-        MeshLastSeenSensor for where this now actually lives instead --
-        refreshed on every regular poll cycle, not stored here at all.
+        MeshAddressSensor for where this now actually lives instead (as
+        its own "last_seen" attribute) -- refreshed on every regular
+        poll cycle, not stored here at all.
 
         title comes from what was actually typed/kept on the
         tank_confirm form (see async_step_tank_confirm()) -- not always

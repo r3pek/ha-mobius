@@ -449,6 +449,17 @@ class MeshAddressSensor(MobiusEntity):
     only need the GATEWAY's connection to be up, not this specific
     device's own address to already be known) -- not a bug, just the
     two becoming available on slightly different schedules.
+
+    Also carries this device's own "last seen on the mesh" timestamp as
+    an attribute (last_seen) -- an earlier version of this integration
+    surfaced that as its own, separate sensor entity; folded in here
+    instead, since the two are closely related diagnostic facts about
+    the same underlying mesh connectivity, not independently meaningful
+    enough to justify a whole extra entity each. Refreshed on the exact
+    same schedule as the standalone sensor was (every poll cycle, for
+    every device -- see coordinator.py's own _fetch()), just read from
+    coordinator.data here rather than the registry directly, since
+    that's where it's actually written each cycle.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -474,59 +485,12 @@ class MeshAddressSensor(MobiusEntity):
         # string an earlier version of this sensor showed instead.
         return str(ipaddress.IPv6Address(member.mesh_address))
 
-
-class MeshLastSeenSensor(MobiusEntity):
-    """
-    Diagnostic: the last real point in time this specific device was
-    confirmed present on the Thread mesh, as far as the tank's gateway
-    currently knows -- refreshed on every single poll cycle for every
-    device (gateway and relayed alike, every ~POLL_INTERVAL -- see
-    coordinator.py's own _fetch()), not a one-time snapshot.
-
-    An earlier version of this integration had a similarly-named sensor
-    built on a value whose own meaning turned out to be unconfirmed, and
-    was removed entirely rather than risk showing something misleading.
-    Reverse engineering the app's own network-troubleshooting screen
-    later confirmed what that value actually is: a live, continuously-
-    changing duration (time since last heard from on the mesh), not a
-    fixed one-time snapshot -- which is exactly why THIS sensor is
-    refreshed continuously too, rather than captured once at setup the
-    way the earlier, incorrect design was.
-
-    Shows as HA's own "unknown" state (native_value None) until this
-    device's tank has had at least one successful gateway poll cycle
-    report data for it -- for an ad-hoc device that isn't actually on a
-    Thread mesh at all, this simply never populates, which is honest:
-    there's genuinely nothing to show, not a bug. Doesn't go fully
-    "unavailable" over this alone, though -- that's still governed by
-    the base class's own available property (whether this device's own
-    regular status poll itself is succeeding), same as every other
-    sensor here.
-    """
-
-    def __init__(self, coordinator, serial, device_info):
-        super().__init__(
-            coordinator, serial, "mesh_last_seen",
-            SensorEntityDescription(
-                key="mesh_last_seen", translation_key="mesh_last_seen",
-                device_class=SensorDeviceClass.TIMESTAMP,
-            ),
-            device_info,
-        )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
     @property
-    def native_value(self):
-        return self.coordinator.data.get("mesh_last_seen_at") if self.coordinator.data else None
-
-    @property
-    def available(self) -> bool:
-        # Deliberately NOT tied to coordinator.data (the base class's own
-        # available property checks that) -- this sensor's own value
-        # comes from the registry, not the poll cycle, so it can be
-        # available/unavailable on its own schedule independent of
-        # whether the most recent poll itself succeeded.
-        return self.native_value is not None
+    def extra_state_attributes(self):
+        last_seen = (self.coordinator.data or {}).get("mesh_last_seen_at")
+        if last_seen is None:
+            return {}
+        return {"last_seen": last_seen}
 
 
 class MeshPrefixSensor(SensorEntity):
@@ -716,7 +680,6 @@ async def async_setup_entry(
             FirmwareVersionSensor(coordinator, serial, device_info),
             HardwareRevisionSensor(coordinator, serial, device_info),
             MeshAddressSensor(coordinator, serial, device_info),
-            MeshLastSeenSensor(coordinator, serial, device_info),
         ]
 
         if support.startswith("pump"):
