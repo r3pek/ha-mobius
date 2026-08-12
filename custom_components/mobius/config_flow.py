@@ -48,6 +48,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
+    async_clear_address_from_match_history,
     async_discovered_service_info,
     async_last_service_info,
 )
@@ -235,10 +236,29 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # we ever learn its serial (see python-mobius's documentation/
             # 12-device-identity-and-address-stability.md) -- serial is
             # required for reliable identity/reconnection, not optional.
-            # No special retry logic needed here: Home Assistant's own
-            # Bluetooth integration will naturally re-trigger this step on
-            # a later, more complete advertisement (typically within
-            # seconds, given how often these devices advertise).
+            #
+            # Confirmed via a real capture that these devices split their
+            # info across multiple, rotating advertisement packets --
+            # name plus a 128-bit service UUID alone already fills 29 of
+            # the 31 bytes a legacy advertisement allows, leaving no room
+            # for manufacturer data in the same packet. An earlier
+            # version of this code assumed Home Assistant would simply
+            # re-trigger this step once a later, fuller advertisement
+            # came in -- confirmed via Home Assistant's own documentation
+            # that this isn't reliable: match history is keyed on which
+            # fields/UUIDs have been seen for an address at all, not
+            # whether their content has since changed, so a later
+            # advertisement carrying manufacturer data for the first time
+            # does NOT reliably re-trigger a fresh discovery step on its
+            # own once this address has already matched via local_name
+            # (see manifest.json's own "bluetooth" matchers -- both
+            # local_name and manufacturer_id are registered there
+            # independently). Clearing this address's own match history
+            # here, rather than just aborting and hoping, is what
+            # actually lets the next advertisement -- even one that,
+            # superficially, looks like something already seen -- get a
+            # real chance to trigger this step again.
+            async_clear_address_from_match_history(self.hass, discovery_info.address)
             return self.async_abort(reason="no_manufacturer_data")
 
         if _find_entry_containing_serial(self.hass, info.serial) is not None:

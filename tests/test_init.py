@@ -176,7 +176,7 @@ async def test_setup_entry_joins_registry_with_current_rssi(hass):
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups",
         AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     mock_rssi.assert_called_once_with(hass, PUMP_SERIAL)
     registry = hass.data[DOMAIN]["gateway_registry"]
@@ -227,7 +227,7 @@ async def test_gateway_device_also_gets_proactive_discovery(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     mock_discover.assert_called_once_with(hass, PUMP_SERIAL, hass.data[DOMAIN]["connection_semaphore"])
     registry = hass.data[DOMAIN]["gateway_registry"]
@@ -272,7 +272,7 @@ async def test_relayed_device_gets_proactive_discovery_at_setup(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     mock_discover.assert_called_once()
     assert mock_discover.call_args[0][0] is hass
@@ -332,7 +332,7 @@ async def test_secondary_device_proactive_discovery_failure_does_not_break_setup
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        result = await async_setup_entry(hass, entry)
+        result = await hass.config_entries.async_setup(entry.entry_id)
 
     assert result is True
     # LIGHT_SERIAL's own proactive discovery genuinely ran and failed --
@@ -407,7 +407,7 @@ async def test_secondary_device_skips_redundant_discovery_when_already_cached(ha
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     # discover_mesh_address is never called at all: PUMP_SERIAL's address
     # came from the probe's own tank report, LIGHT_SERIAL's was already
@@ -490,7 +490,7 @@ async def test_one_unreachable_device_does_not_block_the_whole_tank(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        result = await async_setup_entry(hass, entry)
+        result = await hass.config_entries.async_setup(entry.entry_id)
 
     # The entry itself sets up successfully -- the core point of this fix.
     assert result is True
@@ -547,7 +547,7 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     # PUMP_SERIAL (stronger RSSI) was probed FIRST, despite being listed
     # second in CONF_DEVICES.
@@ -634,7 +634,7 @@ async def test_multi_device_tank_setup_makes_only_one_connection_not_n_plus_one(
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     # Exactly ONE connection for the whole tank -- the probe itself.
     assert mock_discover_tank.call_count == 1
@@ -679,7 +679,7 @@ async def test_multi_device_tank_creates_one_coordinator_per_device(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     assert set(entry.runtime_data.coordinators.keys()) == {PUMP_SERIAL, LIGHT_SERIAL}
 
@@ -719,7 +719,7 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     device_registry = dr.async_get(hass)
     tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX)})
@@ -763,7 +763,7 @@ async def test_single_device_ad_hoc_entry_skips_synthetic_tank_device(hass):
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
     ):
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     device_registry = dr.async_get(hass)
     devices_for_entry = [
@@ -1108,7 +1108,7 @@ async def test_setup_entry_registers_periodic_revalidation(hass):
         "custom_components.mobius.async_track_time_interval",
     ) as mock_track_interval:
         mock_track_interval.return_value = lambda: None
-        await async_setup_entry(hass, entry)
+        await hass.config_entries.async_setup(entry.entry_id)
 
     assert mock_track_interval.call_count == 1
     call_args = mock_track_interval.call_args

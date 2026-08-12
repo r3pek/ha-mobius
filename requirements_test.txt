@@ -1,4 +1,8 @@
-pytest-homeassistant-custom-component
+# >=0.13.344 -- the exact version this integration's own CI was
+# confirmed to first pass against (bundles homeassistant==2026.7.0
+# stable exactly) -- see hacs.json's own "homeassistant" minimum for
+# why 2026.7.0 specifically.
+pytest-homeassistant-custom-component>=0.13.344
 pytest-asyncio
 bleak-retry-connector>=3.0
 pyudev
@@ -11,3 +15,11 @@ pyudev
 # testing only because it happened to already be installed there from
 # unrelated prior work.
 pyserial
+# aiousbwatcher, serialx: same reasoning as pyserial above, one layer
+# further down the same import chain -- confirmed via the same kind of
+# fresh-environment ModuleNotFoundError, this time specific to a newer
+# homeassistant.components.usb (still reached via homeassistant.
+# components.bluetooth's own import of it) that added these as its own,
+# not-automatically-installed extras.
+aiousbwatcher
+serialx

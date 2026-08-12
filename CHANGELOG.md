@@ -12,6 +12,9 @@
   device to reconnect through, addresses) about once a minute instead
   of every 12 hours, so a device that couldn't be reached comes back
   much sooner once it's reachable again.
+- Fixed newly-added devices sometimes never showing up in Home
+  Assistant, even though they were clearly nearby and broadcasting.
+- Now requires Home Assistant 2026.7.0 or newer.
 
 ## 0.3.0
 

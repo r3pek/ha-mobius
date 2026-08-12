@@ -220,19 +220,28 @@ async def test_bluetooth_discovery_aborts_without_manufacturer_data(hass):
     cache has it), the flow must abort rather than proceed with an
     address-based identity that could break later if the address changes
     before a serial is ever learned.
+
+    Also confirms the match-history clear this abort path now does --
+    confirmed via a real report and Home Assistant's own documentation
+    that simply hoping a later advertisement re-triggers discovery on its
+    own isn't reliable once this address has already matched via
+    local_name (see manifest.json's own "bluetooth" matchers).
     """
     incomplete_info = _make_discovery_info(PUMP_ADDRESS, b"")
 
     with patch(
         "custom_components.mobius.config_flow.async_last_service_info",
         return_value=None,  # HA's cache doesn't have anything better either
-    ):
+    ), patch(
+        "custom_components.mobius.config_flow.async_clear_address_from_match_history",
+    ) as mock_clear_history:
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=incomplete_info
         )
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "no_manufacturer_data"
+    mock_clear_history.assert_called_once_with(hass, PUMP_ADDRESS)
     # No entry should exist at all -- not even an address-only one.
     assert len(hass.config_entries.async_entries(DOMAIN)) == 0
 
