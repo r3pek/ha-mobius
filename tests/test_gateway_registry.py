@@ -315,59 +315,6 @@ class TestLeave:
         await registry.leave(0x9999, "nobody")  # must not raise
 
 
-class TestMoveMember:
-    @pytest.mark.asyncio
-    async def test_move_to_different_pan_id(self, registry):
-        await registry.join(PAN_A, "mover", rssi=-50)
-        await registry.join(PAN_B, "other", rssi=-50)
-
-        new_group = await registry.move_member(PAN_A, PAN_B, "mover", rssi=-45)
-
-        assert new_group.pan_id == PAN_B
-        assert "mover" in new_group.members
-        assert registry.group(PAN_A) is None  # PAN_A had only "mover" -- now empty, removed
-
-    @pytest.mark.asyncio
-    async def test_moving_the_gateway_promotes_a_replacement_in_the_old_group(self, registry):
-        await registry.join(PAN_A, "gw", rssi=-50)
-        await registry.join(PAN_A, "backup", rssi=-40)
-        await registry.join(PAN_B, "other", rssi=-50)
-
-        await registry.move_member(PAN_A, PAN_B, "gw", rssi=-45)
-
-        old_group = registry.group(PAN_A)
-        assert old_group.gateway_serial == "backup"
-        assert "gw" not in old_group.members
-
-    @pytest.mark.asyncio
-    async def test_same_pan_id_just_updates_rssi_without_a_real_move(self, registry):
-        await registry.join(PAN_A, "gw", rssi=-50)
-        group_before = registry.group(PAN_A)
-
-        result = await registry.move_member(PAN_A, PAN_A, "gw", rssi=-20)
-
-        assert result is group_before  # same group object, not recreated
-        assert group_before.gateway_serial == "gw"  # unaffected
-        assert group_before.members["gw"].rssi == -20  # but RSSI updated
-
-
-class TestUpdateRssi:
-    @pytest.mark.asyncio
-    async def test_updates_existing_member(self, registry):
-        await registry.join(PAN_A, "gw", rssi=-50)
-        registry.update_rssi(PAN_A, "gw", -30)
-        assert registry.group(PAN_A).members["gw"].rssi == -30
-
-    def test_nonexistent_group_is_a_safe_noop(self, registry):
-        registry.update_rssi(0x9999, "nobody", -30)  # must not raise
-
-    @pytest.mark.asyncio
-    async def test_nonexistent_member_is_a_safe_noop(self, registry):
-        await registry.join(PAN_A, "gw", rssi=-50)
-        registry.update_rssi(PAN_A, "nonexistent", -30)  # must not raise
-        assert "nonexistent" not in registry.group(PAN_A).members
-
-
 class TestUpdateMeshAddress:
     @pytest.mark.asyncio
     async def test_updates_existing_member(self, registry):

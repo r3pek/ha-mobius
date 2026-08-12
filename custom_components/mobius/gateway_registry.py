@@ -26,7 +26,7 @@ Selection happens once per group formation. A better-signal device
 joining an ALREADY-established group later does not displace a working
 gateway -- only GATEWAY_FAILURE_THRESHOLD consecutive gateway failures
 (see record_gateway_failure()) or the gateway leaving the group
-(move_member()/leave()) triggers a change. Continuously reassigning
+(leave()) triggers a change. Continuously reassigning
 gateway based on signal strength alone would cause unnecessary
 connection churn for a marginal benefit.
 
@@ -45,10 +45,16 @@ if relay didn't exist.
 ## pan_id is not assumed fixed
 
 A device's pan_id can change -- it can be physically moved to a
-different tank. Callers (coordinator.py) re-resolve pan_id on every
-reconnect and call move_member() if it's changed, which is a
-leave-then-join -- including re-running gateway promotion for the group
-being left, if the device leaving was that group's gateway.
+different tank. This registry itself doesn't detect that on its own;
+__init__.py's own periodic tank revalidation does (comparing what a
+tank's gateway currently reports its mesh peers to be against what
+each entry's own CONF_DEVICES list says), and handles a confirmed move
+at the CONFIG ENTRY level -- removing the device from its old entry's
+device list and merging it into the new one's, then reloading both.
+That reload is what actually moves the device between this registry's
+own groups (the old entry's own teardown calls leave(), the new
+entry's own setup calls join()), not any direct, single registry-level
+operation.
 """
 
 from __future__ import annotations
@@ -314,22 +320,6 @@ class GatewayRegistry:
             if not group.members:
                 self._groups.pop(pan_id, None)
 
-    async def move_member(
-        self, old_pan_id: int, new_pan_id: int, serial: str, rssi: Optional[int] = None,
-    ) -> PanGroup:
-        """A device's pan_id changed (it moved to a different tank) --
-        leave() the old group (promoting a new gateway there if needed)
-        and join() the new one."""
-        if old_pan_id == new_pan_id:
-            # Not actually a move -- just update the RSSI on file, if any.
-            group = self._group_for(new_pan_id)
-            async with group.lock:
-                if serial in group.members:
-                    group.members[serial].rssi = rssi
-            return group
-        await self.leave(old_pan_id, serial)
-        return await self.join(new_pan_id, serial, rssi)
-
     def record_gateway_success(self, pan_id: int) -> None:
         """Call on every successful gateway read -- resets the
         consecutive-failure counter, and clears recently_failed_gateways
@@ -414,24 +404,14 @@ class GatewayRegistry:
                 await old_connection.disconnect()
             return True
 
-    def update_rssi(self, pan_id: int, serial: str, rssi: Optional[int]) -> None:
-        """Best-effort RSSI update for an existing member -- does nothing
-        if the group or member doesn't (yet) exist. Not itself gated by
-        the group lock: a slightly stale RSSI read losing a race against
-        a concurrent join()/leave() is harmless (RSSI is only consulted
-        during gateway selection, which does hold the lock)."""
-        group = self._groups.get(pan_id)
-        if group is not None and serial in group.members:
-            group.members[serial].rssi = rssi
-
     def update_mesh_address(self, pan_id: int, serial: str, address: bytes) -> None:
         """Caches a member's Thread mesh-local IPv6 address (see
         coordinator.py's on-demand discovery fallback, and the dedicated
         background prefetch task) -- does nothing if the group or member
-        doesn't (yet) exist. Not gated by the group lock, matching
-        update_rssi()'s reasoning: a cached address is only ever read
-        during a relay attempt, not during gateway selection, so losing a
-        race against a concurrent join()/leave() is harmless."""
+        doesn't (yet) exist. Not gated by the group lock: a cached
+        address is only ever read during a relay attempt, not during
+        gateway selection, so losing a race against a concurrent
+        join()/leave() is harmless."""
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
             member = group.members[serial]
