@@ -5,30 +5,61 @@ name: Test
 # publishing requirements), since "does the code work" is a different
 # concern from "is this ready to release" or "does this meet HACS's
 # specific publishing rules".
+#
+# tags-ignore: ["**"] -- deliberately excludes tag pushes from this
+# direct trigger. release.yml's own "release" job now calls this exact
+# workflow itself (via workflow_call, see the job below) as its own
+# prerequisite before it will run anything -- without excluding tags
+# here too, a tag push would run the full test suite TWICE, once via
+# this trigger and once via that call, back to back, for no reason.
+# Confirmed the runner this repo uses actually supports reusable
+# workflows before relying on this (a real, version-dependent Forgejo
+# feature, not something to assume blindly).
+#
+# workflow_call: {} -- what actually makes this workflow file callable
+# from another one at all (release.yml's own "test" job below) rather
+# than just runnable on its own triggers.
+#
 # "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
 # interpret the bare word as the boolean `true` instead of the literal
 # key GitHub/Forgejo Actions expects.
 "on":
   push:
+    tags-ignore:
+      - "**"
   pull_request:
   workflow_dispatch:
+  workflow_call: {}
 
 jobs:
   test:
-    # Same setup as release.yml's own test step -- see that file's
-    # comments for why each of these specific choices (ubuntu-22.04 for
-    # a full GitHub-Actions-compatible environment, reading runtime
-    # requirements from manifest.json rather than hardcoding them,
-    # python -m pytest rather than bare pytest).
+    # Same setup as release.yml's own "release" job used to have
+    # inline, before it started calling this workflow instead -- see
+    # that file's own comments for why each of these specific choices
+    # (ubuntu-22.04 for a full GitHub-Actions-compatible environment,
+    # reading runtime requirements from manifest.json rather than
+    # hardcoding them, python -m pytest rather than bare pytest).
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
       - name: Set up Python
+        # cache: "pip" -- see release.yml's own, much more detailed
+        # comment on this exact same option for the full story (a real
+        # job log showed this step's own pip install responsible for
+        # the overwhelming majority of a job's total runtime). Added
+        # here too, not just there, once this became the single, shared
+        # place both this workflow's own direct runs AND release.yml's
+        # own "test" job actually execute from -- this workflow's own
+        # direct runs (on every push/PR) happen far more often than
+        # release.yml's own tag-triggered runs ever will, so the
+        # benefit matters at least as much here.
         uses: https://code.forgejo.org/actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements_test.txt
 
       - name: Install test dependencies
         run: |

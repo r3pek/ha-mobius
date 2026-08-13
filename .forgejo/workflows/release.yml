@@ -14,74 +14,52 @@ name: Release
   workflow_dispatch: {}
 
 jobs:
+  # Calls test.yml as a reusable workflow (see that file's own
+  # workflow_call trigger) rather than duplicating its steps here --
+  # confirmed the runner this repo uses actually supports reusable
+  # workflows (a real, version-dependent Forgejo feature) before relying
+  # on this. The "release" job below depends on this one (needs: test),
+  # so a release is never even attempted if the test suite doesn't pass
+  # -- test.yml's own direct push trigger deliberately excludes tag
+  # pushes (see its own tags-ignore) specifically so this call is the
+  # ONLY thing that runs the suite on a tag push, not a second, entirely
+  # redundant run alongside it.
+  test:
+    uses: ./.forgejo/workflows/test.yml
+
   release:
+    needs: test
     # ubuntu-22.04 label -> catthehacker/ubuntu:act-22.04, the only one of
     # this runner's three labels with a full, GitHub-Actions-compatible
     # environment (Python, Node, glibc). The "docker" label maps to a bare
     # Alpine image, which lacks the glibc most published actions expect.
     runs-on: ubuntu-22.04
     steps:
+      # A fresh checkout -- this job runs on its own, separate runner
+      # instance from the "test" job above (a real, normal consequence
+      # of them being two distinct jobs, reusable-workflow call or not),
+      # so nothing from that job's own filesystem carries over here.
       # Unlike python-mobius, this repo does NOT use the SHA256 object
       # format, so the standard checkout action works fine here -- no
       # need for the manual git-clone workaround that repo needed.
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Set up Python
-        # cache: "pip" -- confirmed via a real job log that this step's
-        # own pip install was responsible for the overwhelming majority
-        # of this job's total runtime: 12m17s spent installing test
-        # dependencies (pytest-homeassistant-custom-component pulls in
-        # the full homeassistant package, whose own dependency tree is
-        # 100+ packages -- numpy, cryptography, sqlalchemy, boto3, etc,
-        # all re-downloaded from scratch on every single run) out of a
-        # ~14 minute total job, versus the actual pytest run itself
-        # taking only 43 seconds. Confirmed via the same log that this
-        # genuinely wasn't compilation-bound (the handful of wheels this
-        # environment builds from source finish in well under 2 seconds
-        # combined) -- it's pure download/resolution time, exactly what
-        # dependency caching is for. Requires the runner itself to
-        # already be configured with a cache backend, or this step
-        # fails outright rather than degrading gracefully -- confirmed
-        # this repo's own runner already has one.
-        uses: https://code.forgejo.org/actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: requirements_test.txt
+      # No Python setup step at all here -- deliberately. The only
+      # Python this job's own steps actually run is
+      # extract_changelog_section.py, which only imports re/sys (the
+      # standard library, confirmed by reading the script itself), so
+      # whatever python3 this image already has is sufficient; there's
+      # no test/runtime dependency installation happening in this job
+      # at all anymore, since that's now entirely test.yml's own job's
+      # responsibility (see "test" above).
 
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements_test.txt
-
-      # manifest.json's own "requirements" (python-mobius, bleak-retry-
-      # connector) are what Home Assistant itself installs at runtime for
-      # this integration -- not covered by requirements_test.txt, which is
-      # test-tooling only. Reads them from manifest.json directly rather
-      # than hardcoding the same versions a second time here, so this
-      # can't drift out of sync with the manifest. Pulls from PyPI, so
-      # the version constraint in manifest.json must already be published
-      # there for this step to succeed.
-      - name: Install integration runtime requirements (from manifest.json)
-        run: |
-          python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
-          pip install -r /tmp/manifest_requirements.txt
-
-      # Gate: the rest of this job (release creation) only runs if this
-      # step succeeds. No build/publish steps here at all -- unlike
-      # python-mobius, this isn't a PyPI package; HACS installs directly
-      # from the tagged repo source (confirmed via hacs.json's own
-      # "zip_release": false), so there's nothing to build or upload.
-      # `python -m pytest`, not bare `pytest` -- confirmed via a real CI
-      # failure that this matters here: `python -m X` prepends the
-      # current working directory to sys.path, which is what makes
-      # `custom_components.mobius` importable at all (this repo's own
-      # top-level package, not something pip-installed). The bare `pytest`
-      # entry-point script does not do this the same way, and fails with
-      # "No module named 'custom_components'" without it.
-      - name: Run tests
-        run: python -m pytest tests/ -q
+      # Gate: the rest of this job (release creation) only runs if the
+      # "test" job this one needs succeeded. No build/publish steps
+      # here at all -- unlike python-mobius, this isn't a PyPI package;
+      # HACS installs directly from the tagged repo source (confirmed
+      # via hacs.json's own "zip_release": false), so there's nothing
+      # to build or upload beyond the release zip below.
 
       # Pulls the section of CHANGELOG.md under the heading matching this
       # tag's version (tag v0.2.0 -> "## 0.2.0") for the Forgejo release
@@ -137,45 +115,73 @@ jobs:
       # actually makes new versions visible to HACS users, not just to
       # people watching this Forgejo repo directly.
       #
-      # Same reasoning as hacs/action in validate.yml: github_token here
-      # is NOT secrets.GITHUB_TOKEN -- that's a Forgejo-scoped token,
-      # meaningless to GitHub's API, and creating a release additionally
-      # needs WRITE access (hacs/action's use of GH_MIRROR_TOKEN only
-      # ever needed read access) -- confirm that secret's token actually
-      # has write permission on the mirror repo before relying on this,
-      # rather than assuming the existing read-scoped one is enough.
+      # Uses the real `gh` CLI directly, NOT a third-party Node action
+      # (action-gh-release, used here previously) -- confirmed via a
+      # real, repeated failure that overriding GITHUB_API_URL/
+      # GITHUB_GRAPHQL_URL in this step's own env (the standard fix for
+      # this exact class of problem) did NOT work: this runner doesn't
+      # let a step's own env override those specific values, so the
+      # action kept resolving its API base URL back to the Forgejo
+      # instance itself regardless. `gh` CLI genuinely sidesteps this
+      # rather than working around it -- confirmed directly against its
+      # own official documentation that it doesn't read GITHUB_API_URL/
+      # GITHUB_GRAPHQL_URL at all; those are specifically the Node.js
+      # @actions/github (Octokit) library's own env-var convention, a
+      # completely different tool `gh` has no relationship to. `gh`
+      # itself defaults to the real api.github.com unconditionally
+      # unless GH_HOST says otherwise (which nothing here sets), so
+      # whatever the runner's own environment injects for GITHUB_API_URL
+      # is simply irrelevant to it.
+      #
+      # Installed on demand (checked first, not reinstalled if already
+      # present) rather than assumed preinstalled -- confirmed this
+      # runner's own ubuntu-22.04 image (catthehacker/ubuntu:act-22.04,
+      # the "medium" variant, not "full") doesn't guarantee gh CLI is
+      # already there the way GitHub's own hosted runners do.
+      #
+      # GH_TOKEN (not GITHUB_TOKEN) -- gh CLI's own documented order of
+      # precedence between the two, GH_TOKEN first -- deliberately used
+      # here specifically so this explicit value wins even if the
+      # runner's own environment also independently sets GITHUB_TOKEN
+      # (a Forgejo-scoped token, meaningless to the real GitHub's API,
+      # for its own native actions' convenience) for this job.
+      #
+      # token here is NOT secrets.GITHUB_TOKEN -- that's the Forgejo-
+      # scoped one just described -- and creating a release additionally
+      # needs WRITE access (hacs/action's own use of GH_MIRROR_TOKEN in
+      # validate.yml only ever needed read access) -- confirm that
+      # secret's token actually has write permission on the mirror repo
+      # before relying on this, rather than assuming the existing
+      # read-scoped one is enough.
       #
       # Reuses the same release_notes.md this job already built for the
       # Forgejo release -- one changelog extraction, used for both.
-      #
-      # Confirmed via a real failure on this exact step ("token is
-      # malformed: token contains an invalid number of segments" /
-      # "authorized integration: parse JWT error" -- a combined,
-      # multi-method auth-failure response, which is Forgejo/Gitea's own
-      # error format, not a real GitHub API error like "Bad
-      # credentials") that this action was silently sending its request
-      # to the FORGEJO instance itself, not github.com, and Forgejo's
-      # own auth system rejected the real GitHub PAT because it doesn't
-      # match any token format Forgejo recognizes. Root cause: this
-      # action's underlying @actions/github client resolves its API
-      # base URL from the GITHUB_API_URL/GITHUB_GRAPHQL_URL environment
-      # variables when not told otherwise (a real, documented feature,
-      # added upstream specifically for GitHub Enterprise Server
-      # support) -- and Forgejo's own runner sets those to point at
-      # itself by default, for its own native actions' convenience, not
-      # realizing a real, non-Forgejo-aware GitHub Action would trust
-      # them too. Explicitly overriding both here forces the actual
-      # api.github.com / api.github.com/graphql endpoints regardless of
-      # whatever the runner's own environment already set.
       - name: Create GitHub release
         if: github.event_name == 'push'
-        uses: https://github.com/softprops/action-gh-release@v2
         env:
-          GITHUB_API_URL: https://api.github.com
-          GITHUB_GRAPHQL_URL: https://api.github.com/graphql
-        with:
-          repository: r3pek/ha-mobius
-          token: ${{ secrets.GH_MIRROR_TOKEN }}
-          tag_name: ${{ github.ref_name }}
-          body_path: release_notes.md
-          files: dist/release/mobius.zip
+          GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            # Matches cli/cli's own current, official install_linux.md
+            # instructions exactly (/etc/apt/keyrings/, not the
+            # /usr/share/keyrings/ path several older, third-party
+            # guides still show) -- confirmed directly against that
+            # repo's own docs, not just any blog post repeating it.
+            #
+            # $SUDO, not a hardcoded `sudo` prefix -- this image
+            # (catthehacker/ubuntu:act-22.04) runs as root by default,
+            # where sudo may not even be installed at all; empty when
+            # already root, the real command otherwise, so this works
+            # either way rather than assuming one or the other.
+            SUDO=$(command -v sudo || true)
+            $SUDO mkdir -p -m 755 /etc/apt/keyrings
+            wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | $SUDO tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+            $SUDO chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | $SUDO tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y gh
+          fi
+          gh release create "${{ github.ref_name }}" dist/release/mobius.zip \
+            --repo r3pek/ha-mobius \
+            --title "${{ github.ref_name }}" \
+            --notes-file release_notes.md
