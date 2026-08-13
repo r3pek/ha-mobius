@@ -849,7 +849,14 @@ OTHER_MLPREFIX_HEX = "aabbccddeeff0011"
 def _make_registry_with_gateway(hass, pan_id, gateway_serial, peers_to_return):
     """A GatewayRegistry with one already-elected group, whose gateway
     connection is mocked to return a controlled peer list from
-    discover_mesh_peers_auto() -- avoids any real BLE connection."""
+    discover_mesh_peers_auto() -- avoids any real BLE connection.
+    is_connected is set True on the underlying fake device -- matching
+    _async_revalidate_tank()'s own documented common case ("the gateway
+    is already connected most of the time for its own regular polling")
+    -- so its own proactive Bluetooth-cache check (gated on NOT already
+    connected) doesn't fire for tests that aren't specifically about
+    that behavior; see TestRevalidateProactiveCacheCheck below for
+    tests that deliberately set is_connected False instead."""
     semaphore = asyncio.Semaphore(2)
     registry = GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
     hass.data.setdefault(DOMAIN, {})
@@ -858,8 +865,10 @@ def _make_registry_with_gateway(hass, pan_id, gateway_serial, peers_to_return):
 
     connection = MobiusConnectionManager(hass, gateway_serial, semaphore)
     fake_device = MagicMock()
+    fake_device.is_connected = True
     fake_device.discover_mesh_peers_auto = AsyncMock(return_value=peers_to_return)
     connection.ensure_connected = AsyncMock(return_value=fake_device)
+    connection._device = fake_device
 
     group = PanGroup(pan_id=pan_id, gateway_serial=gateway_serial, gateway_connection=connection)
     group.members[gateway_serial] = MemberState(serial=gateway_serial)
@@ -892,6 +901,90 @@ async def test_revalidate_skips_cleanly_if_no_group_exists_at_all(hass):
     await _async_revalidate_tank(hass, entry)  # must not raise
 
 
+class TestRevalidateProactiveCacheCheck:
+    """The actual point of this whole addition: catching a device
+    (specifically the tank's own gateway) missing from Home Assistant's
+    own Bluetooth cache proactively, during this function's own regular
+    1-minute cycle, rather than only reactively -- discovered only once
+    something actually needed to connect and failed. A real, confirmed
+    production incident showed the gateway going missing from that
+    cache for hours at a stretch."""
+
+    async def test_requests_active_scan_when_not_connected_and_not_in_cache(self, hass):
+        registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+        group.gateway_connection._device = None  # not currently connected
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+            unique_id=PUMP_SERIAL,
+        )
+        entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=[],
+        ), patch(
+            "custom_components.mobius.bluetooth.async_request_active_scan", AsyncMock(),
+        ) as mock_active_scan:
+            await _async_revalidate_tank(hass, entry)
+
+        mock_active_scan.assert_awaited_once_with(hass)
+
+    async def test_skips_active_scan_when_already_connected(self, hass):
+        """The key, protective case: a currently-connected gateway
+        legitimately stops advertising while connected -- it must never
+        be treated as "missing" just because it isn't in the
+        advertisement cache right now."""
+        registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+        # _make_registry_with_gateway's own default: already connected.
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+            unique_id=PUMP_SERIAL,
+        )
+        entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=[],  # would "find it missing" if the check ran at all
+        ), patch(
+            "custom_components.mobius.bluetooth.async_request_active_scan", AsyncMock(),
+        ) as mock_active_scan:
+            await _async_revalidate_tank(hass, entry)
+
+        mock_active_scan.assert_not_called()
+
+    async def test_skips_active_scan_when_gateway_found_in_cache(self, hass):
+        """Not connected, but already visible in the cache -- nothing
+        actually wrong, no need to request a scan."""
+        registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+        group.gateway_connection._device = None
+
+        fake_info = MagicMock()
+        fake_info.manufacturer_data = {
+            0x0202: bytes.fromhex("2a0001000000000f3d") + PUMP_SERIAL.encode("ascii"),
+        }
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+            unique_id=PUMP_SERIAL,
+        )
+        entry.add_to_hass(hass)
+
+        with patch(
+            "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+            return_value=[fake_info],
+        ), patch(
+            "custom_components.mobius.bluetooth.async_request_active_scan", AsyncMock(),
+        ) as mock_active_scan:
+            await _async_revalidate_tank(hass, entry)
+
+        mock_active_scan.assert_not_called()
+
+
 async def test_revalidate_skips_cleanly_on_connection_failure(hass):
     """A failed check (gateway unreachable, read timeout) is logged and
     skipped, not raised -- the next scheduled run is its own retry."""
@@ -903,6 +996,12 @@ async def test_revalidate_skips_cleanly_on_connection_failure(hass):
     hass.data[DOMAIN]["gateway_registry"] = registry
     connection = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
     connection.ensure_connected = AsyncMock(side_effect=Exception("boom"))
+    # is_connected True -- this test is about ensure_connected() itself
+    # raising, not about the separate proactive Bluetooth-cache check
+    # (which is gated on NOT already connected); leaving it False here
+    # would make this test depend on a real, unmocked Bluetooth manager
+    # for something it isn't actually testing.
+    connection._device = MagicMock(is_connected=True)
     group = PanGroup(pan_id=PAN_ID, gateway_serial=PUMP_SERIAL, gateway_connection=connection)
     group.members[PUMP_SERIAL] = MemberState(serial=PUMP_SERIAL)
     registry._groups[PAN_ID] = group

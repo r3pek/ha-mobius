@@ -162,6 +162,19 @@ class MobiusConnectionManager:
         # gateway from all trying to reconnect it at the same time.
         self._lock = asyncio.Lock()
 
+    @property
+    def is_connected(self) -> bool:
+        """Whether this manager currently holds an open connection --
+        exposed publicly (rather than callers reaching into the private
+        _device attribute directly) specifically so __init__.py's own
+        periodic revalidation can tell "genuinely not connected, worth
+        checking Home Assistant's own Bluetooth cache for" apart from
+        "already connected, so of course it isn't currently advertising
+        (a real, healthy device stops advertising while connected) --
+        checking the cache for it here would be a false alarm, not a
+        real signal of trouble."""
+        return self._device is not None and self._device.is_connected
+
     async def _resolve_current_ble_device(self):
         """
         Finds the BLEDevice currently advertising self.serial, by reading

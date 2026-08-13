@@ -23,7 +23,9 @@ from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
     TANK_REVALIDATION_INTERVAL,
 )
-from .coordinator import MobiusDeviceCoordinator, discover_mesh_address, discover_tank_for_serial
+from .coordinator import (
+    MobiusDeviceCoordinator, _find_in_bluetooth_cache, discover_mesh_address, discover_tank_for_serial,
+)
 from .gateway_registry import GatewayRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,7 +128,7 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     polling) to ask what else is currently on its Thread mesh, AND to
     keep every known member's own connection info current.
 
-    Two real jobs, not one:
+    Three real jobs, not two:
 
     1. RECOVERY, if there's currently no gateway at all for this tank
        (every candidate previously exhausted -- see gateway_registry.py's
@@ -136,7 +138,14 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
        gateway_serial-is-None check already re-triggers a normal election
        for an EXISTING group exactly the same way it does for a brand-new
        one, so this just needs to call it, not duplicate its logic.
-    2. MAINTENANCE, once a gateway does exist: every known member's own
+    2. PROACTIVE CACHE REFRESH, if there IS a gateway but its own
+       connection isn't currently open: requests a one-shot active
+       Bluetooth scan if that gateway isn't currently visible in Home
+       Assistant's own advertisement cache either, before this same
+       cycle goes on to actually try using the connection below -- see
+       that check's own inline comment for the full reasoning (including
+       why it's specifically gated on "not already connected").
+    3. MAINTENANCE, once a gateway does exist: every known member's own
        mesh address and mesh-last-seen data gets refreshed from this
        same read, opportunistically -- not just the migration check this
        used to be limited to. A REAL, CONFIRMED production issue is what
@@ -207,6 +216,32 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
             "picked up by that device's own next regular poll cycle)", entry.title,
         )
         return
+
+    # Proactive: if the gateway's own connection isn't currently open,
+    # check whether it's even visible in Home Assistant's own Bluetooth
+    # cache right now, and request a one-shot active scan if not --
+    # BEFORE this cycle's own attempt to actually use the connection
+    # below, so a successful scan has a real chance to help THIS cycle
+    # too, not just whichever coordinator happens to hit the same wall
+    # next. A real, confirmed production incident is what this
+    # addresses: a tank's own gateway going missing from that cache for
+    # hours at a stretch, discovered only reactively, poll cycle after
+    # poll cycle, once something actually needed to connect and failed.
+    #
+    # Deliberately gated on "connection not already open": a currently-
+    # connected device legitimately stops advertising while connected
+    # (busy talking to us, not free to advertise) -- checking the
+    # advertisement cache for a healthy, already-connected gateway
+    # would be a false alarm, not a real signal of trouble, and would
+    # trigger an active scan every single cycle for no reason.
+    if not group.gateway_connection.is_connected:
+        if _find_in_bluetooth_cache(hass, group.gateway_serial) is None:
+            _LOGGER.debug(
+                "Tank %r's own gateway %r isn't currently connected, and wasn't found "
+                "in Home Assistant's Bluetooth cache either -- requesting an active scan",
+                entry.title, group.gateway_serial,
+            )
+            await bluetooth.async_request_active_scan(hass)
 
     try:
         mdevice = await group.gateway_connection.ensure_connected()

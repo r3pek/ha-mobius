@@ -11,9 +11,10 @@
   manual reload to recover.
 - Fixed a device occasionally going missing from Home Assistant's own
   Bluetooth cache for a long stretch, even while still nearby and
-  broadcasting. When that happens, Mobius now asks Home Assistant to
-  do a quick active scan before giving up, rather than only relying on
-  whatever's already cached.
+  broadcasting. Mobius now periodically checks its own gateway is
+  still visible there and asks Home Assistant to do a quick active
+  scan if not, rather than only finding out reactively once something
+  actually failed to connect.
 
 ## 0.3.1
 

@@ -173,6 +173,49 @@ async def test_resolve_current_ble_device_recovers_via_active_scan(hass, caplog)
 # MobiusConnectionManager.ensure_connected / mark_disconnected / disconnect
 # --------------------------------------------------------------------------
 
+async def test_is_connected_false_before_any_connection(hass):
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+    assert manager.is_connected is False
+
+
+async def test_is_connected_true_after_connecting(hass):
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ):
+        await manager.ensure_connected()
+
+    assert manager.is_connected is True
+
+
+async def test_is_connected_false_after_mark_disconnected(hass):
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ):
+        await manager.ensure_connected()
+    manager.mark_disconnected()
+
+    assert manager.is_connected is False
+
+
 async def test_ensure_connected_connects_once_and_reuses(hass):
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
