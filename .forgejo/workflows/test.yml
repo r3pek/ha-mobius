@@ -1,28 +1,11 @@
 name: Test
 
-# Runs the test suite on every push and pull request -- separate from
-# release.yml (tag pushes only) and validate.yml (HACS/hassfest
-# publishing requirements), since "does the code work" is a different
-# concern from "is this ready to release" or "does this meet HACS's
-# specific publishing rules".
+# Runs on every push/PR. Separate from release.yml (tag pushes only)
+# and validate.yml (HACS/hassfest rules) -- different concerns.
 #
-# tags-ignore: ["**"] -- deliberately excludes tag pushes from this
-# direct trigger. release.yml's own "release" job now calls this exact
-# workflow itself (via workflow_call, see the job below) as its own
-# prerequisite before it will run anything -- without excluding tags
-# here too, a tag push would run the full test suite TWICE, once via
-# this trigger and once via that call, back to back, for no reason.
-# Confirmed the runner this repo uses actually supports reusable
-# workflows before relying on this (a real, version-dependent Forgejo
-# feature, not something to assume blindly).
-#
-# workflow_call: {} -- what actually makes this workflow file callable
-# from another one at all (release.yml's own "test" job below) rather
-# than just runnable on its own triggers.
-#
-# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
-# interpret the bare word as the boolean `true` instead of the literal
-# key GitHub/Forgejo Actions expects.
+# tags-ignore excludes tag pushes: release.yml's "test" job calls this
+# workflow directly (workflow_call below) as its own prerequisite, so
+# without this a tag push would run the suite twice.
 "on":
   push:
     tags-ignore:
@@ -33,28 +16,12 @@ name: Test
 
 jobs:
   test:
-    # Same setup as release.yml's own "release" job used to have
-    # inline, before it started calling this workflow instead -- see
-    # that file's own comments for why each of these specific choices
-    # (ubuntu-22.04 for a full GitHub-Actions-compatible environment,
-    # reading runtime requirements from manifest.json rather than
-    # hardcoding them, python -m pytest rather than bare pytest).
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
       - name: Set up Python
-        # cache: "pip" -- see release.yml's own, much more detailed
-        # comment on this exact same option for the full story (a real
-        # job log showed this step's own pip install responsible for
-        # the overwhelming majority of a job's total runtime). Added
-        # here too, not just there, once this became the single, shared
-        # place both this workflow's own direct runs AND release.yml's
-        # own "test" job actually execute from -- this workflow's own
-        # direct runs (on every push/PR) happen far more often than
-        # release.yml's own tag-triggered runs ever will, so the
-        # benefit matters at least as much here.
         uses: https://code.forgejo.org/actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -66,10 +33,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements_test.txt
 
+      # manifest.json's own "requirements" are what Home Assistant
+      # installs at runtime -- read from there rather than duplicated
+      # here, so they can't drift out of sync.
       - name: Install integration runtime requirements (from manifest.json)
         run: |
           python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
           pip install -r /tmp/manifest_requirements.txt
 
+      # `python -m pytest`, not bare `pytest` -- the former puts the
+      # repo root on sys.path, which custom_components.mobius needs.
       - name: Run tests
         run: python -m pytest tests/ -q

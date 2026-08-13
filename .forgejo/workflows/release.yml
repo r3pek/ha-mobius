@@ -1,12 +1,7 @@
 name: Release
 
-# Triggers on any tag matching v* (e.g. v0.2.0) -- or manually via
-# workflow_dispatch (Forgejo's web UI / API "Run workflow" button) for
-# testing/debugging the workflow itself. Does NOT trigger on regular
-# pushes.
-# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
-# interpret the bare word as the boolean `true` instead of the literal
-# key GitHub/Forgejo Actions expects.
+# Triggers on tags matching v* (e.g. v0.2.0), or manually via
+# workflow_dispatch for testing this workflow itself.
 "on":
   push:
     tags:
@@ -14,82 +9,35 @@ name: Release
   workflow_dispatch: {}
 
 jobs:
-  # Calls test.yml as a reusable workflow (see that file's own
-  # workflow_call trigger) rather than duplicating its steps here --
-  # confirmed the runner this repo uses actually supports reusable
-  # workflows (a real, version-dependent Forgejo feature) before relying
-  # on this. The "release" job below depends on this one (needs: test),
-  # so a release is never even attempted if the test suite doesn't pass
-  # -- test.yml's own direct push trigger deliberately excludes tag
-  # pushes (see its own tags-ignore) specifically so this call is the
-  # ONLY thing that runs the suite on a tag push, not a second, entirely
-  # redundant run alongside it.
+  # Calls test.yml as a reusable workflow rather than duplicating its
+  # steps. "release" below (needs: test) never runs if this fails.
   test:
     uses: ./.forgejo/workflows/test.yml
 
   release:
     needs: test
-    # ubuntu-22.04 label -> catthehacker/ubuntu:act-22.04, the only one of
-    # this runner's three labels with a full, GitHub-Actions-compatible
-    # environment (Python, Node, glibc). The "docker" label maps to a bare
-    # Alpine image, which lacks the glibc most published actions expect.
+    # ubuntu-22.04 -> catthehacker/ubuntu:act-22.04, the only one of this
+    # runner's labels with a full GitHub-Actions-compatible environment.
     runs-on: ubuntu-22.04
     steps:
-      # A fresh checkout -- this job runs on its own, separate runner
-      # instance from the "test" job above (a real, normal consequence
-      # of them being two distinct jobs, reusable-workflow call or not),
-      # so nothing from that job's own filesystem carries over here.
-      # Unlike python-mobius, this repo does NOT use the SHA256 object
-      # format, so the standard checkout action works fine here -- no
-      # need for the manual git-clone workaround that repo needed.
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      # No Python setup step at all here -- deliberately. The only
-      # Python this job's own steps actually run is
-      # extract_changelog_section.py, which only imports re/sys (the
-      # standard library, confirmed by reading the script itself), so
-      # whatever python3 this image already has is sufficient; there's
-      # no test/runtime dependency installation happening in this job
-      # at all anymore, since that's now entirely test.yml's own job's
-      # responsibility (see "test" above).
+      # No Python setup needed -- the only script this job runs
+      # (extract_changelog_section.py) is stdlib-only.
 
-      # Gate: the rest of this job (release creation) only runs if the
-      # "test" job this one needs succeeded. No build/publish steps
-      # here at all -- unlike python-mobius, this isn't a PyPI package;
-      # HACS installs directly from the tagged repo source (confirmed
-      # via hacs.json's own "zip_release": false), so there's nothing
-      # to build or upload beyond the release zip below.
-
-      # Pulls the section of CHANGELOG.md under the heading matching this
-      # tag's version (tag v0.2.0 -> "## 0.2.0") for the Forgejo release
-      # notes, rather than letting Forgejo auto-generate notes from
-      # commits. Fails the job (on purpose) if no matching section is
-      # found, rather than silently publishing a release with empty or
-      # wrong notes. Same script as python-mobius uses -- the CHANGELOG.md
-      # format is identical between the two repos.
-      # Only on a real tag push -- a workflow_dispatch run (manual, for
-      # testing/debugging this workflow itself) has no version tag to
-      # look up, and github.ref_name would just be whatever branch was
-      # picked, not a version.
+      # Pulls the CHANGELOG.md section for this tag's version (v0.2.0 ->
+      # "## 0.2.0") as the release notes, rather than auto-generating
+      # from commits. Fails the job if no matching section is found.
+      # Only on a real tag push -- workflow_dispatch has no version to
+      # look up.
       - name: Extract changelog section for this version
         if: github.event_name == 'push'
         run: python3 .forgejo/scripts/extract_changelog_section.py "${{ github.ref_name }}"
 
-      # Both of the action's own README examples always set release-dir
-      # explicitly, even though it's documented as optional with a
-      # default -- an earlier version of this workflow omitted it
-      # entirely (relying on that default) and hit a curl failure
-      # ("Failed to open/read local data from file") trying to create the
-      # release, which is consistent with the action expecting a real,
-      # existing directory there rather than tolerating an absent one.
-      #
-      # hacs.json's "zip_release" stays false -- HACS itself still
-      # installs directly from the tagged repo source, not this asset.
-      # This zip is only for anyone installing manually instead of
-      # through HACS: extracting it directly into their own
-      # custom_components/mobius/ (hence zipping the CONTENTS of that
-      # directory, not the directory itself -- no extra nesting to undo).
+      # Zips the CONTENTS of custom_components/mobius (not the folder
+      # itself) for anyone installing manually instead of via HACS,
+      # which installs from the tagged source directly either way.
       - name: Build release zip
         if: github.event_name == 'push'
         run: |
@@ -97,6 +45,7 @@ jobs:
           cd custom_components/mobius
           find . -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           zip -r ../../dist/release/mobius.zip .
+
       - name: Create Forgejo release
         if: github.event_name == 'push'
         uses: https://code.forgejo.org/actions/forgejo-release@v2
@@ -109,70 +58,24 @@ jobs:
           release-dir: dist/release
           release-notes-file: release_notes.md
 
-      # This project is mirrored to GitHub (github.com/r3pek/ha-mobius) --
-      # HACS's own install/update detection reads real GitHub releases
-      # from there, not just the tag itself, so this step is what
-      # actually makes new versions visible to HACS users, not just to
-      # people watching this Forgejo repo directly.
+      # Mirrors the release to GitHub (github.com/r3pek/ha-mobius) --
+      # HACS reads real GitHub releases from there.
       #
-      # Uses the real `gh` CLI directly, NOT a third-party Node action
-      # (action-gh-release, used here previously) -- confirmed via a
-      # real, repeated failure that overriding GITHUB_API_URL/
-      # GITHUB_GRAPHQL_URL in this step's own env (the standard fix for
-      # this exact class of problem) did NOT work: this runner doesn't
-      # let a step's own env override those specific values, so the
-      # action kept resolving its API base URL back to the Forgejo
-      # instance itself regardless. `gh` CLI genuinely sidesteps this
-      # rather than working around it -- confirmed directly against its
-      # own official documentation that it doesn't read GITHUB_API_URL/
-      # GITHUB_GRAPHQL_URL at all; those are specifically the Node.js
-      # @actions/github (Octokit) library's own env-var convention, a
-      # completely different tool `gh` has no relationship to. `gh`
-      # itself defaults to the real api.github.com unconditionally
-      # unless GH_HOST says otherwise (which nothing here sets), so
-      # whatever the runner's own environment injects for GITHUB_API_URL
-      # is simply irrelevant to it.
+      # Uses `gh` CLI directly, not a Node action: this runner doesn't
+      # let a step's own env override GITHUB_API_URL, which a
+      # Node-based action needs to avoid resolving to the Forgejo
+      # instance itself. `gh` doesn't read that variable at all, so it
+      # isn't affected either way.
       #
-      # Installed on demand (checked first, not reinstalled if already
-      # present) rather than assumed preinstalled -- confirmed this
-      # runner's own ubuntu-22.04 image (catthehacker/ubuntu:act-22.04,
-      # the "medium" variant, not "full") doesn't guarantee gh CLI is
-      # already there the way GitHub's own hosted runners do.
-      #
-      # GH_TOKEN (not GITHUB_TOKEN) -- gh CLI's own documented order of
-      # precedence between the two, GH_TOKEN first -- deliberately used
-      # here specifically so this explicit value wins even if the
-      # runner's own environment also independently sets GITHUB_TOKEN
-      # (a Forgejo-scoped token, meaningless to the real GitHub's API,
-      # for its own native actions' convenience) for this job.
-      #
-      # token here is NOT secrets.GITHUB_TOKEN -- that's the Forgejo-
-      # scoped one just described -- and creating a release additionally
-      # needs WRITE access (hacs/action's own use of GH_MIRROR_TOKEN in
-      # validate.yml only ever needed read access) -- confirm that
-      # secret's token actually has write permission on the mirror repo
-      # before relying on this, rather than assuming the existing
-      # read-scoped one is enough.
-      #
-      # Reuses the same release_notes.md this job already built for the
-      # Forgejo release -- one changelog extraction, used for both.
+      # GH_TOKEN (not GITHUB_TOKEN) wins over whatever Forgejo-scoped
+      # token the runner sets on its own. Needs write access on the
+      # mirror -- confirm GH_MIRROR_TOKEN actually has it.
       - name: Create GitHub release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
         run: |
           if ! command -v gh >/dev/null 2>&1; then
-            # Matches cli/cli's own current, official install_linux.md
-            # instructions exactly (/etc/apt/keyrings/, not the
-            # /usr/share/keyrings/ path several older, third-party
-            # guides still show) -- confirmed directly against that
-            # repo's own docs, not just any blog post repeating it.
-            #
-            # $SUDO, not a hardcoded `sudo` prefix -- this image
-            # (catthehacker/ubuntu:act-22.04) runs as root by default,
-            # where sudo may not even be installed at all; empty when
-            # already root, the real command otherwise, so this works
-            # either way rather than assuming one or the other.
             SUDO=$(command -v sudo || true)
             $SUDO mkdir -p -m 755 /etc/apt/keyrings
             wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | $SUDO tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
