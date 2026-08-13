@@ -121,7 +121,7 @@ class SupportTierSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "support",
-            SensorEntityDescription(key="support", translation_key="support"),
+            SensorEntityDescription(key="support", translation_key="support", icon="mdi:list-status"),
             device_info,
         )
         # Set directly rather than via SensorEntityDescription -- observed
@@ -147,7 +147,9 @@ class ErrorStateSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "error_state",
-            SensorEntityDescription(key="error_state", translation_key="error_state"),
+            SensorEntityDescription(
+                key="error_state", translation_key="error_state", icon="mdi:alert-circle-outline",
+            ),
             device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -163,7 +165,9 @@ class OperationStateSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "operation_state",
-            SensorEntityDescription(key="operation_state", translation_key="operation_state"),
+            SensorEntityDescription(
+                key="operation_state", translation_key="operation_state", icon="mdi:state-machine",
+            ),
             device_info,
         )
 
@@ -183,7 +187,7 @@ class MotorSpeedSensor(MobiusEntity):
         super().__init__(
             coordinator, serial, "motor_speed",
             SensorEntityDescription(
-                key="motor_speed", translation_key="motor_speed",
+                key="motor_speed", translation_key="motor_speed", icon="mdi:speedometer",
                 native_unit_of_measurement="%", state_class=SensorStateClass.MEASUREMENT,
             ),
             device_info,
@@ -252,6 +256,7 @@ class SchedulePointCountSensor(MobiusEntity):
             coordinator, serial, "schedule_point_count",
             SensorEntityDescription(
                 key="schedule_point_count", translation_key="schedule_point_count",
+                icon="mdi:calendar-clock",
             ),
             device_info,
         )
@@ -268,7 +273,9 @@ class CurrentPumpModeSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "current_pump_mode",
-            SensorEntityDescription(key="current_pump_mode", translation_key="current_pump_mode"),
+            SensorEntityDescription(
+                key="current_pump_mode", translation_key="current_pump_mode", icon="mdi:waves",
+            ),
             device_info,
         )
 
@@ -305,6 +312,7 @@ class LightChannelIntensitySensor(MobiusEntity):
                 key=f"intensity_{channel_name.lower()}",
                 translation_key="channel_intensity",
                 translation_placeholders={"channel": channel_name},
+                icon="mdi:brightness-percent",
                 native_unit_of_measurement="%",
                 state_class="measurement",
                 suggested_display_precision=0,
@@ -337,7 +345,7 @@ class CalibrationSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "calibration",
-            SensorEntityDescription(key="calibration", translation_key="calibration"),
+            SensorEntityDescription(key="calibration", translation_key="calibration", icon="mdi:tune"),
             device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -380,7 +388,9 @@ class FirmwareVersionSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "firmware_version",
-            SensorEntityDescription(key="firmware_version", translation_key="firmware_version"),
+            SensorEntityDescription(
+                key="firmware_version", translation_key="firmware_version", icon="mdi:chip",
+            ),
             device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -417,7 +427,9 @@ class HardwareRevisionSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "hardware_revision",
-            SensorEntityDescription(key="hardware_revision", translation_key="hardware_revision"),
+            SensorEntityDescription(
+                key="hardware_revision", translation_key="hardware_revision", icon="mdi:developer-board",
+            ),
             device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -465,7 +477,9 @@ class MeshAddressSensor(MobiusEntity):
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "mesh_address",
-            SensorEntityDescription(key="mesh_address", translation_key="mesh_address"),
+            SensorEntityDescription(
+                key="mesh_address", translation_key="mesh_address", icon="mdi:ip-network-outline",
+            ),
             device_info,
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -513,7 +527,7 @@ class MeshPrefixSensor(SensorEntity):
 
     def __init__(self, entry: ConfigEntry, mlprefix_hex: str, tank_identifier: tuple[str, str]) -> None:
         self.entity_description = SensorEntityDescription(
-            key="mesh_prefix", translation_key="mesh_prefix",
+            key="mesh_prefix", translation_key="mesh_prefix", icon="mdi:lan",
         )
         self._attr_unique_id = f"{entry.entry_id}_mesh_prefix"
         self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
@@ -563,7 +577,7 @@ class GatewayDeviceSensor(SensorEntity):
         tank_identifier: tuple[str, str],
     ) -> None:
         self.entity_description = SensorEntityDescription(
-            key="gateway_device", translation_key="gateway_device",
+            key="gateway_device", translation_key="gateway_device", icon="mdi:router-wireless",
         )
         self._attr_unique_id = f"{entry.entry_id}_gateway_device"
         self._attr_device_info = DeviceInfo(identifiers={tank_identifier})

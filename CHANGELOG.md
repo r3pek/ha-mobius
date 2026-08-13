@@ -28,6 +28,7 @@
   what Mobius has cached -- useful for telling "Mobius's own cached
   info is stale" apart from "Home Assistant hasn't seen this device
   recently" when nothing's connecting.
+- Most sensors now have a proper icon instead of the generic default.
 
 ## 0.3.0
 
