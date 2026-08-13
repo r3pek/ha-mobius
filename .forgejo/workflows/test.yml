@@ -1,15 +1,13 @@
 name: Test
 
-# Runs on every push/PR. Separate from release.yml (tag pushes only)
-# and validate.yml (HACS/hassfest rules) -- different concerns.
-#
-# tags-ignore excludes tag pushes: release.yml's "test" job calls this
-# workflow directly (workflow_call below) as its own prerequisite, so
-# without this a tag push would run the suite twice.
+# Runs on every push/PR, unconditionally -- including tag pushes.
+# release.yml also calls this workflow as its own "test" job
+# (workflow_call below), so a tag push runs the suite twice: once here,
+# once via that call. Deliberate -- this workflow always running the
+# same way regardless of ref type matters more than avoiding that
+# duplication.
 "on":
   push:
-    tags-ignore:
-      - "**"
   pull_request:
   workflow_dispatch:
   workflow_call: {}
