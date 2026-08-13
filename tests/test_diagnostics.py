@@ -183,6 +183,8 @@ async def test_diagnostics_shows_device_currently_visible_in_bluetooth_cache(has
     with patch(
         "custom_components.mobius.diagnostics.bluetooth.async_discovered_service_info",
         return_value=[fake_info],
+    ), patch(
+        "custom_components.mobius.diagnostics.bluetooth.async_scanner_count", return_value=3,
     ), patch("custom_components.mobius.diagnostics.time.time", return_value=1042.5):
         diagnostics = await async_get_config_entry_diagnostics(hass, entry)
 
@@ -193,6 +195,12 @@ async def test_diagnostics_shows_device_currently_visible_in_bluetooth_cache(has
     assert pump_cache["seconds_since_last_advertisement"] == 42.5
     # LIGHT_SERIAL wasn't in the fake cache at all.
     assert devices_by_serial[LIGHT_SERIAL]["bluetooth_cache"] == {"found_by_serial": False}
+    # The complementary "is there even a working scanner at all" check --
+    # a real, confirmed production incident showed a device (that
+    # tank's own gateway) missing from the cache for hours at a
+    # stretch; this is what tells whether that's a whole-system problem
+    # or specific to one device.
+    assert diagnostics["bluetooth_connectable_scanners_registered"] == 3
     # The whole-cache sanity count reflects what was actually there.
     assert diagnostics["bluetooth_cache_total_connectable_devices"] == 1
 

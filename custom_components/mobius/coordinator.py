@@ -92,6 +92,57 @@ from .gateway_registry import GatewayRegistry, PanGroup
 _LOGGER = logging.getLogger(__name__)
 
 
+def _find_in_bluetooth_cache(hass: HomeAssistant, serial: str):
+    """Searches Home Assistant's own Bluetooth cache once for a
+    currently-visible advertisement matching serial, by manufacturer
+    data. Returns the matching BluetoothServiceInfoBleak, or None if
+    serial isn't currently present in the cache at all."""
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
+        if not payload:
+            continue
+        parsed = parse_manufacturer_data(payload)
+        if parsed and parsed.serial == serial:
+            return info
+    return None
+
+
+async def _find_in_bluetooth_cache_with_active_scan_fallback(hass: HomeAssistant, serial: str):
+    """Like _find_in_bluetooth_cache() above, but if the fast, cache-
+    only lookup comes back empty, requests a one-shot active scan
+    sweep and tries once more before giving up entirely -- shared by
+    _resolve_current_ble_device() and discover_mesh_address() below,
+    both of which need this exact same fallback sequence.
+
+    Confirmed via Home Assistant's own documentation (bluetooth.
+    async_request_active_scan) this is exactly the intended use case --
+    "for config flow discovery and other one-shot probes" -- not
+    something reserved only for initial setup-time discovery. A real,
+    confirmed production incident is what this addresses: a device
+    (in that case, the group's own gateway) can go missing from Home
+    Assistant's own Bluetooth cache for hours at a stretch, well past
+    whatever passive-scanning cadence would normally rediscover it.
+
+    Concurrent callers across every coordinator needing to resolve the
+    SAME device around the same time -- confirmed: exactly what
+    happens when a shared gateway goes missing, since every relayed
+    coordinator's own poll also needs to resolve it -- dedupe to a
+    single, shared scan window on Home Assistant's own side (per that
+    same documentation), so calling this from every coordinator's own
+    failed resolution doesn't cause redundant, overlapping active-scan
+    storms.
+    """
+    info = _find_in_bluetooth_cache(hass, serial)
+    if info is not None:
+        return info
+
+    await bluetooth.async_request_active_scan(hass)
+    info = _find_in_bluetooth_cache(hass, serial)
+    if info is not None:
+        _LOGGER.debug("%s found after requesting a one-shot active scan", serial)
+    return info
+
+
 class MobiusConnectionManager:
     """
     Owns a single persistent MobiusDevice connection for one physical
@@ -117,16 +168,12 @@ class MobiusConnectionManager:
         Home Assistant's own Bluetooth cache -- NOT by scanning
         independently. See this module's docstring for why.
         """
-        for info in bluetooth.async_discovered_service_info(self.hass, connectable=True):
-            payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-            if not payload:
-                continue
-            parsed = parse_manufacturer_data(payload)
-            if parsed and parsed.serial == self.serial:
-                _LOGGER.debug("%s currently advertising at %s", self.serial, info.address)
-                return bluetooth.async_ble_device_from_address(
-                    self.hass, info.address, connectable=True
-                )
+        info = await _find_in_bluetooth_cache_with_active_scan_fallback(self.hass, self.serial)
+        if info is not None:
+            _LOGGER.debug("%s currently advertising at %s", self.serial, info.address)
+            return bluetooth.async_ble_device_from_address(
+                self.hass, info.address, connectable=True
+            )
         # The single most useful line for diagnosing "can't connect to
         # any device at all" -- confirms whether this device is even
         # visible to Home Assistant's own Bluetooth stack right now, as
@@ -135,10 +182,15 @@ class MobiusConnectionManager:
         # different problems with different causes (out of range/
         # powered off vs. a proxy connection-limit/timeout issue), and
         # without this line they're indistinguishable from the logs
-        # alone.
+        # alone. The connectable-scanner count is included too -- 0
+        # means nothing local could ever generate a connectable
+        # BLEDevice at all right now, a whole-system problem this
+        # integration has no way to fix on its own, as distinct from
+        # this one device specifically being out of range/powered off.
         _LOGGER.debug(
-            "%s not found in Home Assistant's own Bluetooth cache right now "
-            "(not currently advertising, or not connectable from here)", self.serial,
+            "%s not found in Home Assistant's own Bluetooth cache, even after "
+            "requesting an active scan (%d connectable scanner(s) currently registered)",
+            self.serial, bluetooth.async_scanner_count(self.hass, connectable=True),
         )
         return None
 
@@ -576,13 +628,8 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
     gateway's own otherwise-healthy connection failing for reasons
     unrelated to the gateway itself, triggering unnecessary failover.
     """
-    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
-        if not parsed or parsed.serial != serial:
-            continue
+    info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
+    if info is not None:
         ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
         if ble_device is None:
             # Confirmed present in Home Assistant's OWN advertisement
@@ -605,8 +652,9 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
             _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
             return None
     _LOGGER.debug(
-        "%s not found in Home Assistant's own Bluetooth cache at all -- "
-        "not currently advertising, or not visible to any scanner from here", serial,
+        "%s not found in Home Assistant's own Bluetooth cache at all, even after "
+        "requesting an active scan (%d connectable scanner(s) currently registered)",
+        serial, bluetooth.async_scanner_count(hass, connectable=True),
     )
     return None
 
@@ -635,21 +683,16 @@ async def discover_tank_for_serial(
     these apart: this function's None means "try again later, this
     device isn't currently reachable," not "this device has no tank."
     """
-    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
-        if not parsed or parsed.serial != serial:
-            continue
-        ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
-        if ble_device is None:
-            return None
-        try:
-            async with semaphore:
-                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
-                    return await discover_tank(mdevice)
-        except Exception as err:
-            _LOGGER.debug("Tank discovery failed for %s: %s", serial, err)
-            return None
-    return None
+    info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
+    if info is None:
+        return None
+    ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
+    if ble_device is None:
+        return None
+    try:
+        async with semaphore:
+            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                return await discover_tank(mdevice)
+    except Exception as err:
+        _LOGGER.debug("Tank discovery failed for %s: %s", serial, err)
+        return None

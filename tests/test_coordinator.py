@@ -112,7 +112,12 @@ async def test_resolve_current_ble_device_returns_none_when_not_found(hass, capl
     """Confirms both the return value AND the diagnostic log this
     specifically exists for -- the single most useful line for
     distinguishing "device isn't visible at all" from "visible but
-    couldn't connect" when debugging a device that's never coming up."""
+    couldn't connect" when debugging a device that's never coming up.
+    Also confirms the active-scan fallback is actually attempted before
+    giving up -- a real, confirmed production incident showed a device
+    can go missing from Home Assistant's own Bluetooth cache for hours
+    at a stretch, well past whatever passive-scanning cadence would
+    normally rediscover it on its own."""
     caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, "NONEXISTENT_SERIAL", semaphore)
@@ -120,11 +125,48 @@ async def test_resolve_current_ble_device_returns_none_when_not_found(hass, capl
     with patch(
         "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
         return_value=[],
+    ), patch(
+        "custom_components.mobius.coordinator.bluetooth.async_request_active_scan",
+        AsyncMock(),
+    ) as mock_active_scan, patch(
+        "custom_components.mobius.coordinator.bluetooth.async_scanner_count",
+        return_value=2,
     ):
         result = await manager._resolve_current_ble_device()
 
     assert result is None
+    mock_active_scan.assert_awaited_once_with(hass)
     assert "NONEXISTENT_SERIAL not found in Home Assistant's own Bluetooth cache" in caplog.text
+    assert "2 connectable scanner(s) currently registered" in caplog.text
+
+
+async def test_resolve_current_ble_device_recovers_via_active_scan(hass, caplog):
+    """The actual point of the whole fallback: a device not found on
+    the first, fast cache-only pass but found immediately after
+    requesting a one-shot active scan must still resolve successfully,
+    not report not-found just because the FIRST pass alone missed it."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    async def fake_active_scan(hass_arg):
+        assert hass_arg is hass
+
+    with patch(
+        "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+        side_effect=[[], [_fake_discovery_info(PUMP_ADDRESS, REAL_PUMP_PAYLOAD)]],
+    ), patch(
+        "custom_components.mobius.coordinator.bluetooth.async_request_active_scan",
+        fake_active_scan,
+    ), patch(
+        "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+        return_value=MagicMock(address=PUMP_ADDRESS),
+    ):
+        result = await manager._resolve_current_ble_device()
+
+    assert result is not None
+    assert result.address == PUMP_ADDRESS
+    assert f"{PUMP_SERIAL} found after requesting a one-shot active scan" in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -927,6 +969,9 @@ class TestDiscoverTankForSerial:
         with patch(
             "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
             return_value=[],
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_request_active_scan",
+            AsyncMock(),
         ):
             result = await discover_tank_for_serial(hass, PUMP_SERIAL, semaphore)
 

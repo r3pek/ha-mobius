@@ -9,6 +9,11 @@
   a device keeps failing to relay through its current gateway, a
   different gateway now gets tried automatically instead of needing a
   manual reload to recover.
+- Fixed a device occasionally going missing from Home Assistant's own
+  Bluetooth cache for a long stretch, even while still nearby and
+  broadcasting. When that happens, Mobius now asks Home Assistant to
+  do a quick active scan before giving up, rather than only relying on
+  whatever's already cached.
 
 ## 0.3.1
 

@@ -171,6 +171,16 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     connectable_count = sum(
         1 for _ in bluetooth.async_discovered_service_info(hass, connectable=True)
     )
+    # A complementary, more direct answer to the same "is the whole
+    # Bluetooth subsystem even working" question -- the cache count
+    # above tells you how many devices currently happen to be visible;
+    # this tells you whether there's a connectable scanner registered
+    # at all right now, regardless of whether anything's currently in
+    # range. Zero here means nothing local could generate a connectable
+    # BLEDevice for ANY device at all, a whole-system problem, as
+    # distinct from a healthy scanner that just doesn't currently see
+    # this specific device.
+    connectable_scanner_count = bluetooth.async_scanner_count(hass, connectable=True)
 
     diagnostics = {
         "entry_data": dict(entry.data),
@@ -181,6 +191,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "consecutive_gateway_failures": group.consecutive_gateway_failures if group is not None else None,
         } if group is not None else None,
         "bluetooth_cache_total_connectable_devices": connectable_count,
+        "bluetooth_connectable_scanners_registered": connectable_scanner_count,
         "devices": devices_diag,
     }
     return async_redact_data(diagnostics, TO_REDACT)
