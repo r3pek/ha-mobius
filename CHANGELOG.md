@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Fixed the "Discovered at" sensor, which could show confusing,
   out-of-order values. It's now a "last seen" attribute on the mesh
