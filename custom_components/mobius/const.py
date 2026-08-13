@@ -84,6 +84,33 @@ GATEWAY_ELECTION_SETTLE_SECONDS = 3.0
 # for the general backstop.
 GATEWAY_FAILURE_THRESHOLD = 3
 
+# Consecutive failed RELAYED reads to one specific target -- through an
+# otherwise-healthy gateway -- that trigger forcing a different gateway,
+# even though GATEWAY_FAILURE_THRESHOLD above hasn't been reached (the
+# gateway's own direct reads may be succeeding the whole time). A real,
+# confirmed production incident is what this addresses: a gateway can be
+# perfectly healthy for its own reads, and for relaying to SOME other
+# group members, while persistently failing to relay to one specific
+# target for 40+ minutes straight -- something wrong with the gateway's
+# own route to that one target specifically, at the Thread mesh level,
+# not the gateway's own health in the way this integration could
+# otherwise detect. Confirmed, not assumed: reverse-engineered the real
+# app's own decompiled source specifically looking for a mesh-rebuild or
+# network-reset command it could fall back to for exactly this situation
+# -- there isn't one. The only Thread-network-creation code in the whole
+# app is a one-time, destructive initial-provisioning sequence (starting
+# with an actual factory reset) run once when a tank is first set up,
+# never something triggered at runtime to recover a misbehaving mesh.
+# Forcing a different gateway -- which might have its own, different,
+# working route to the same target -- is the best lever actually
+# available, not a first choice among several.
+#
+# A separate counter from GATEWAY_FAILURE_THRESHOLD's own, deliberately:
+# conflating "the gateway's own reads are failing" with "the gateway
+# can't relay to one specific member" would muddy which of two, genuinely
+# different problems actually happened when read back from logs later.
+RELAY_FAILURE_THRESHOLD = 3
+
 # How long any single device (gateway or relayed) can go without a
 # successful read before its entities are marked unavailable. The general
 # backstop for every device -- GATEWAY_FAILURE_THRESHOLD above is a

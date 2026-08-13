@@ -440,6 +440,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 peer = await self._resolve_own_mesh_peer(group)
                 relayed = RelayedMobiusDevice(gateway_device, peer)
                 data = await _fetch_all(relayed)
+                self.registry.record_relay_success(self.pan_id, self.serial)
         except Exception as err:
             # A READ can fail even after ensure_connected() reported
             # success (the connection can drop in between) -- this needs
@@ -448,13 +449,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # poll cycle would keep reusing the same dead connection
             # forever instead of ever actually reconnecting.
             #
-            # Only done when THIS device is the gateway -- see this
-            # module's docstring for why a relayed device's own failure
-            # doesn't touch the shared gateway connection's state at all
-            # (it might be specific to this device/target, not the
-            # gateway connection itself; the gateway's own coordinator
-            # independently detects and handles its own connection health
-            # on its own cycle regardless).
+            # A relayed device's own failure never touches the shared
+            # gateway CONNECTION's state (mark_disconnected()) -- it
+            # might be specific to this one device/target, not the
+            # gateway connection itself, which the gateway's own
+            # coordinator already detects and handles independently on
+            # its own cycle. It DOES still count toward a separate,
+            # per-target failure tally (record_relay_failure()) though --
+            # a real, confirmed production incident showed a gateway can
+            # be perfectly healthy for its own reads, and for relaying to
+            # OTHER members, while persistently failing to relay to one
+            # specific target for 40+ minutes straight. See
+            # RELAY_FAILURE_THRESHOLD's own docstring in const.py for why
+            # this is a genuinely different symptom from the gateway's
+            # own health, kept as a deliberately separate mechanism.
             _LOGGER.debug(
                 "%s poll (%s) failed: %s", self.serial,
                 "gateway" if is_gateway else "relayed", err,
@@ -462,6 +470,8 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if is_gateway:
                 group.gateway_connection.mark_disconnected()
                 await self.registry.record_gateway_failure(self.pan_id)
+            else:
+                await self.registry.record_relay_failure(self.pan_id, self.serial)
             raise
 
         # Every device -- gateway and relayed alike -- picks up its own,

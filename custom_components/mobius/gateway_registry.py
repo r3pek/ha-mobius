@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Optional
 
 from homeassistant.core import HomeAssistant
 
-from .const import GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD
+from .const import GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
 
 if TYPE_CHECKING:
     from .coordinator import MobiusConnectionManager
@@ -114,6 +114,18 @@ class MemberState:
     # duration paired with a separate poll timestamp for every consumer
     # to redo that subtraction itself.
     mesh_last_seen_at: Optional[datetime] = None
+    # How many consecutive RELAYED reads to this specific member have
+    # failed, through whatever gateway currently holds the group --
+    # separate from PanGroup.consecutive_gateway_failures (the
+    # gateway's own DIRECT read failing), since a real production
+    # incident showed these are genuinely different failure modes: a
+    # gateway can be perfectly healthy for its own reads, and for
+    # relaying to SOME other members, while persistently failing to
+    # relay to one specific target for 40+ minutes straight -- see
+    # GatewayRegistry.record_relay_failure()'s own docstring for the
+    # full reasoning and what this actually triggers once it reaches
+    # RELAY_FAILURE_THRESHOLD.
+    consecutive_relay_failures: int = 0
 
 
 @dataclass
@@ -343,14 +355,61 @@ class GatewayRegistry:
             group.consecutive_gateway_failures = 0
             group.recently_failed_gateways.clear()
 
+    async def _promote_away_from_current_gateway(self, group: PanGroup, reason: str) -> Optional[str]:
+        """Shared promotion logic: excludes the current gateway (and
+        every other recently-failed one) from consideration, assigns
+        the next-best candidate, and disconnects the old connection.
+        Called with group.lock already held by the caller -- both
+        record_gateway_failure() and record_relay_failure() below reuse
+        this exact same machinery, since "route around a bad gateway"
+        is the same operation either way, just triggered by two
+        genuinely different symptoms (see RELAY_FAILURE_THRESHOLD's own
+        docstring for why those are kept as separate counters upstream
+        of this shared call)."""
+        failing_serial = group.gateway_serial
+        old_connection = group.gateway_connection
+        if failing_serial is not None:
+            group.recently_failed_gateways.add(failing_serial)
+
+        new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
+        if new_gateway is None:
+            # Every member has now failed at least once since the last
+            # success (see PanGroup's own docstring) -- rather than
+            # getting stuck with nothing left to promote at all, give
+            # everyone a clean slate and try again, excluding only the
+            # one that JUST failed (no sense immediately re-picking that
+            # one specifically, but everyone else deserves a fresh look
+            # after a full round).
+            _LOGGER.debug(
+                "Every member of pan_id %#06x has now failed since the last success -- "
+                "giving everyone a clean slate (excluding only %r, which just failed)",
+                group.pan_id, failing_serial,
+            )
+            group.recently_failed_gateways = {failing_serial} if failing_serial is not None else set()
+            new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
+
+        self._assign_gateway(group, new_gateway)
+        _LOGGER.warning(
+            "Gateway %r for pan_id %#06x %s; promoted %r",
+            failing_serial, group.pan_id, reason, new_gateway,
+        )
+        if old_connection is not None:
+            await old_connection.disconnect()
+        return new_gateway
+
     async def record_gateway_failure(self, pan_id: int) -> bool:
         """
-        Call when the CURRENT gateway's connection/read fails. Returns
+        Call when the CURRENT gateway's OWN connection/read fails. Returns
         True if this triggered a promotion (the GATEWAY_FAILURE_THRESHOLDth
         consecutive failure), False otherwise -- mainly useful for
         logging/tests; the promotion itself already updates
         group.gateway_serial/gateway_connection, so callers don't need to
         branch on the return value to behave correctly.
+
+        For a RELAYED read to some other member failing, through a
+        gateway whose own reads are still succeeding, see
+        record_relay_failure() below instead -- a genuinely different
+        symptom, deliberately not funneled through this same counter.
         """
         group = self._groups.get(pan_id)
         if group is None:
@@ -372,37 +431,67 @@ class GatewayRegistry:
                 )
                 return False
 
-            failing_serial = group.gateway_serial
-            old_connection = group.gateway_connection
-            if failing_serial is not None:
-                group.recently_failed_gateways.add(failing_serial)
-
-            new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
-            if new_gateway is None:
-                # Every member has now failed at least once since the
-                # last success (see PanGroup's own docstring) -- rather
-                # than getting stuck with nothing left to promote at
-                # all, give everyone a clean slate and try again,
-                # excluding only the one that JUST failed (no sense
-                # immediately re-picking that one specifically, but
-                # everyone else deserves a fresh look after a full
-                # round).
-                _LOGGER.debug(
-                    "Every member of pan_id %#06x has now failed since the last success -- "
-                    "giving everyone a clean slate (excluding only %r, which just failed)",
-                    pan_id, failing_serial,
-                )
-                group.recently_failed_gateways = {failing_serial} if failing_serial is not None else set()
-                new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
-
-            self._assign_gateway(group, new_gateway)
-            _LOGGER.warning(
-                "Gateway %r for pan_id %#06x failed %d consecutive times; promoted %r",
-                failing_serial, pan_id, GATEWAY_FAILURE_THRESHOLD, new_gateway,
+            await self._promote_away_from_current_gateway(
+                group, f"failed {GATEWAY_FAILURE_THRESHOLD} consecutive times",
             )
-            if old_connection is not None:
-                await old_connection.disconnect()
             return True
+
+    async def record_relay_failure(self, pan_id: int, target_serial: str) -> bool:
+        """
+        Call when a RELAYED read to target_serial fails, through a
+        gateway whose OWN reads are still succeeding -- see
+        RELAY_FAILURE_THRESHOLD's own docstring in const.py for the full
+        reasoning behind why this exists as a separate mechanism from
+        record_gateway_failure() above, and why forcing a different
+        gateway is genuinely the best recovery lever available here, not
+        just the easiest one.
+
+        Returns True if this triggered a promotion, matching
+        record_gateway_failure()'s own return-value convention.
+        """
+        group = self._groups.get(pan_id)
+        if group is None:
+            return False
+        async with group.lock:
+            member = group.members.get(target_serial)
+            if member is None:
+                return False
+            member.consecutive_relay_failures += 1
+            if member.consecutive_relay_failures < RELAY_FAILURE_THRESHOLD:
+                _LOGGER.debug(
+                    "Relay to %s via gateway %r for pan_id %#06x failed (%d/%d consecutive)",
+                    target_serial, group.gateway_serial, pan_id,
+                    member.consecutive_relay_failures, RELAY_FAILURE_THRESHOLD,
+                )
+                return False
+
+            await self._promote_away_from_current_gateway(
+                group, f"failed to relay to {target_serial!r} {RELAY_FAILURE_THRESHOLD} consecutive times",
+            )
+            # A fresh start for every member's own relay-failure count,
+            # not just target_serial's -- the failure was specific to
+            # the OLD gateway's own route, which may not still be
+            # relevant at all under the newly-promoted one.
+            for other_member in group.members.values():
+                other_member.consecutive_relay_failures = 0
+            return True
+
+    def record_relay_success(self, pan_id: int, target_serial: str) -> None:
+        """Call on every successful RELAYED read -- resets that specific
+        target's own consecutive-failure counter, matching
+        record_gateway_success()'s own reasoning: a real, successful
+        relay means there's no reason to keep counting whatever earlier
+        trouble just ended against this target."""
+        group = self._groups.get(pan_id)
+        if group is not None and target_serial in group.members:
+            member = group.members[target_serial]
+            if member.consecutive_relay_failures > 0:
+                _LOGGER.debug(
+                    "Relay to %s via gateway %r for pan_id %#06x recovered after %d "
+                    "consecutive failure(s)",
+                    target_serial, group.gateway_serial, pan_id, member.consecutive_relay_failures,
+                )
+            member.consecutive_relay_failures = 0
 
     def update_mesh_address(self, pan_id: int, serial: str, address: bytes) -> None:
         """Caches a member's Thread mesh-local IPv6 address (see

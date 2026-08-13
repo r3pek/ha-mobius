@@ -11,7 +11,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from custom_components.mobius.gateway_registry import GatewayRegistry
-from custom_components.mobius.const import GATEWAY_FAILURE_THRESHOLD
+from custom_components.mobius.const import GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
 
 
 PAN_A = 0x3D0F
@@ -279,6 +279,117 @@ class TestGatewayFailover:
     @pytest.mark.asyncio
     async def test_success_on_nonexistent_group_is_a_safe_noop(self, registry):
         registry.record_gateway_success(0x9999)  # must not raise
+
+
+class TestRelayFailover:
+    """A real, confirmed production incident is what this whole
+    mechanism addresses: a gateway can be perfectly healthy for its own
+    direct reads, and for relaying to SOME other group members, while
+    persistently failing to relay to ONE specific target for 40+
+    minutes straight -- see RELAY_FAILURE_THRESHOLD's own docstring in
+    const.py for the full reasoning, including why forcing a different
+    gateway turned out to be the best recovery lever actually
+    available, confirmed by reverse-engineering the real app's own
+    source specifically looking for (and not finding) any runtime
+    mesh-rebuild command it could fall back to instead."""
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_does_not_promote(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+        await registry.join(PAN_A, "backup", rssi=-30)
+
+        for _ in range(RELAY_FAILURE_THRESHOLD - 1):
+            triggered = await registry.record_relay_failure(PAN_A, "target")
+            assert triggered is False
+
+        assert registry.group(PAN_A).gateway_serial == "gw"
+
+    @pytest.mark.asyncio
+    async def test_threshold_reached_promotes_even_though_gateway_itself_is_healthy(self, registry):
+        """The actual point: the gateway's own direct reads succeeding
+        the whole time (record_gateway_success() called between every
+        relay failure, exactly like a real healthy gateway would) must
+        NOT prevent promotion once relay-to-one-target failures alone
+        cross their own, separate threshold."""
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+        await registry.join(PAN_A, "backup", rssi=-30)
+
+        for _ in range(RELAY_FAILURE_THRESHOLD):
+            registry.record_gateway_success(PAN_A)  # gateway's own reads keep succeeding
+            await registry.record_relay_failure(PAN_A, "target")
+
+        group = registry.group(PAN_A)
+        assert group.gateway_serial != "gw"
+        assert group.gateway_serial in ("target", "backup")
+
+    @pytest.mark.asyncio
+    async def test_relay_failures_do_not_affect_gateways_own_failure_counter(self, registry):
+        """Confirms the two counters are genuinely independent, not
+        just independently-named -- relay failures alone must never
+        move consecutive_gateway_failures at all."""
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+
+        for _ in range(RELAY_FAILURE_THRESHOLD + 5):
+            await registry.record_relay_failure(PAN_A, "target")
+
+        assert registry.group(PAN_A).consecutive_gateway_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_success_resets_the_targets_own_counter(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+        await registry.join(PAN_A, "backup", rssi=-30)
+
+        for _ in range(RELAY_FAILURE_THRESHOLD - 1):
+            await registry.record_relay_failure(PAN_A, "target")
+        registry.record_relay_success(PAN_A, "target")
+        assert registry.group(PAN_A).members["target"].consecutive_relay_failures == 0
+
+        # Now needs the FULL threshold again -- confirms the count
+        # actually reset, not just got close and stalled.
+        for _ in range(RELAY_FAILURE_THRESHOLD - 1):
+            triggered = await registry.record_relay_failure(PAN_A, "target")
+            assert triggered is False
+        assert registry.group(PAN_A).gateway_serial == "gw"
+
+    @pytest.mark.asyncio
+    async def test_promotion_resets_every_members_relay_failure_count(self, registry):
+        """Not just the target that triggered the promotion -- the
+        failure was specific to the OLD gateway's own route, which may
+        not still be relevant at all under the newly-promoted one."""
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+        await registry.join(PAN_A, "other", rssi=-35)
+        await registry.join(PAN_A, "backup", rssi=-30)
+
+        # "other" has some accumulated (but not yet threshold-reached)
+        # relay trouble of its own, separate from "target".
+        for _ in range(RELAY_FAILURE_THRESHOLD - 1):
+            await registry.record_relay_failure(PAN_A, "other")
+        for _ in range(RELAY_FAILURE_THRESHOLD):
+            await registry.record_relay_failure(PAN_A, "target")
+
+        group = registry.group(PAN_A)
+        assert group.gateway_serial != "gw"
+        for member in group.members.values():
+            assert member.consecutive_relay_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_failure_on_nonexistent_group_is_a_safe_noop(self, registry):
+        triggered = await registry.record_relay_failure(0x9999, "nobody")
+        assert triggered is False
+
+    @pytest.mark.asyncio
+    async def test_failure_for_nonexistent_member_is_a_safe_noop(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        triggered = await registry.record_relay_failure(PAN_A, "nonexistent")
+        assert triggered is False
+
+    def test_success_on_nonexistent_group_is_a_safe_noop(self, registry):
+        registry.record_relay_success(0x9999, "nobody")  # must not raise
 
 
 class TestLeave:

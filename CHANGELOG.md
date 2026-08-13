@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fixed relayed devices (anything reached through a gateway, not
+  directly over BLE) sometimes getting stuck failing every single
+  update for extended periods, even though the gateway itself and
+  every other device on the tank kept working fine the whole time. If
+  a device keeps failing to relay through its current gateway, a
+  different gateway now gets tried automatically instead of needing a
+  manual reload to recover.
+
 ## 0.3.1
 
 - Fixed the "Discovered at" sensor, which could show confusing,

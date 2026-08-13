@@ -433,7 +433,12 @@ async def test_relayed_coordinator_fails_cleanly_when_address_undiscoverable(has
 async def test_relayed_coordinator_failure_does_not_touch_gateway_connection_state(hass):
     """The actual point of this test: a relayed device's own failure must
     NOT mark the shared gateway connection disconnected or report a
-    gateway failure -- only the gateway's own coordinator does that."""
+    gateway failure -- only the gateway's own coordinator does that. It
+    DOES still count toward a separate, per-target relay-failure tally
+    though (see gateway_registry.py's own TestRelayFailover for the full
+    reasoning) -- confirmed here too, not just in that lower-level suite,
+    since this is what actually proves _fetch() itself is wired up to
+    call it, not just that the registry method works in isolation."""
     registry = _make_registry(hass)
     await registry.join(PAN_ID, "gateway-serial", rssi=-50)
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)
@@ -459,6 +464,34 @@ async def test_relayed_coordinator_failure_does_not_touch_gateway_connection_sta
     assert coordinator.last_update_success is False
     mock_mark.assert_not_called()
     assert registry.group(PAN_ID).consecutive_gateway_failures == 0
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].consecutive_relay_failures == 1
+
+
+async def test_relayed_coordinator_success_resets_its_own_relay_failure_count(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, "gateway-serial", rssi=-50)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-80)
+    registry.update_mesh_address(PAN_ID, PUMP_SERIAL, bytes.fromhex("fd11223344556677000000fffe001234"))
+    # Simulates some earlier relay trouble that hadn't yet reached the
+    # promotion threshold -- confirms a real, successful read clears it.
+    registry.group(PAN_ID).members[PUMP_SERIAL].consecutive_relay_failures = 2
+
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_gateway_device = MagicMock()
+    fake_relayed_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_relayed_device,
+    ):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert registry.group(PAN_ID).members[PUMP_SERIAL].consecutive_relay_failures == 0
 
 
 # --------------------------------------------------------------------------
