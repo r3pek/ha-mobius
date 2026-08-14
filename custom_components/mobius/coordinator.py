@@ -698,9 +698,18 @@ async def discover_tank_for_serial(
     """
     info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
     if info is None:
+        _LOGGER.debug(
+            "%s not found in Home Assistant's own Bluetooth cache at all, even after "
+            "requesting an active scan (%d connectable scanner(s) currently registered)",
+            serial, bluetooth.async_scanner_count(hass, connectable=True),
+        )
         return None
     ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
     if ble_device is None:
+        _LOGGER.debug(
+            "%s found in Home Assistant's advertisement cache at %s, but not "
+            "currently connectable from here", serial, info.address,
+        )
         return None
     try:
         async with semaphore:

@@ -1002,11 +1002,16 @@ class TestDiscoverTankForSerial:
 
         assert result is expected_tank
 
-    async def test_returns_none_if_device_not_currently_advertising(self, hass):
+    async def test_returns_none_if_device_not_currently_advertising(self, hass, caplog):
         """Distinguishable from discover_tank()'s own Tank(prefix=None,
         peers=[]) -- this None specifically means "couldn't even find/
         reach the device right now," not "reached it, but it has no
-        tank." Callers must not conflate the two."""
+        tank." Callers must not conflate the two. Also confirms this
+        logs the same diagnostic detail its two sibling functions
+        (_resolve_current_ble_device, discover_mesh_address) already
+        do -- a real, confirmed gap this used to have: silently
+        returning None with no logging at all, unlike either of them."""
+        caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
         semaphore = asyncio.Semaphore(1)
 
         with patch(
@@ -1015,10 +1020,15 @@ class TestDiscoverTankForSerial:
         ), patch(
             "custom_components.mobius.coordinator.bluetooth.async_request_active_scan",
             AsyncMock(),
+        ), patch(
+            "custom_components.mobius.coordinator.bluetooth.async_scanner_count",
+            return_value=1,
         ):
             result = await discover_tank_for_serial(hass, PUMP_SERIAL, semaphore)
 
         assert result is None
+        assert f"{PUMP_SERIAL} not found in Home Assistant's own Bluetooth cache" in caplog.text
+        assert "1 connectable scanner(s) currently registered" in caplog.text
 
     async def test_returns_none_on_connection_failure_rather_than_raising(self, hass):
         semaphore = asyncio.Semaphore(1)
