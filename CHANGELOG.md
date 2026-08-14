@@ -15,6 +15,11 @@
   still visible there and asks Home Assistant to do a quick active
   scan if not, rather than only finding out reactively once something
   actually failed to connect.
+- Now requires `python-mobius` 0.4.3 (still auto-installed, nothing to
+  do manually) and won't automatically move to its next minor version
+  even once one exists, to avoid a `python-mobius` change breaking
+  Mobius before a matching update here has actually been tested
+  against it.
 
 ## 0.3.1
 
