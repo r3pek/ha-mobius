@@ -184,14 +184,6 @@ directory, then restart Home Assistant.
 
 ### HACS
 
-**HACS only works with repositories hosted on GitHub** (it uses GitHub's
-API directly — OAuth auth, GitHub Releases for versioning — and doesn't
-support GitLab/Gitea/Forgejo). This repo's source of truth is
-`https://code.r3pek.org/r3pek/ha-mobius` (Forgejo); every tagged release
-here is mirrored to `https://github.com/r3pek/ha-mobius` automatically
-(`.forgejo/workflows/release.yml`'s own final step, confirmed working),
-so HACS installs work directly from there:
-
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=r3pek&repository=ha-mobius&category=integration)
 
 Or manually: in HACS, Settings → Custom repositories → add
