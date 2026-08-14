@@ -1,18 +1,19 @@
 name: Validate
 
-# HACS's own publishing requirements (https://hacs.xyz/docs/publish/include/)
-# call for both of these checks passing before a PR is submitted -- hence
-# push/pull_request/schedule, matching the exact trigger set both actions'
-# own official docs use, not just tag pushes like release.yml.
-# "on" is quoted deliberately -- unquoted, some YAML parsers (YAML 1.1)
-# interpret the bare word as the boolean `true` instead of the literal
-# key GitHub/Forgejo Actions expects.
+# Tag pushes only (matching release.yml's own trigger), plus
+# workflow_dispatch and workflow_call -- same shape as test.yml, so
+# release.yml can call this as its own prerequisite too. Deliberately
+# NOT HACS's own documented recommendation for this action
+# (push/pull_request/daily schedule, confirmed directly against
+# https://hacs.xyz/docs/publish/action/) -- these checks only need to
+# be current at the moment something's actually released, not on every
+# push/PR in between.
 "on":
   push:
-  pull_request:
-  schedule:
-    - cron: "0 0 * * *"
-  workflow_dispatch:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+  workflow_call: {}
 
 jobs:
   hacs:

@@ -9,13 +9,17 @@ name: Release
   workflow_dispatch: {}
 
 jobs:
-  # Calls test.yml as a reusable workflow rather than duplicating its
-  # steps. "release" below (needs: test) never runs if this fails.
+  # Calls test.yml and validate.yml as reusable workflows rather than
+  # duplicating their steps. "release" below (needs: [test, validate])
+  # never runs if either fails.
   test:
     uses: ./.forgejo/workflows/test.yml
 
+  validate:
+    uses: ./.forgejo/workflows/validate.yml
+
   release:
-    needs: test
+    needs: [test, validate]
     # ubuntu-22.04 -> catthehacker/ubuntu:act-22.04, the only one of this
     # runner's labels with a full GitHub-Actions-compatible environment.
     runs-on: ubuntu-22.04
