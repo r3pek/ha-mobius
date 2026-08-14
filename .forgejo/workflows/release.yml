@@ -17,6 +17,14 @@ jobs:
 
   validate:
     uses: ./.forgejo/workflows/validate.yml
+    # Explicit, not secrets: inherit -- validate.yml only actually
+    # needs this one secret. Confirmed by a REAL failure this actually
+    # matters (not just theoretical): the HACS validation step passed
+    # when validate.yml was triggered standalone, then failed with a
+    # 401 specifically when triggered through this call instead --
+    # without this block, that's exactly what happens again.
+    secrets:
+      GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
 
   release:
     needs: [test, validate]

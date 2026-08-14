@@ -13,7 +13,22 @@ name: Validate
     tags:
       - "v*"
   workflow_dispatch: {}
-  workflow_call: {}
+  workflow_call:
+    secrets:
+      GH_MIRROR_TOKEN:
+        # Reusable-workflow secrets are NOT automatically inherited,
+        # even for a same-repo call like release.yml's own -- confirmed
+        # by a REAL failure of exactly this shape: the HACS validation
+        # step below passed when this workflow was triggered standalone
+        # (its own push/workflow_dispatch trigger), then failed with the
+        # identical 401 when triggered AS release.yml's own "validate"
+        # job instead -- proving the secret genuinely wasn't reaching
+        # this step on that specific path, not a coincidence or a
+        # config-drift issue. Without this declaration (and the matching
+        # secrets: block on release.yml's own call to this workflow),
+        # secrets.GH_MIRROR_TOKEN below is empty specifically when
+        # invoked that way.
+        required: true
 
 jobs:
   hacs:
