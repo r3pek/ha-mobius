@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3
 
 - Fixed some sensors (motor speed, flow rate, light intensity,
   calibration, and similar) sometimes showing "Unavailable" forever
