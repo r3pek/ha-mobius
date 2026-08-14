@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - Fixed relayed devices (anything reached through a gateway, not
   directly over BLE) sometimes getting stuck failing every single
