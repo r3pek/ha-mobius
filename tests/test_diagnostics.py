@@ -70,6 +70,12 @@ async def _setup_multi_device_tank_entry(hass):
         side_effect=Exception("LIGHT_SERIAL relay unreachable in this test"),
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        # LIGHT_SERIAL's own soft refresh above fails every attempt, by
+        # design (see the RelayedMobiusDevice patch above) -- without
+        # this, that means really waiting out SOFT_REFRESH_RETRY_DELAY
+        # in wall-clock time for every test using this fixture.
+        "custom_components.mobius.asyncio.sleep", AsyncMock(),
     ):
         from mobius import Tank, MeshPeer, Model
         mock_probe.return_value = Tank(

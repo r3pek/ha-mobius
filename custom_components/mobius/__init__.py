@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Optional
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -21,7 +24,7 @@ from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
 from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
-    TANK_REVALIDATION_INTERVAL,
+    TANK_REVALIDATION_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS, SOFT_REFRESH_RETRY_DELAY,
 )
 from .coordinator import (
     MobiusDeviceCoordinator, _find_in_bluetooth_cache, discover_mesh_address, discover_tank_for_serial,
@@ -67,6 +70,12 @@ class MobiusRuntimeData:
     in this integration already works (gateway_registry.PanGroup.members,
     for instance)."""
     coordinators: dict[str, MobiusDeviceCoordinator] = field(default_factory=dict)
+    # The rest are populated once by sensor.py's own async_setup_entry(),
+    # consulted later by _async_ensure_sensors_exist() below -- see that
+    # function's own docstring for why it needs to exist at all.
+    sensor_add_entities: Optional[AddEntitiesCallback] = None
+    sensor_device_infos: dict[str, DeviceInfo] = field(default_factory=dict)
+    created_sensor_unique_ids: set[str] = field(default_factory=set)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -118,6 +127,76 @@ def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex:
     )
 
 
+async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    A REAL, CONFIRMED production bug this addresses: sensor.py's own
+    async_setup_entry() decides which type-specific entities to create
+    for a device (pump vs light -- OperationState/MotorSpeed/etc, or
+    LightChannelIntensity/Calibration) from a ONE-TIME snapshot of that
+    device's coordinator.data, taken right at setup. For a relayed
+    (non-gateway) member of a tank specifically, that snapshot can still
+    be empty at that exact moment: its own first read deliberately uses
+    a soft, non-blocking async_refresh() rather than the gateway's own
+    blocking, retried async_config_entry_first_refresh() (so one
+    unreachable device can never hold up the rest of the tank's setup --
+    see this module's own async_setup_entry() for the full story of the
+    real bug that fixed). If that one soft attempt happens to fail -- a
+    relayed read on a freshly-starting integration, especially right
+    after a Home Assistant restart when the Bluetooth cache itself may
+    not be warm yet, is exactly the kind of thing confirmed to
+    transiently fail once -- the type-specific entities for that device
+    simply never get created for this session at all, even though every
+    later poll succeeds fine. The always-created generic entities
+    (support tier, error state, etc) recover on their own once the
+    coordinator succeeds, since they already exist and only their own
+    `available` needs to flip; these don't, since entity creation itself
+    only ever happens once per session.
+
+    The fix is this: periodically check whether each known device's
+    CURRENT data would produce any entities beyond what was already
+    created, and add just the ones that are missing. Self-healing,
+    deliberately, rather than trying to fully rule the original gap out
+    at setup time -- a fixed retry count there narrows the window but
+    can't fully close it (nothing guarantees the Bluetooth cache is warm
+    again within any fixed number of attempts), while this keeps
+    checking on every regular revalidation cycle for as long as it
+    takes, with no risk of ever creating a duplicate (compared against
+    already-created unique_ids every time, never assumed from whether
+    this device's support was previously unknown).
+    """
+    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime is None or runtime.sensor_add_entities is None:
+        return
+
+    # Local import: sensor.py itself imports from this module
+    # (MobiusRuntimeData, tank_device_identifier) -- a top-level import
+    # here would be circular.
+    from .sensor import _build_type_specific_entities
+
+    new_entities = []
+    for serial, coordinator in runtime.coordinators.items():
+        device_info = runtime.sensor_device_infos.get(serial)
+        if device_info is None:
+            continue  # this device's own sensor entities were never set up at all yet
+        data = coordinator.data or {}
+        support = data.get("support", "")
+        if not support:
+            continue  # still nothing to build from -- next cycle's own retry
+        candidates = _build_type_specific_entities(coordinator, serial, device_info, support, data)
+        missing = [e for e in candidates if e.unique_id not in runtime.created_sensor_unique_ids]
+        if missing:
+            new_entities += missing
+            runtime.created_sensor_unique_ids.update(e.unique_id for e in missing)
+
+    if new_entities:
+        _LOGGER.debug(
+            "%r: creating %d sensor(s) that were missed at setup (that "
+            "device's own data wasn't ready yet at that exact moment): %s",
+            entry.title, len(new_entities), [e.unique_id for e in new_entities],
+        )
+        runtime.sensor_add_entities(new_entities)
+
+
 async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
     """
     Periodic per-entry check, run every TANK_REVALIDATION_INTERVAL (see
@@ -128,7 +207,7 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     polling) to ask what else is currently on its Thread mesh, AND to
     keep every known member's own connection info current.
 
-    Three real jobs, not two:
+    Four real jobs, not three:
 
     1. RECOVERY, if there's currently no gateway at all for this tank
        (every candidate previously exhausted -- see gateway_registry.py's
@@ -157,6 +236,15 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
        this function's own "one bad round proves nothing, the next
        scheduled run is the retry" philosophy, not something that needs
        every member to succeed at once to be worth doing at all.
+    4. ENSURING EVERY DEVICE'S OWN SENSOR ENTITIES ACTUALLY EXIST -- see
+       _async_ensure_sensors_exist()'s own docstring for the real, dead
+       simple production bug this addresses (an entity that was never
+       created at setup time, for a device whose own data legitimately
+       wasn't ready yet at that exact moment, never gets a second chance
+       otherwise). Deliberately independent of the gateway-connection
+       logic below -- this only needs each device's own coordinator.data,
+       already fetched on its own regular poll cycle regardless of
+       whether that specific gateway connection right now is healthy.
 
     Migration detection itself is unchanged from before:
 
@@ -196,6 +284,11 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     group = registry.group(pan_id)
     if group is None:
         return
+
+    # Independent of everything below -- see this function's own
+    # docstring (job 4) and _async_ensure_sensors_exist()'s own for why
+    # this doesn't need (or wait on) gateway connection health at all.
+    await _async_ensure_sensors_exist(hass, entry)
 
     known_devices = entry.data.get(CONF_DEVICES, [])
     if group.gateway_serial is None:
@@ -494,6 +587,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_config_entry_first_refresh()
         else:
             await coordinator.async_refresh()
+            attempt = 1
+            # See SOFT_REFRESH_RETRY_ATTEMPTS's own docstring in const.py
+            # for the full reasoning -- a bounded, real chance for a
+            # transient first-attempt failure to actually resolve before
+            # setup moves on, not a guarantee (that's what
+            # _async_ensure_sensors_exist()'s own self-healing check is
+            # for). Still soft throughout -- never raises, same as the
+            # single attempt this replaces.
+            while not coordinator.last_update_success and attempt <= SOFT_REFRESH_RETRY_ATTEMPTS:
+                _LOGGER.debug(
+                    "%s's own first soft refresh at setup failed -- retrying "
+                    "(attempt %d/%d, %ss apart)", serial, attempt,
+                    SOFT_REFRESH_RETRY_ATTEMPTS, SOFT_REFRESH_RETRY_DELAY,
+                )
+                await asyncio.sleep(SOFT_REFRESH_RETRY_DELAY)
+                await coordinator.async_refresh()
+                if coordinator.last_update_success:
+                    _LOGGER.debug(
+                        "%s came up on retry %d/%d -- would otherwise have started "
+                        "unavailable this session for no real reason", serial, attempt,
+                        SOFT_REFRESH_RETRY_ATTEMPTS,
+                    )
+                attempt += 1
             if not coordinator.last_update_success:
                 # async_refresh() is deliberately soft here (see this
                 # function's own docstring for why) -- it never raises,

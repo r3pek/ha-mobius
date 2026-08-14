@@ -629,6 +629,36 @@ class GatewayDeviceSensor(SensorEntity):
         return {"serial": serial}
 
 
+def _build_type_specific_entities(coordinator, serial, device_info, support, data) -> list[SensorEntity]:
+    """The pump-or-light-specific entities for one device, given its
+    CURRENT support/data snapshot -- split out from async_setup_entry()
+    below so _async_ensure_sensors_exist() (in __init__.py) can reuse
+    the exact same logic later, for a device whose data wasn't ready
+    yet the first time this ran. See that function's own docstring for
+    the full story of why a second call, later, with fresher data, is
+    sometimes necessary at all."""
+    if support.startswith("pump"):
+        return [
+            OperationStateSensor(coordinator, serial, device_info),
+            MotorSpeedSensor(coordinator, serial, device_info),
+            FlowRateSensor(coordinator, serial, device_info),
+            CurrentPumpModeSensor(coordinator, serial, device_info),
+        ]
+    elif support == "light":
+        entities: list[SensorEntity] = []
+        channel_names = data.get("channels") or []
+        for name in channel_names:
+            entities.append(LightChannelIntensitySensor(coordinator, serial, device_info, name))
+        # Only added if calibration data was actually present at setup --
+        # confirmed via real hardware that not all lights necessarily
+        # support this, and there's no point creating a permanently
+        # unavailable entity for one that doesn't.
+        if data.get("calibration") is not None:
+            entities.append(CalibrationSensor(coordinator, serial, device_info))
+        return entities
+    return []
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -696,23 +726,16 @@ async def async_setup_entry(
             MeshAddressSensor(coordinator, serial, device_info),
         ]
 
-        if support.startswith("pump"):
-            entities += [
-                OperationStateSensor(coordinator, serial, device_info),
-                MotorSpeedSensor(coordinator, serial, device_info),
-                FlowRateSensor(coordinator, serial, device_info),
-                CurrentPumpModeSensor(coordinator, serial, device_info),
-            ]
-        elif support == "light":
-            channel_names = data.get("channels") or []
-            for name in channel_names:
-                entities.append(LightChannelIntensitySensor(coordinator, serial, device_info, name))
-            # Only added if calibration data was actually present at setup --
-            # confirmed via real hardware that not all lights necessarily
-            # support this, and there's no point creating a permanently
-            # unavailable entity for one that doesn't.
-            if data.get("calibration") is not None:
-                entities.append(CalibrationSensor(coordinator, serial, device_info))
+        type_specific = _build_type_specific_entities(coordinator, serial, device_info, support, data)
+        entities += type_specific
+        # Both consulted later by _async_ensure_sensors_exist() (in
+        # __init__.py) -- see that function's own docstring for why it
+        # needs to exist at all. sensor_device_infos specifically so it
+        # never has to duplicate this function's own via_device/
+        # tank_identifier logic just to build one when healing a device
+        # whose data wasn't ready yet the first time this ran.
+        runtime.sensor_device_infos[serial] = device_info
+        runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific)
 
     # The tank-level prefix sensor, attached to the synthetic tank device
     # itself, not any one real device -- same condition as via_device
@@ -724,4 +747,8 @@ async def async_setup_entry(
             entities.append(GatewayDeviceSensor(entry, pan_id, registry, runtime.coordinators, tank_identifier))
 
     async_add_entities(entities)
+    # Stashed last, not first -- if anything above this point raised,
+    # a partially-populated callback with no matching entities would be
+    # worse than none at all for _async_ensure_sensors_exist() to find.
+    runtime.sensor_add_entities = async_add_entities
 

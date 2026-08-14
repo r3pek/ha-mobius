@@ -332,6 +332,11 @@ async def test_secondary_device_proactive_discovery_failure_does_not_break_setup
         return_value=fake_device,
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        # LIGHT_SERIAL's own mesh address is never resolved in this
+        # test, so its own soft refresh fails and retries for real
+        # without this.
+        "custom_components.mobius.asyncio.sleep", AsyncMock(),
     ):
         result = await hass.config_entries.async_setup(entry.entry_id)
 
@@ -490,6 +495,10 @@ async def test_one_unreachable_device_does_not_block_the_whole_tank(hass):
         side_effect=Exception("LIGHT_SERIAL cannot be relayed to either"),
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        # LIGHT_SERIAL is unreachable both ways in this test, by design
+        # -- its own soft refresh fails and retries for real without this.
+        "custom_components.mobius.asyncio.sleep", AsyncMock(),
     ):
         result = await hass.config_entries.async_setup(entry.entry_id)
 
@@ -551,6 +560,11 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass, caplog):
         "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=fake_pump_device,
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        # LIGHT_SERIAL's own mesh address is never resolved in this test
+        # (discover_mesh_address above returns None unconditionally), so
+        # its own soft refresh fails and retries for real without this.
+        "custom_components.mobius.asyncio.sleep", AsyncMock(),
     ):
         await hass.config_entries.async_setup(entry.entry_id)
 
@@ -567,6 +581,73 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass, caplog):
     # but the actual order/RSSI every device was considered in.
     assert f"[('{PUMP_SERIAL}', -30), ('{LIGHT_SERIAL}', -95)]" in caplog.text
     assert f"{PUMP_SERIAL} is the working device" in caplog.text
+
+
+async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(hass, caplog):
+    """The setup-time half of the fix for a real, confirmed production
+    bug (see _async_ensure_sensors_exist()'s own docstring for the
+    self-healing half): a relayed device's own first soft refresh
+    failing transiently shouldn't mean it starts unavailable for the
+    whole session if a retry, moments later, would have succeeded fine.
+    Also confirms this is actually visible in the logs -- a real,
+    confirmed gap this used to have: only the final give-up case was
+    ever logged, nothing for "failed once, retrying" or "recovered on
+    retry"."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}, {CONF_SERIAL: LIGHT_SERIAL}],
+        },
+        unique_id=MLPREFIX_HEX,
+    )
+    entry.add_to_hass(hass)
+
+    fake_pump_device = _fake_pump_device()
+    fetch_all_calls = {"n": 0}
+
+    async def flaky_fetch_all(device, minute_of_day_now=None):
+        # PUMP_SERIAL (the gateway) always succeeds; LIGHT_SERIAL's own
+        # relayed fetch fails on its first call, then succeeds on retry.
+        if device is fake_pump_device:
+            return {
+                "support": "pump", "operation_state": "Schedule",
+                "telemetry": {"speed_percent": 10.0, "gph": 500},
+                "current_pump_mode": "TidalSwell", "current_pump_params": {},
+                "schedule_point_count": 1, "firmware_versions": {}, "hardware_info": {},
+            }
+        fetch_all_calls["n"] += 1
+        if fetch_all_calls["n"] == 1:
+            raise IOError("transient relay hiccup")
+        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}
+
+    with patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=_fake_tank_for(PUMP_SERIAL, LIGHT_SERIAL)),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_pump_device),
+    ), patch(
+        "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=MagicMock(),
+    ), patch(
+        "custom_components.mobius.coordinator._fetch_all", AsyncMock(side_effect=flaky_fetch_all),
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        "custom_components.mobius.asyncio.sleep", AsyncMock(),
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+
+    assert entry.runtime_data.coordinators[LIGHT_SERIAL].last_update_success is True
+    assert entry.runtime_data.coordinators[LIGHT_SERIAL].data["support"] == "light"
+    assert fetch_all_calls["n"] == 2  # confirms a retry genuinely happened, not just luck
+    assert f"{LIGHT_SERIAL}'s own first soft refresh at setup failed" in caplog.text
+    assert f"{LIGHT_SERIAL} came up on retry" in caplog.text
 
 
 async def test_setup_raises_not_ready_only_if_every_device_is_unreachable(hass):
@@ -1346,3 +1427,116 @@ async def test_unload_entry_does_not_trigger_rediscovery(hass):
         await hass.config_entries.async_unload(entry.entry_id)
 
     mock_rediscover.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# _async_ensure_sensors_exist() -- the self-healing check for a real,
+# confirmed production bug: sensor.py's own async_setup_entry() decides
+# which type-specific entities to create from a ONE-TIME snapshot of
+# coordinator.data, taken at setup. For a relayed (non-gateway) device
+# specifically, that snapshot can still be empty at that exact moment (its
+# own first read is a soft, non-blocking refresh -- see
+# SOFT_REFRESH_RETRY_ATTEMPTS's own docstring in const.py) -- these tests
+# confirm the periodic backstop that catches whatever the retry there
+# doesn't.
+# --------------------------------------------------------------------------
+
+from custom_components.mobius import _async_ensure_sensors_exist, MobiusRuntimeData
+from custom_components.mobius.sensor import _build_type_specific_entities
+
+
+def _make_runtime_for_healing_test(hass, entry, serial, data, already_created=()):
+    """A MobiusRuntimeData with one coordinator whose data is exactly
+    as given, a stashed (mocked) sensor_add_entities callback, and a
+    fake device_info -- everything _async_ensure_sensors_exist() needs,
+    without going through a real sensor.py platform setup at all."""
+    coordinator = MagicMock()
+    coordinator.data = data
+    runtime = MobiusRuntimeData(coordinators={serial: coordinator})
+    runtime.sensor_add_entities = MagicMock()
+    runtime.sensor_device_infos = {serial: MagicMock()}
+    runtime.created_sensor_unique_ids = set(already_created)
+    entry.runtime_data = runtime
+    return runtime
+
+
+class TestEnsureSensorsExist:
+    async def test_creates_missing_type_specific_entities_when_data_becomes_available(self, hass):
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-1")
+        entry.add_to_hass(hass)
+        data = {"support": "pump", "telemetry": {"speed_percent": 50, "gph": 1200}}
+        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, data)
+
+        await _async_ensure_sensors_exist(hass, entry)
+
+        runtime.sensor_add_entities.assert_called_once()
+        added = runtime.sensor_add_entities.call_args[0][0]
+        added_unique_ids = {e.unique_id for e in added}
+        assert added_unique_ids == {
+            f"{PUMP_SERIAL}_operation_state", f"{PUMP_SERIAL}_motor_speed",
+            f"{PUMP_SERIAL}_flow_rate", f"{PUMP_SERIAL}_current_pump_mode",
+        }
+        assert runtime.created_sensor_unique_ids == added_unique_ids
+
+    async def test_does_not_recreate_already_created_entities(self, hass):
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-2")
+        entry.add_to_hass(hass)
+        data = {"support": "pump", "telemetry": {}}
+        already = {
+            f"{PUMP_SERIAL}_operation_state", f"{PUMP_SERIAL}_motor_speed",
+            f"{PUMP_SERIAL}_flow_rate", f"{PUMP_SERIAL}_current_pump_mode",
+        }
+        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, data, already_created=already)
+
+        await _async_ensure_sensors_exist(hass, entry)
+
+        runtime.sensor_add_entities.assert_not_called()
+        assert runtime.created_sensor_unique_ids == already  # unchanged, not duplicated
+
+    async def test_creates_only_the_specific_missing_entity_not_the_whole_type(self, hass):
+        """The subtler version of the same bug: support was already
+        correctly detected as "light" and its other entities already
+        created, but calibration data specifically wasn't present yet
+        at that exact moment -- confirms only the missing Calibration
+        entity gets added, not duplicates of the already-created ones."""
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-3")
+        entry.add_to_hass(hass)
+        data = {
+            "support": "light", "channels": ["RoyalBlue"], "current_intensities": {"RoyalBlue": 500},
+            "calibration": MagicMock(completed=True, date_of_last=0, lower_bound=None, upper_bound=None),
+        }
+        already = {f"{LIGHT_SERIAL}_intensity_royalblue"}  # calibration NOT yet in this set
+        runtime = _make_runtime_for_healing_test(hass, entry, LIGHT_SERIAL, data, already_created=already)
+
+        await _async_ensure_sensors_exist(hass, entry)
+
+        runtime.sensor_add_entities.assert_called_once()
+        added = runtime.sensor_add_entities.call_args[0][0]
+        assert {e.unique_id for e in added} == {f"{LIGHT_SERIAL}_calibration"}
+
+    async def test_skips_devices_whose_data_still_is_not_ready(self, hass):
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-4")
+        entry.add_to_hass(hass)
+        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, {})  # support still missing
+
+        await _async_ensure_sensors_exist(hass, entry)
+
+        runtime.sensor_add_entities.assert_not_called()
+        assert runtime.created_sensor_unique_ids == set()
+
+    async def test_noop_if_sensor_platform_never_set_up_yet(self, hass):
+        """runtime.sensor_add_entities is None until sensor.py's own
+        async_setup_entry() has actually run once -- must not raise if
+        this somehow runs before that's happened."""
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-5")
+        entry.add_to_hass(hass)
+        entry.runtime_data = MobiusRuntimeData(coordinators={})
+
+        await _async_ensure_sensors_exist(hass, entry)  # must not raise
+
+    async def test_noop_if_runtime_data_does_not_exist_yet(self, hass):
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-6")
+        entry.add_to_hass(hass)
+        # entry.runtime_data deliberately never set at all.
+
+        await _async_ensure_sensors_exist(hass, entry)  # must not raise

@@ -118,6 +118,36 @@ RELAY_FAILURE_THRESHOLD = 3
 # this for an entire group at once.
 MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 
+# For a relayed (non-gateway) device's own soft, non-blocking refresh at
+# setup -- see __init__.py's own async_setup_entry() for why that's soft
+# in the first place. A single attempt turned out to fail transiently
+# often enough in real production use (especially right after a Home
+# Assistant restart, when the Bluetooth cache itself may not be warm yet)
+# that the device's own type-specific sensor entities (which sensor.py's
+# own async_setup_entry() decides whether to create from THAT ONE
+# attempt's own data) never got created for the whole session -- see
+# _async_ensure_sensors_exist()'s own docstring for the self-healing
+# half of this fix. This constant is the OTHER half: giving that first
+# attempt a real, but bounded, chance to actually succeed before setup
+# moves on, so the self-healing check has as little to actually clean up
+# afterward as possible.
+#
+# Deliberately just 1 -- not unlimited, and specifically NOT enough to
+# reach RELAY_FAILURE_THRESHOLD (3) on its own: this setup-time retry
+# burst calls the same coordinator.async_refresh() a normal poll cycle
+# does, which counts toward that same threshold underneath. Confirmed
+# via a real test failure that 3 retries here (matching that threshold
+# exactly) can trigger a gateway re-election during setup itself, from
+# nothing more than this retry burst -- a few failures within several
+# seconds of each other isn't the same kind of evidence as 3 genuinely
+# independent, time-separated poll cycles noticing the same thing, and
+# shouldn't count the same way. The self-healing check is the real,
+# primary fix for the actual problem this addresses -- this is cheap,
+# bounded insurance on top of it, not a second mechanism trying to fully
+# solve the same thing on its own.
+SOFT_REFRESH_RETRY_ATTEMPTS = 1  # on top of the first attempt, so 2 total
+SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds between attempts
+
 # How often each tank re-checks who's actually on its own Thread mesh
 # AND refreshes what every member's own connection info looks like right
 # now (mesh address, mesh last-seen -- see __init__.py's own

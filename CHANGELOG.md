@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Fixed some sensors (motor speed, flow rate, light intensity,
+  calibration, and similar) sometimes showing "Unavailable" forever
+  after a reboot, for one or two devices on a tank, even though
+  everything else about that device kept updating normally. Caused by
+  a relayed (non-gateway) device's own very first read sometimes
+  failing right after startup -- often because Home Assistant's own
+  Bluetooth cache isn't fully warmed up yet at that exact moment. That
+  first read now gets a couple of quick retries, and, as a backstop,
+  Mobius periodically checks for and fills in any sensors that still
+  ended up missing.
+
 ## 0.3.2
 
 - Fixed relayed devices (anything reached through a gateway, not
