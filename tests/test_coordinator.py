@@ -744,6 +744,88 @@ async def test_coordinator_does_not_touch_registry_when_versions_unchanged(hass)
     assert updated_device.sw_version == "2.1.5"  # unchanged, as expected
 
 
+async def test_coordinator_corrects_device_name_once_real_data_arrives(hass):
+    """The actual, real, reported bug this fixes: a device whose own
+    first read at setup failed gets registered with sensor.py's own
+    generic "Mobius device (SERIAL)" fallback name (DeviceInfo is only
+    consulted once, at entity-creation time) -- and since the entity-
+    healing fix (_async_ensure_sensors_exist()) only ever creates the
+    missing ENTITIES, not update the device's own registry entry, that
+    name was staying stuck at the fallback forever, even once the
+    entities themselves recovered correctly. Confirms this coordinator-
+    level, every-successful-poll sync (already existing for sw_version/
+    hw_version) now also corrects name/model/manufacturer the same way,
+    the moment real data actually arrives -- not just at initial setup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, PUMP_SERIAL)},
+        name=f"Mobius device ({PUMP_SERIAL})",  # the generic fallback, matching a failed first read
+    )
+    assert device_entry.name == f"Mobius device ({PUMP_SERIAL})"
+    assert device_entry.model is None
+
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    # _make_fake_pump_device()'s own get_device_info() reports a real
+    # name ("MP40QD Right"), model, and manufacturer -- the read this
+    # test simulates finally succeeding.
+    fake_device = _make_fake_pump_device()
+
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    updated_device = device_registry.async_get(device_entry.id)
+    assert updated_device.name == "MP40QD Right"
+    assert updated_device.model == "VorTechMP40wG3QD"
+    assert updated_device.manufacturer == "EcoTech Marine"
+
+
+async def test_coordinator_does_not_touch_registry_name_when_already_correct(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_ADDRESS: PUMP_ADDRESS, CONF_SERIAL: PUMP_SERIAL},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, PUMP_SERIAL)},
+        name="MP40QD Right",  # already correct, matching _make_fake_pump_device()'s own report
+        model="VorTechMP40wG3QD",
+        manufacturer="EcoTech Marine",
+        sw_version="2.1.5",
+        hw_version="2",
+    )
+
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+    fake_device = _make_fake_pump_device()
+
+    group = registry.group(PAN_ID)
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device),
+    ), patch.object(
+        device_registry, "async_update_device",
+    ) as mock_update:
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    mock_update.assert_not_called()
+
+
 # --------------------------------------------------------------------------
 # derive_sw_version() -- picks a "main" firmware version to display,
 # falling through a priority list rather than assuming "Product OS" is

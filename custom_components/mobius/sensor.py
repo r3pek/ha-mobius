@@ -45,7 +45,7 @@ def _device_info(serial: str, data: dict, address: str | None = None,
     identifier guaranteed present either way -- see python-mobius's own
     documentation/12-device-identity-and-address-stability.md for why
     it's the right one regardless, not just the only available option
-    here. coordinator.py's own _sync_device_registry_versions() must
+    here. coordinator.py's own _sync_device_registry_info() must
     look this device up the same, serial-based way, or it would never
     find anything to update.
 
@@ -707,9 +707,14 @@ async def async_setup_entry(
         # components as separate sensors -- that would be sensor sprawl for
         # something that's fundamentally device info, not a changing value;
         # the full breakdown is available via python-mobius directly for
-        # anyone who wants it. coordinator._sync_device_registry_versions()
-        # also keeps the device registry in sync if either changes after
-        # setup, using the same derivation logic.
+        # anyone who wants it. coordinator._sync_device_registry_info()
+        # also keeps the device registry in sync afterward if any of these
+        # (or name/model/manufacturer) change, using the same derivation
+        # logic -- including fixing a device stuck at this method's own
+        # generic "Mobius device (SERIAL)" fallback name (built right here,
+        # below) once real data actually becomes available, since this is
+        # only ever consulted once, at entity-creation time, not
+        # continuously.
         sw_version = derive_sw_version(data.get("firmware_versions", {}))
         hw_version = derive_hw_version(data.get("hardware_info", {}))
         device_info = _device_info(

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a device's own name staying stuck at the generic "Mobius
+  device (SERIAL)" placeholder forever, even after it recovered and
+  started reporting real data again -- a side effect of the previous
+  fix for sensors stuck "Unavailable" after a reboot. The device's
+  proper name (and model/manufacturer) now gets corrected the moment
+  real data actually arrives, not just captured once at initial setup.
+
 ## 0.3.3
 
 - Fixed some sensors (motor speed, flow rate, light intensity,

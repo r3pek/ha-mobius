@@ -445,7 +445,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self._fetch()
             self._last_success = dt_util.utcnow()
-            self._sync_device_registry_versions(data)
+            self._sync_device_registry_info(data)
             return data
         except Exception as err:
             now = dt_util.utcnow()
@@ -458,12 +458,31 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return self.data
             raise UpdateFailed(f"Error communicating with {self.serial}: {err}") from err
 
-    def _sync_device_registry_versions(self, data: dict[str, Any]) -> None:
-        """Keeps the device registry's sw_version/hw_version in sync with
-        reality -- firmware changes are infrequent but real (a real
-        device got an OTA update mid-development of this integration), so
-        this needs to actually propagate, not just be captured once at
-        setup and left stale forever after.
+    def _sync_device_registry_info(self, data: dict[str, Any]) -> None:
+        """Keeps the device registry's sw_version/hw_version/name/model/
+        manufacturer in sync with reality -- firmware changes are
+        infrequent but real (a real device got an OTA update
+        mid-development of this integration), so this needs to actually
+        propagate, not just be captured once at setup and left stale
+        forever after.
+
+        name/model/manufacturer specifically: a real, confirmed gap the
+        entity-healing fix (_async_ensure_sensors_exist(), in __init__.py)
+        left behind. sensor.py's own _device_info() falls back to a
+        generic "Mobius device (SERIAL)" name when a device's own first
+        read at setup didn't have "model" yet -- and since DeviceInfo is
+        only ever consulted at entity-CREATION time, not continuously,
+        that fallback name was never getting corrected once real data
+        actually arrived, even after the entities themselves recovered
+        correctly. This is the fix: recomputed and re-synced on every
+        successful read, the same as sw_version/hw_version already were.
+
+        Safe to update .name unconditionally whenever it differs --
+        confirmed directly against Home Assistant's own DeviceEntry:
+        name and name_by_user are separate fields, and a user's own
+        rename (via Home Assistant's UI) always goes into the latter,
+        which this never touches and which always takes display
+        precedence regardless of what .name itself holds.
 
         Looks the device up by SERIAL, not BLE address -- a real,
         necessary fix, not incidental to this integration's move to
@@ -480,7 +499,15 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         same, serial-based way, or this lookup would never find anything."""
         sw_version = derive_sw_version(data.get("firmware_versions") or {})
         hw_version = derive_hw_version(data.get("hardware_info") or {})
-        if not sw_version and not hw_version:
+        model = data.get("model")
+        manufacturer = data.get("manufacturer")
+        # Mirrors _device_info()'s own fallback chain exactly -- serial
+        # is always known here (self.serial, never dependent on a
+        # successful read), so "model and serial" is the only realistic
+        # non-custom-name outcome once real data exists at all.
+        custom_name = data.get("name")
+        name = custom_name or (f"{model} ({self.serial})" if model else None)
+        if not any([sw_version, hw_version, model, manufacturer, name]):
             return
         device_registry = dr.async_get(self.hass)
         device_entry = device_registry.async_get_device(
@@ -493,6 +520,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             updates["sw_version"] = sw_version
         if hw_version and device_entry.hw_version != hw_version:
             updates["hw_version"] = hw_version
+        if model and device_entry.model != model:
+            updates["model"] = model
+        if manufacturer and device_entry.manufacturer != manufacturer:
+            updates["manufacturer"] = manufacturer
+        if name and device_entry.name != name:
+            updates["name"] = name
         if updates:
             device_registry.async_update_device(device_entry.id, **updates)
 
