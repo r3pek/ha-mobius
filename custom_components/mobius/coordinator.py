@@ -394,6 +394,19 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
         info["schedule_point_count"] = len(points)
         current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
         info["current_intensities"] = {ch.name: v for ch, v in current.items()}
+        # A real, confirmed need for this: the app applies a lunar-phase
+        # reduction (or not) on top of the raw schedule-interpolated
+        # value depending on both the current time (is this the
+        # dusk-to-night segment of the schedule) and a per-device toggle
+        # (lunar phases enabled) -- a mismatch against what the app
+        # itself displays can come from either one being misjudged, and
+        # those aren't distinguishable from the final intensity value
+        # alone. python-mobius's own get_current_light_intensities()
+        # already surfaces exactly this via its own .diagnostics, so
+        # just log it -- without this, that information exists for one
+        # call and is then gone, forcing a separate, manual diagnostic
+        # script every time this needs debugging again.
+        _LOGGER.debug("%s light intensity diagnostics: %s", device.serial, current.diagnostics)
         # Confirmed light-only via real device testing AND the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).

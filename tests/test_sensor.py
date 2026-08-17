@@ -6,6 +6,7 @@ canned data reuses real values captured from actual hardware during this
 project's development, for both a pump and a light.
 """
 
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,7 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank, MeshPeer, Model
+from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -42,6 +43,7 @@ REAL_LIGHT_INTENSITIES = {
 
 def _fake_pump_device():
     device = MagicMock()
+    device.serial = "00000000000001"
     device.get_device_info = AsyncMock(return_value={
         "model_raw": 42, "model": "VorTechMP40wG3QD", "manufacturer": "EcoTech Marine",
         "name": "MP40QD Right", "serial": "00000000000001",
@@ -72,6 +74,7 @@ def _fake_pump_device():
 
 def _fake_light_device():
     device = MagicMock()
+    device.serial = "FAKESERIAL0001"
     device.get_device_info = AsyncMock(return_value={
         "model_raw": 179, "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
         "name": "", "serial": "FAKESERIAL0001",
@@ -92,7 +95,12 @@ def _fake_light_device():
         key = MagicMock()
         key.name = name
         intensity_map[key] = value
-    device.get_current_light_intensities = AsyncMock(return_value=intensity_map)
+    device.get_current_light_intensities = AsyncMock(
+        return_value=LightIntensityResult(intensity_map, diagnostics={
+            "insolation_active": False, "is_night_segment": False,
+            "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
+        })
+    )
 
     # Deliberately WITHOUT "Product OS" -- matches the confirmed real-world
     # scenario this fixture is meant to represent: at least some real
@@ -351,6 +359,44 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     hardware = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_hardware_revision")
     assert hardware is not None
     assert hardware.state == "1"
+
+
+async def test_light_intensity_diagnostics_are_logged(hass, caplog):
+    """A real, confirmed need this addresses directly: whether the
+    app's own displayed intensity matches this library's own computed
+    value can depend on branches (is this the dusk-to-night segment,
+    is the lunar-phase toggle actually enabled on this specific
+    device) that are otherwise invisible from the final number alone
+    -- python-mobius's own get_current_light_intensities() already
+    surfaces exactly this via its own .diagnostics; this confirms it
+    actually reaches the logs, not just existing as an unused,
+    theoretically-available field."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: LIGHT_SERIAL, CONF_ADDRESS: LIGHT_ADDRESS}],
+        },
+        unique_id=LIGHT_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_light_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert f"{LIGHT_SERIAL} light intensity diagnostics:" in caplog.text
+    assert "'scalar_source': 'schedule_intensity'" in caplog.text
 
 
 async def test_entry_unload_removes_entities_and_disconnects(hass):
