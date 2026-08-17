@@ -1,0 +1,20 @@
+# Forgejo's own issue-config schema (identical to GitHub's) -- see
+# https://forgejo.org/docs/latest/user/repository/issue-pull-request-templates/#syntax-for-issue-config
+#
+# This repository's actual home IS this Forgejo instance --
+# code.r3pek.org/r3pek/ha-mobius is not a mirror of anything. Without
+# this file, Forgejo falls back to reading .github/ISSUE_TEMPLATE/
+# config.yml instead (confirmed: Forgejo checks .forgejo, then .gitea,
+# then .github, then docs, in that order, specifically to make
+# migrating from those services easier) -- but that file is written for
+# the OPPOSITE direction, telling github.com's own mirror visitors to
+# come file their issue here instead. Read from here, on here, it was
+# telling people already in the right place to redirect to themselves.
+#
+# blank_issues_enabled: true (Forgejo's own default too, stated
+# explicitly here so this file's own intent -- "nothing to override,
+# just needed to exist at all" -- doesn't need explaining again the
+# next time someone reads this) keeps the normal "Open a blank issue"
+# option available, and no contact_links are needed, since there's
+# nowhere else to point people to.
+blank_issues_enabled: true
