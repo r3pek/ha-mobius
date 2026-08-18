@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.4
 
 - Fixed a device's name sometimes staying stuck as "Mobius device
   (SERIAL)" even after it started working again.
 - Fixed the firmware version sensor showing "Unknown" for
   AquaIllumination-brand devices (AI Prime, AI Axis, and similar).
+- Now requires `python-mobius` 0.4.4 (still auto-installed, nothing to
+  do manually), for its own fixes to the device model list and to the
+  lunar-phase light intensity calculation.
 
 ## 0.3.3
 
