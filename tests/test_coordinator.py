@@ -888,6 +888,33 @@ class TestDeriveSwVersion:
         versions = {"Product OS": "", "Radio Firmware": "1.5.103"}
         assert derive_sw_version(versions) == "1.5.103"
 
+    def test_ai_axis_pump_uses_os_label(self):
+        """A real, reported production gap: AquaIllumination-brand
+        devices report an entirely different label set than EcoTech-
+        brand ones -- "OS" here, matching neither "Firmware" nor
+        "Product OS" -- so sw_version came back None despite
+        firmware_versions itself being fully populated (confirmed via
+        the sensor's own extra_state_attributes still showing every
+        individual firmware component correctly). Real values, from an
+        actual AI Axis 40."""
+        versions = {"OS": "2.3.15", "Bootloader": "1.5.0"}
+        assert derive_sw_version(versions) == "2.3.15"
+
+    def test_ai_prime_light_falls_back_to_qca4020_firmware_label(self):
+        """Same gap, the light-side variant: no "OS" label at all here
+        (that's pump-specific), so this needs its own fallback. Order
+        (OS checked first, in the priority list above this one) confirmed
+        directly against the app's own TDevice.json() -- its own
+        diagnostics-export method picks exactly this same priority for
+        its own single "main version" field, since a device only ever
+        reports one of the two labels, never both. Real values, from an
+        actual AI Prime 16HD."""
+        versions = {
+            "QCA4020Firmware": "1.5.69", "QCA4020FileSystem": "1.1.0",
+            "QCA4020M4F": "1.5.69", "QCA4020M0": "3.1.0", "QCA4020WLAN": "3.1.0",
+        }
+        assert derive_sw_version(versions) == "1.5.69"
+
 
 class TestDeriveHwVersion:
     """Requires python-mobius>=0.3.0's get_hardware_info() shape: Revision

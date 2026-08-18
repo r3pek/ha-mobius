@@ -8,6 +8,13 @@
   fix for sensors stuck "Unavailable" after a reboot. The device's
   proper name (and model/manufacturer) now gets corrected the moment
   real data actually arrives, not just captured once at initial setup.
+- Fixed the firmware version sensor showing "Unknown" for
+  AquaIllumination-brand devices (AI Prime, AI Axis, and similar) --
+  confirmed from a real user's own hardware -- even though every
+  individual firmware component was already showing correctly. These
+  report an entirely different label set than EcoTech-brand devices
+  ("OS" for pumps, "QCA4020Firmware" for QCA4020-radio lights), which
+  this integration's own priority list didn't yet know about.
 
 ## 0.3.3
 

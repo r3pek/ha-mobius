@@ -307,7 +307,26 @@ class MobiusConnectionManager:
 # every component) -- the first one found wins, matching "the most
 # main-firmware-like thing this device actually reported" rather than
 # picking arbitrarily among what's left.
-_SW_VERSION_LABEL_PRIORITY = ["Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio"]
+#
+# "OS" and "QCA4020Firmware" specifically: AquaIllumination-brand
+# devices (AI Prime/Axis/etc) use an entirely different label set from
+# EcoTech-brand ones, confirmed via a real, reported production gap --
+# neither one matched anything in this list, so derive_sw_version()
+# returned None for these devices despite firmware_versions itself
+# being fully populated (confirmed via the sensor's own extra_state_
+# attributes still showing every individual component correctly; only
+# the single "main" value came back empty). Order (OS before
+# QCA4020Firmware) confirmed directly against the app's own TDevice.
+# json() -- its own diagnostics-export method picks exactly this same
+# priority for its own single "v" (version) field. In practice these
+# two labels are mutually exclusive per device (a pump reports "OS", a
+# QCA4020-radio light reports "QCA4020Firmware", never both at once),
+# so appending rather than interleaving with the EcoTech-brand labels
+# above doesn't change behavior for any actual device either way.
+_SW_VERSION_LABEL_PRIORITY = [
+    "Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio",
+    "OS", "QCA4020Firmware",
+]
 
 
 def derive_sw_version(firmware_versions: dict) -> Optional[str]:
