@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New sensors for VorTech's own "Local Control"/"Led Auto Dim" and
+  Radion's own "Max Fan Speed"/"Fan Shutdown" settings, when a device
+  actually supports them.
+
 ## 0.3.4
 
 - Fixed a device's name sometimes staying stuck as "Mobius device

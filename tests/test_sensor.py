@@ -15,7 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult
+from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, AdvancedFeatures
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -52,6 +52,7 @@ def _fake_pump_device():
     device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
+    device.get_advanced_features = AsyncMock(return_value=None)
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
 
     fake_point = MagicMock()
@@ -81,6 +82,7 @@ def _fake_light_device():
         "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
     })
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VisualV1)
+    device.get_advanced_features = AsyncMock(return_value=None)
 
     channel_objs = []
     for name in REAL_LIGHT_CHANNELS:
@@ -658,3 +660,141 @@ class TestLightChannelIntensitySensorRounding:
     def test_returns_none_when_channel_not_present(self):
         sensor = self._make_sensor({})
         assert sensor.native_value is None
+
+
+# --------------------------------------------------------------------------
+# AdvancedFeatures sensors -- deliberately generic (per-attribute, not
+# per-device-type): each of the four is created independently based on
+# whether python-mobius's own get_advanced_features() actually returned a
+# value for it, never hardcoded to "pumps get these two, lights get those
+# two". See sensor.py's own _build_advanced_feature_entities() docstring.
+# --------------------------------------------------------------------------
+
+async def test_vortech_style_advanced_features_create_only_the_relevant_two(hass):
+    """A pump reporting only LocalControlEnabled/AutoDimTimeout (the
+    app's own VorTech-relevant subset) -- confirms MaxFanSpeed/
+    FanShutdownEnabled sensors are NOT created for it, since this
+    device never reported anything for those two."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+    fake_device.get_advanced_features = AsyncMock(return_value=AdvancedFeatures(
+        local_control_enabled=True, auto_dim_timeout=300,
+        max_fan_speed=None, fan_shutdown_enabled=None,
+    ))
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    local_control = hass.states.get("sensor.mp40qd_right_local_control")
+    assert local_control is not None
+    assert local_control.state == "True"
+
+    auto_dim = hass.states.get("sensor.mp40qd_right_led_auto_dim_timeout")
+    assert auto_dim is not None
+    assert auto_dim.state == "300"
+    assert auto_dim.attributes["unit_of_measurement"] == "s"
+
+    assert hass.states.get("sensor.mp40qd_right_max_fan_speed") is None
+    assert hass.states.get("sensor.mp40qd_right_fan_shutdown") is None
+
+
+async def test_radion_style_advanced_features_create_only_the_relevant_two(hass):
+    """The reverse combination -- a light reporting only MaxFanSpeed/
+    FanShutdownEnabled (the app's own Radion-relevant subset) --
+    confirms the same generic mechanism works for the opposite subset
+    with no device-type-specific code path."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: LIGHT_SERIAL, CONF_ADDRESS: LIGHT_ADDRESS}],
+        },
+        unique_id=LIGHT_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_light_device()
+    fake_device.get_advanced_features = AsyncMock(return_value=AdvancedFeatures(
+        local_control_enabled=None, auto_dim_timeout=None,
+        max_fan_speed=60.0, fan_shutdown_enabled=False,
+    ))
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    max_fan = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_max_fan_speed")
+    assert max_fan is not None
+    assert max_fan.state == "60.0"
+    assert max_fan.attributes["unit_of_measurement"] == "%"
+
+    fan_shutdown = hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_fan_shutdown")
+    assert fan_shutdown is not None
+    assert fan_shutdown.state == "False"
+
+    assert hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_local_control") is None
+    assert hass.states.get("sensor.radionxr15wg6pro_fakeserial0001_auto_dim_timeout") is None
+
+
+async def test_no_advanced_features_sensors_when_device_supports_none(hass):
+    """The existing _fake_pump_device()/_fake_light_device() fixtures
+    already mock get_advanced_features() to return None -- this just
+    makes that expectation explicit for one of them, rather than
+    relying only on the other tests never mentioning these sensors."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # Real entity ID suffixes (from the actual friendly names), not the
+    # dataclass field names -- using the field names here would still
+    # pass trivially (a wrong-but-also-nonexistent ID also returns None),
+    # without actually confirming the real entity is absent.
+    for key in ("local_control", "led_auto_dim_timeout", "max_fan_speed", "fan_shutdown"):
+        assert hass.states.get(f"sensor.mp40qd_right_{key}") is None

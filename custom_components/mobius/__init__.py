@@ -171,7 +171,7 @@ async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -
     # Local import: sensor.py itself imports from this module
     # (MobiusRuntimeData, tank_device_identifier) -- a top-level import
     # here would be circular.
-    from .sensor import _build_type_specific_entities
+    from .sensor import _build_type_specific_entities, _build_advanced_feature_entities
 
     new_entities = []
     for serial, coordinator in runtime.coordinators.items():
@@ -183,6 +183,14 @@ async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -
         if not support:
             continue  # still nothing to build from -- next cycle's own retry
         candidates = _build_type_specific_entities(coordinator, serial, device_info, support, data)
+        # Independent of "support" entirely -- see _build_advanced_feature_
+        # entities()'s own docstring for why gating this on pump/light type
+        # would reintroduce exactly the per-device-type hardcoding this was
+        # built to avoid. Still gated on the same "not support: continue"
+        # above, though -- that's really just a proxy for "has this device's
+        # coordinator ever completed a successful fetch at all", which
+        # get_advanced_features() itself depends on regardless.
+        candidates += _build_advanced_feature_entities(coordinator, serial, device_info, data)
         missing = [e for e in candidates if e.unique_id not in runtime.created_sensor_unique_ids]
         if missing:
             new_entities += missing

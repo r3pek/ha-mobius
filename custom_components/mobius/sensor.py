@@ -18,7 +18,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -372,6 +372,122 @@ class CalibrationSensor(MobiusEntity):
         return attrs
 
 
+class LocalControlEnabledSensor(MobiusEntity):
+    """
+    VorTech-relevant (per the app's own AdvancedFeatures screen), but
+    deliberately not gated to pumps here -- see coordinator.py's own
+    comment on why get_advanced_features() is called unconditionally
+    for every device, regardless of "support". Only added to a config
+    entry if this specific attribute was actually present at setup --
+    see async_setup_entry() below and _build_advanced_feature_entities().
+    """
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "local_control_enabled",
+            SensorEntityDescription(
+                key="local_control_enabled", translation_key="local_control_enabled", icon="mdi:gesture-tap",
+            ),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return super().available and features.get("local_control_enabled") is not None
+
+    @property
+    def native_value(self):
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return features.get("local_control_enabled")
+
+
+class AutoDimTimeoutSensor(MobiusEntity):
+    """
+    VorTech-relevant (the app's own "Led Auto Dim" setting) -- seconds
+    until the device's own status LED dims, per the app's own preset
+    options (0 = "Always On"/never dims). See python-mobius's own
+    AdvancedFeatures docstring for the confirmed preset value list.
+    """
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "auto_dim_timeout",
+            SensorEntityDescription(
+                key="auto_dim_timeout", translation_key="auto_dim_timeout", icon="mdi:led-off",
+                native_unit_of_measurement=UnitOfTime.SECONDS,
+            ),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return super().available and features.get("auto_dim_timeout") is not None
+
+    @property
+    def native_value(self):
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return features.get("auto_dim_timeout")
+
+
+class MaxFanSpeedSensor(MobiusEntity):
+    """
+    Radion-relevant (the app's own "Max Fan Speed" setting) -- already
+    converted to percent by python-mobius's own get_advanced_features(),
+    including its own -1/"unlimited" sentinel handling (see that
+    method's own docstring) -- this entity never sees the raw permille
+    encoding or the sentinel at all.
+    """
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "max_fan_speed",
+            SensorEntityDescription(
+                key="max_fan_speed", translation_key="max_fan_speed", icon="mdi:fan",
+                native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
+            ),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return super().available and features.get("max_fan_speed") is not None
+
+    @property
+    def native_value(self):
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return features.get("max_fan_speed")
+
+
+class FanShutdownEnabledSensor(MobiusEntity):
+    """Radion-relevant (the app's own "Fan Shutdown" setting)."""
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "fan_shutdown_enabled",
+            SensorEntityDescription(
+                key="fan_shutdown_enabled", translation_key="fan_shutdown_enabled", icon="mdi:fan-off",
+            ),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return super().available and features.get("fan_shutdown_enabled") is not None
+
+    @property
+    def native_value(self):
+        features = (self.coordinator.data or {}).get("advanced_features") or {}
+        return features.get("fan_shutdown_enabled")
+
+
 class FirmwareVersionSensor(MobiusEntity):
     """
     Diagnostic: the same headline value already shown as sw_version on
@@ -659,6 +775,30 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
     return []
 
 
+def _build_advanced_feature_entities(coordinator, serial, device_info, data) -> list[SensorEntity]:
+    """The subset of AdvancedFeatures entities this specific device's
+    CURRENT data actually supports -- split out the same way as
+    _build_type_specific_entities() above, and for the same reason
+    (reused by _async_ensure_sensors_exist() later). Deliberately takes
+    no "support" parameter at all, unlike that function -- these four
+    attributes are checked independently of pump/light type entirely
+    (see coordinator.py's own comment on why get_advanced_features() is
+    called unconditionally), so gating entity creation on "support"
+    here would reintroduce exactly the per-device-type hardcoding this
+    was built to avoid."""
+    features = data.get("advanced_features") or {}
+    entities: list[SensorEntity] = []
+    if features.get("local_control_enabled") is not None:
+        entities.append(LocalControlEnabledSensor(coordinator, serial, device_info))
+    if features.get("auto_dim_timeout") is not None:
+        entities.append(AutoDimTimeoutSensor(coordinator, serial, device_info))
+    if features.get("max_fan_speed") is not None:
+        entities.append(MaxFanSpeedSensor(coordinator, serial, device_info))
+    if features.get("fan_shutdown_enabled") is not None:
+        entities.append(FanShutdownEnabledSensor(coordinator, serial, device_info))
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -733,6 +873,8 @@ async def async_setup_entry(
 
         type_specific = _build_type_specific_entities(coordinator, serial, device_info, support, data)
         entities += type_specific
+        advanced_features = _build_advanced_feature_entities(coordinator, serial, device_info, data)
+        entities += advanced_features
         # Both consulted later by _async_ensure_sensors_exist() (in
         # __init__.py) -- see that function's own docstring for why it
         # needs to exist at all. sensor_device_infos specifically so it
@@ -740,7 +882,7 @@ async def async_setup_entry(
         # tank_identifier logic just to build one when healing a device
         # whose data wasn't ready yet the first time this ran.
         runtime.sensor_device_infos[serial] = device_info
-        runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific)
+        runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific + advanced_features)
 
     # The tank-level prefix sensor, attached to the synthetic tank device
     # itself, not any one real device -- same condition as via_device

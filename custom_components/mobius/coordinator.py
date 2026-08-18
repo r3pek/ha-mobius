@@ -69,6 +69,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import asdict
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -441,6 +442,18 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
                 p.name: (v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v))
                 for p, v in block.pump.params.items()
             }
+
+    # Deliberately unconditional -- NOT gated to LIGHT_PRIMITIVES/
+    # PUMP_PRIMITIVES the way most of the above is. The app's own
+    # AdvancedFeatures screen covers VorTech (LocalControlEnabled/
+    # AutoDimTimeout) and Radion (MaxFanSpeed/FanShutdownEnabled) under
+    # one umbrella, gated per-attribute rather than per-device-type (see
+    # python-mobius's own get_advanced_features() docstring for the full
+    # confirmation) -- so this is called for every device, regardless of
+    # what "support" ended up being above, and simply returns None for
+    # whichever devices support none of the four underlying attributes.
+    features = await device.get_advanced_features()
+    info["advanced_features"] = asdict(features) if features else None
 
     return info
 
