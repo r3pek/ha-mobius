@@ -2,19 +2,10 @@
 
 ## Unreleased
 
-- Fixed a device's own name staying stuck at the generic "Mobius
-  device (SERIAL)" placeholder forever, even after it recovered and
-  started reporting real data again -- a side effect of the previous
-  fix for sensors stuck "Unavailable" after a reboot. The device's
-  proper name (and model/manufacturer) now gets corrected the moment
-  real data actually arrives, not just captured once at initial setup.
+- Fixed a device's name sometimes staying stuck as "Mobius device
+  (SERIAL)" even after it started working again.
 - Fixed the firmware version sensor showing "Unknown" for
-  AquaIllumination-brand devices (AI Prime, AI Axis, and similar) --
-  confirmed from a real user's own hardware -- even though every
-  individual firmware component was already showing correctly. These
-  report an entirely different label set than EcoTech-brand devices
-  ("OS" for pumps, "QCA4020Firmware" for QCA4020-radio lights), which
-  this integration's own priority list didn't yet know about.
+  AquaIllumination-brand devices (AI Prime, AI Axis, and similar).
 
 ## 0.3.3
 
