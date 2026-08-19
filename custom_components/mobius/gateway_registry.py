@@ -146,18 +146,17 @@ class PanGroup:
     # on to fail GATEWAY_FAILURE_THRESHOLD times, since the last time
     # ANY gateway actually succeeded (see record_gateway_success(), which
     # clears this) or since this set grew to cover every member (see
-    # _best_candidate()'s own handling of that case). A REAL, CONFIRMED
-    # production bug lived here before this field existed: promotion
-    # always just picked the single best-RSSI member excluding only the
-    # one CURRENTLY failing -- for a tank where two devices both have
-    # much better RSSI than the other two, that meant failures ping-
-    # ponged forever between exactly those two best-RSSI devices (fail,
-    # promote the other; it fails too, promote back to the first one,
-    # since excluding only "the one failing right now" doesn't stop it
-    # being immediately re-eligible) -- the other two members were never
-    # tried even once, however many hours this went on for. This set is
-    # what actually breaks that cycle: every member gets a real turn
-    # before anyone is reconsidered.
+    # _best_candidate()'s own handling of that case). This set is what
+    # prevents promotion from just picking the single best-RSSI member
+    # excluding only the one CURRENTLY failing -- for a tank where two
+    # devices both have much better RSSI than the other two, that would
+    # mean failures ping-pong forever between exactly those two
+    # best-RSSI devices (fail, promote the other; it fails too, promote
+    # back to the first one, since excluding only "the one failing
+    # right now" doesn't stop it being immediately re-eligible), with
+    # the other two members never getting tried at all. This set breaks
+    # that cycle: every member gets a real turn before anyone is
+    # reconsidered.
     recently_failed_gateways: set[str] = field(default_factory=set)
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)

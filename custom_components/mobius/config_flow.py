@@ -241,11 +241,10 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # info across multiple, rotating advertisement packets --
             # name plus a 128-bit service UUID alone already fills 29 of
             # the 31 bytes a legacy advertisement allows, leaving no room
-            # for manufacturer data in the same packet. An earlier
-            # version of this code assumed Home Assistant would simply
-            # re-trigger this step once a later, fuller advertisement
-            # came in -- confirmed via Home Assistant's own documentation
-            # that this isn't reliable: match history is keyed on which
+            # for manufacturer data in the same packet. Home Assistant's own
+            # match-history behavior means this step doesn't reliably
+            # re-trigger on its own once a later, fuller advertisement
+            # arrives: match history is keyed on which
             # fields/UUIDs have been seen for an address at all, not
             # whether their content has since changed, so a later
             # advertisement carrying manufacturer data for the first time
@@ -345,9 +344,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # template in strings.json -- see below), and if "name" isn't
             # present at all, that whole mechanism is silently ignored --
             # not just left blank, ignored entirely, falling back to the
-            # bare integration name ("Mobius"/"Mobius") instead. Confirmed
-            # via a real screenshot showing exactly that fallback after an
-            # earlier version of this dropped "name" from here.
+            # bare integration name ("Mobius"/"Mobius") instead.
             self.context["title_placeholders"] = {
                 "count": str(len(tank.peers)),
                 "devices": _device_list_for_display(tank),
@@ -374,25 +371,21 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         this address, which by the time the confirm screen renders is
         usually more complete, and use it if it's actually better.
 
-        A REAL, CONFIRMED bug lived here: an earlier version of this
-        function computed old_has_data/new_has_data purely to decide
-        whether to log a debug message, then unconditionally overwrote
-        self._discovery_info with the new snapshot regardless of that
-        comparison -- meaning a perfectly good initial snapshot (WITH
-        manufacturer data) could get silently downgraded to a WORSE one
-        (WITHOUT it), if HA's Bluetooth cache happened to have a more
-        recent, but data-less, advertisement/scan-response packet for
-        that same address at that exact moment (real BLE devices often
-        rotate between several different advertisement payloads, not
-        all of which necessarily carry the same data every time). This
-        directly explains a real screenshot showing "Mobius device"/
-        "Mobius" instead of a real model/serial: the confirm screen ran
-        AFTER a connection attempt (which itself takes real time,
-        giving the device's advertisement plenty of opportunity to
-        rotate to a different payload in the meantime), then this
-        function threw away the still-perfectly-good original snapshot
-        for a worse one. Now only overwrites when the new snapshot is
-        actually at least as good.
+        Only overwrites self._discovery_info with the new snapshot when
+        it's actually at least as good (comparing whether each snapshot
+        has manufacturer data at all) -- a perfectly good initial
+        snapshot (WITH manufacturer data) must never be silently
+        downgraded to a worse one (WITHOUT it), which real BLE devices
+        can otherwise cause: they often rotate between several
+        different advertisement payloads, not all of which necessarily
+        carry the same data every time, so HA's Bluetooth cache can have
+        a more recent, but data-less, advertisement/scan-response packet
+        for that same address at the exact moment this runs. This
+        matters concretely for a confirm screen that would otherwise
+        show "Mobius device"/"Mobius" instead of a real model/serial:
+        the confirm screen runs AFTER a connection attempt (which itself
+        takes real time, giving the device's advertisement plenty of
+        opportunity to rotate to a different payload in the meantime).
         """
         assert self._discovery_info is not None
         latest = async_last_service_info(self.hass, self._discovery_info.address, connectable=True)

@@ -22,7 +22,7 @@ CONF_SERIAL = "serial"
 # read once at initial setup.
 CONF_PAN_ID = "pan_id"
 
-# One unified polling tier, not the previous fast/slow split -- with a
+# One unified polling tier -- with a
 # persistent connection (direct for the gateway, relayed-but-still-
 # persistent for everyone else) and cached mesh addresses, a single read
 # covering both status and schedule data each cycle is fast enough not to
@@ -188,15 +188,14 @@ TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 # CONF_DEVICES is itself a dict with CONF_SERIAL/CONF_ADDRESS keys (reuses
 # the same two constants a single device's own data already used before
 # this integration moved to tank-level entries). Deliberately does NOT
-# carry python-mobius's own MeshPeer.age -- an earlier version of this
-# integration stored and displayed it, but real hardware testing (two
+# carry python-mobius's own MeshPeer.age: real hardware testing (two
 # consecutive discover_tank() scans against the same gateway, nothing
 # else changing) showed values that both increased AND decreased between
 # runs for the same physical device, disproving any time-since-last-seen
 # interpretation. Combined with no actual evidence anywhere for what the
-# field really represents (the name itself was always just a plausible
-# guess, never confirmed against real app/decompiled source), there was
-# nothing honest left to display -- removed rather than kept unused.
+# field really represents (the name itself is just a plausible
+# guess, never confirmed against real app/decompiled source), there's
+# nothing honest left to display -- excluded entirely rather than shown unused.
 CONF_DEVICES = "devices"
 
 # Not a standard homeassistant.const constant -- the tank's own confirmed,

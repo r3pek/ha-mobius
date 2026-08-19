@@ -5,8 +5,7 @@ gateway_registry.GatewayRegistry rather than each device holding its own
 direct connection.
 
 One coordinator per device, one ~30s poll cycle, fetching both status
-and schedule data together -- see const.py's POLL_INTERVAL for why this
-replaced the previous fast/slow two-tier split.
+and schedule data together.
 
 ## Gateway vs. relayed reads
 
@@ -32,7 +31,7 @@ the coordinator keeps returning its last-known-good data for up to
 MARK_UNAVAILABLE_AFTER (const.py) of consecutive failures before actually
 raising UpdateFailed. Only a genuinely sustained outage results in
 entities going unavailable. Reconnection itself isn't retried within the
-same poll cycle (unlike an earlier version of this module) -- a failed
+same poll cycle -- a failed
 read marks the connection disconnected so the NEXT ~30s cycle reconnects
 fresh, and the grace period covers the gap in between; this is simpler
 than an immediate in-cycle retry and, given the poll interval is already
@@ -291,17 +290,10 @@ class MobiusConnectionManager:
 #
 # "Firmware" first, not "Product OS" -- confirmed by directly comparing
 # against what the official app itself displays for a real Radion light:
-# once python-mobius 0.2.1 fixed a multi-block response truncation bug
-# (see its CHANGELOG -- a single get_firmware_versions() response can
-# legitimately split across multiple blocks, and earlier versions of
-# that library silently returned only the first), the FULL firmware
-# dict became visible, including a "Firmware" label (FirmwareType.
-# LEDClusterMicro/Esp32*Firmware -- the light's actual LED-driver
-# microcontroller) that hadn't been visible before, and it -- not
+# a "Firmware" label (FirmwareType.LEDClusterMicro/Esp32*Firmware --
+# the light's actual LED-driver microcontroller) -- not
 # "Product OS" (FirmwareType.MainMicroOS) -- is what the app treats as
-# primary. An earlier version of this comment assumed "Product OS" was
-# always the right first choice; that assumption predated having the
-# full picture and turned out to be backwards for at least this device.
+# primary.
 #
 # Falls through this list rather than assuming any one label is always
 # present (some devices, or some firmware versions, may not report
@@ -317,8 +309,8 @@ class MobiusConnectionManager:
 # being fully populated (confirmed via the sensor's own extra_state_
 # attributes still showing every individual component correctly; only
 # the single "main" value came back empty). Order (OS before
-# QCA4020Firmware) confirmed directly against the app's own TDevice.
-# json() -- its own diagnostics-export method picks exactly this same
+# QCA4020Firmware) confirmed directly against the app's own
+# diagnostics-export logic, which picks exactly this same
 # priority for its own single "v" (version) field. In practice these
 # two labels are mutually exclusive per device (a pump reports "OS", a
 # QCA4020-radio light reports "QCA4020Firmware", never both at once),
@@ -355,8 +347,7 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
     already a plain int (no confirmed enum meaning exists for it, unlike
     Color/ProductType/RadioType/MotorType, which that version decodes
     into their own confirmed label strings) -- just stringified here, not
-    decoded from raw bytes the way an earlier version of this function
-    needed to.
+    decoded from raw bytes.
     """
     raw = hardware_info.get("Revision")
     if raw is None:
@@ -366,9 +357,9 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
 
 async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     """
-    The actual read logic, merging what used to be two separate tiers
-    (status: identity + live telemetry; schedule: programmed schedule +
-    firmware version) into one. `device` can be a directly-connected
+    The actual read logic, covering both status (identity + live
+    telemetry) and schedule (programmed schedule + firmware version) in
+    one pass. `device` can be a directly-connected
     MobiusDevice or a RelayedMobiusDevice -- identical either way, since
     RelayedMobiusDevice implements the same interface transparently.
     """

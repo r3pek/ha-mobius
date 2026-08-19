@@ -533,11 +533,7 @@ class HardwareRevisionSensor(MobiusEntity):
     "White"/"VorTech"/"QCA4020"/"VorTech MP40 G3" -- each is itself a
     confirmed enum with confirmed labels, see that library's
     mobius.constants), and Revision/Segments as plain integers -- used
-    directly here, not re-decoded. An earlier version of this class
-    manually decoded every field as a raw little-endian integer, which
-    was correct only for Revision/Segments and actively wrong for the
-    other four once python-mobius started returning real label strings
-    instead of raw bytes for them.
+    directly here, not re-decoded.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -579,14 +575,13 @@ class MeshAddressSensor(MobiusEntity):
     two becoming available on slightly different schedules.
 
     Also carries this device's own "last seen on the mesh" timestamp as
-    an attribute (last_seen) -- an earlier version of this integration
-    surfaced that as its own, separate sensor entity; folded in here
-    instead, since the two are closely related diagnostic facts about
-    the same underlying mesh connectivity, not independently meaningful
-    enough to justify a whole extra entity each. Refreshed on the exact
-    same schedule as the standalone sensor was (every poll cycle, for
-    every device -- see coordinator.py's own _fetch()), just read from
-    coordinator.data here rather than the registry directly, since
+    an attribute (last_seen), folded in here rather than as its own
+    separate sensor entity, since the two are closely related diagnostic
+    facts about the same underlying mesh connectivity, not independently
+    meaningful enough to justify a whole extra entity each. Refreshed on
+    the same schedule as every other poll-driven sensor (every poll
+    cycle, for every device -- see coordinator.py's own _fetch()), read
+    directly from coordinator.data here rather than the registry, since
     that's where it's actually written each cycle.
     """
 
@@ -611,8 +606,7 @@ class MeshAddressSensor(MobiusEntity):
         # A real Thread mesh-local IPv6 address (16 raw bytes, confirmed
         # in python-mobius's own wire-format documentation) -- format it
         # as one (standard colon-separated, zero-compressed notation via
-        # the stdlib ipaddress module), not the flat, unrecognizable hex
-        # string an earlier version of this sensor showed instead.
+        # the stdlib ipaddress module), not raw hex.
         return str(ipaddress.IPv6Address(member.mesh_address))
 
     @property
@@ -803,8 +797,8 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up sensors for a Mobius config entry -- one or more devices
-    now (see const.py's own module-level docstring for the CONF_DEVICES
-    shape this mirrors), not always exactly one the way it used to be."""
+    (see const.py's own module-level docstring for the CONF_DEVICES
+    shape this mirrors)."""
     runtime: MobiusRuntimeData = entry.runtime_data
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
     pan_id = entry.data.get(CONF_PAN_ID)

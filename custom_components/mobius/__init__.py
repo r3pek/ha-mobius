@@ -129,28 +129,28 @@ def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex:
 
 async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
-    A REAL, CONFIRMED production bug this addresses: sensor.py's own
-    async_setup_entry() decides which type-specific entities to create
-    for a device (pump vs light -- OperationState/MotorSpeed/etc, or
-    LightChannelIntensity/Calibration) from a ONE-TIME snapshot of that
-    device's coordinator.data, taken right at setup. For a relayed
-    (non-gateway) member of a tank specifically, that snapshot can still
-    be empty at that exact moment: its own first read deliberately uses
-    a soft, non-blocking async_refresh() rather than the gateway's own
+    sensor.py's own async_setup_entry() decides which type-specific
+    entities to create for a device (pump vs light --
+    OperationState/MotorSpeed/etc, or LightChannelIntensity/
+    Calibration) from a ONE-TIME snapshot of that device's
+    coordinator.data, taken right at setup. For a relayed (non-gateway)
+    member of a tank specifically, that snapshot can still be empty at
+    that exact moment: its own first read deliberately uses a soft,
+    non-blocking async_refresh() rather than the gateway's own
     blocking, retried async_config_entry_first_refresh() (so one
     unreachable device can never hold up the rest of the tank's setup --
-    see this module's own async_setup_entry() for the full story of the
-    real bug that fixed). If that one soft attempt happens to fail -- a
-    relayed read on a freshly-starting integration, especially right
-    after a Home Assistant restart when the Bluetooth cache itself may
-    not be warm yet, is exactly the kind of thing confirmed to
-    transiently fail once -- the type-specific entities for that device
-    simply never get created for this session at all, even though every
-    later poll succeeds fine. The always-created generic entities
-    (support tier, error state, etc) recover on their own once the
-    coordinator succeeds, since they already exist and only their own
-    `available` needs to flip; these don't, since entity creation itself
-    only ever happens once per session.
+    see this module's own async_setup_entry()). If that one soft
+    attempt happens to fail -- a relayed read on a freshly-starting
+    integration, especially right after a Home Assistant restart when
+    the Bluetooth cache itself may not be warm yet, is exactly the kind
+    of thing that can transiently fail once -- the type-specific
+    entities for that device simply never get created for this session
+    at all, even though every later poll succeeds fine. The
+    always-created generic entities (support tier, error state, etc)
+    recover on their own once the coordinator succeeds, since they
+    already exist and only their own `available` needs to flip; these
+    don't, since entity creation itself only ever happens once per
+    session.
 
     The fix is this: periodically check whether each known device's
     CURRENT data would produce any entities beyond what was already
@@ -235,19 +235,18 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     3. MAINTENANCE, once a gateway does exist: every known member's own
        mesh address and mesh-last-seen data gets refreshed from this
        same read, opportunistically -- not just the migration check this
-       used to be limited to. A REAL, CONFIRMED production issue is what
-       this addresses: a device whose own address was never successfully
-       discovered had no way back in on its own, since nothing kept
-       retrying it. Deliberately best-effort per member (a peer simply
-       not reported this particular round is left as whatever was
-       already cached, not treated as an error) -- matching the rest of
-       this function's own "one bad round proves nothing, the next
-       scheduled run is the retry" philosophy, not something that needs
-       every member to succeed at once to be worth doing at all.
+       is otherwise scoped to. This is what gets a device whose own
+       address was never successfully discovered back in on its own,
+       since nothing else keeps retrying it. Deliberately best-effort per
+       member (a peer simply not reported this particular round is left
+       as whatever was already cached, not treated as an error) --
+       matching the rest of this function's own "one bad round proves
+       nothing, the next scheduled run is the retry" philosophy, not
+       something that needs every member to succeed at once to be worth
+       doing at all.
     4. ENSURING EVERY DEVICE'S OWN SENSOR ENTITIES ACTUALLY EXIST -- see
-       _async_ensure_sensors_exist()'s own docstring for the real, dead
-       simple production bug this addresses (an entity that was never
-       created at setup time, for a device whose own data legitimately
+       _async_ensure_sensors_exist()'s own docstring (an entity that was
+       never created at setup time, for a device whose own data legitimately
        wasn't ready yet at that exact moment, never gets a second chance
        otherwise). Deliberately independent of the gateway-connection
        logic below -- this only needs each device's own coordinator.data,
@@ -453,20 +452,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mlprefix_hex is not None and len(devices) > 1:
         _register_tank_device(hass, entry, mlprefix_hex, len(devices))
 
-    # A REAL, CONFIRMED PRODUCTION BUG lived in an earlier version of
-    # this function: coordinator.async_config_entry_first_refresh() was
-    # awaited in a loop, once per device. That method's whole contract
-    # is "raise ConfigEntryNotReady if this fails" -- fine for the ONE
-    # coordinator a typical integration has, but here it meant ANY
-    # single device out of several failing (even the very last one)
-    # raised out of this function entirely, aborting the WHOLE entry's
-    # setup -- discarding every other device that had already
-    # succeeded moments earlier. Confirmed via a real log: a tank with
-    # 4 devices repeatedly failed to load at all, a DIFFERENT device
-    # timing out on each retry, because every retry re-ran this same
-    # loop from the very start.
-    #
-    # Fixed with a two-phase setup: first, PROBE devices (strongest
+    # Two-phase setup, deliberately: first, PROBE devices (strongest
     # RSSI first, not just CONF_DEVICES' own stored order, so a single
     # consistently-unreachable device is never retried forever while a
     # perfectly reachable one sits right there unused) via
@@ -483,24 +469,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # it can never block the rest of the tank. That device's own
     # entities simply start unavailable and retry on the normal poll
     # cycle, exactly like any other transient failure after setup.
+    # Keeping the ConfigEntryNotReady contract scoped to just the ONE
+    # gateway-probe coordinator, rather than looping it across every
+    # device in the tank, means one unreachable device out of several
+    # can never abort the whole entry's setup and discard every other
+    # device that already succeeded.
     #
     # Uses discover_tank_for_serial() for the probe, not the narrower
-    # discover_mesh_address() an earlier version of this used -- a real,
-    # unnecessary inefficiency: that one connection already learns the
+    # discover_mesh_address(): that one connection already learns the
     # WHOLE tank's peer list, with every peer's own mesh address
     # (discover_tank_for_serial() calls python-mobius's own
     # discover_tank(), which reads NetworkedThreadDevices over the
     # Thread mesh -- the same CoAP-relayed mechanism this integration's
     # own relay reads already depend on), not just the probed device's
-    # own address. An earlier version of this function ignored that and
-    # went on to open a SEPARATE, direct BLE connection to every OTHER
-    # device in the tank too, just to learn each one's address
-    # individually -- on a brand-new tank, that meant N+1 total
-    # connections during setup for an N-device tank, when the mesh
-    # already handed us N-1 of those addresses for free from the first
-    # one. Now only a genuinely MISSING peer (not reported at all by the
-    # probed device's own mesh view, however that happened) falls back
-    # to a direct per-device connection.
+    # own address. Now only a genuinely MISSING peer (not reported at
+    # all by the probed device's own mesh view, however that happened)
+    # falls back to a direct per-device connection, rather than opening
+    # a separate, direct BLE connection to every device in the tank
+    # just to learn each one's own address individually.
     rssi_by_serial = {d[CONF_SERIAL]: _current_rssi(hass, d[CONF_SERIAL]) for d in devices}
     devices_by_rssi = sorted(
         devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
