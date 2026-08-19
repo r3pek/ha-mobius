@@ -301,21 +301,17 @@ class MobiusConnectionManager:
 # main-firmware-like thing this device actually reported" rather than
 # picking arbitrarily among what's left.
 #
-# "OS" and "QCA4020Firmware" specifically: AquaIllumination-brand
-# devices (AI Prime/Axis/etc) use an entirely different label set from
-# EcoTech-brand ones, confirmed via a real, reported production gap --
-# neither one matched anything in this list, so derive_sw_version()
-# returned None for these devices despite firmware_versions itself
-# being fully populated (confirmed via the sensor's own extra_state_
-# attributes still showing every individual component correctly; only
-# the single "main" value came back empty). Order (OS before
-# QCA4020Firmware) confirmed directly against the app's own
-# diagnostics-export logic, which picks exactly this same
-# priority for its own single "v" (version) field. In practice these
-# two labels are mutually exclusive per device (a pump reports "OS", a
-# QCA4020-radio light reports "QCA4020Firmware", never both at once),
-# so appending rather than interleaving with the EcoTech-brand labels
-# above doesn't change behavior for any actual device either way.
+# "OS" and "QCA4020Firmware" specifically: kept as a fallback for the
+# model=None/unrecognized-model case, where get_firmware_versions()
+# itself has no manufacturer to key off and falls back to the raw
+# FirmwareType enum name -- these two are what AquaIllumination-brand
+# devices (AI Prime/Axis/etc) reported as their raw enum names before
+# python-mobius gained proper AquaIllumination-brand labels
+# (FIRMWARE_TYPE_LABELS_NON_ETM), which map "OS" -> "Product OS" and
+# "QCA4020Firmware" -> "Firmware" -- both already earlier in this same
+# list, so a device with a recognized model now matches one of those
+# instead and never reaches these two at all. Harmless to keep for the
+# unrecognized-model fallback path.
 _SW_VERSION_LABEL_PRIORITY = [
     "Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio",
     "OS", "QCA4020Firmware",
