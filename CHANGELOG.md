@@ -5,6 +5,14 @@
 - New sensors for VorTech's own "Local Control"/"Led Auto Dim" and
   Radion's own "Max Fan Speed"/"Fan Shutdown" settings, when a device
   actually supports them.
+- Each tank's clock now gets nudged back to the current time once an
+  hour, via one write to its own current gateway -- confirmed against
+  real hardware to propagate to the rest of that tank's mesh too, not
+  just the device written to. Fixes devices occasionally losing sync
+  with each other (symptom: lights turning on/off at the wrong time
+  relative to the rest of the tank). Requires an unreleased
+  python-mobius with set_time_to_now() -- see that project's own
+  documentation/09-thread-coap-relay.md for the full confirmation.
 
 ## 0.3.4
 

@@ -24,7 +24,8 @@ from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
 
 from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
-    TANK_REVALIDATION_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS, SOFT_REFRESH_RETRY_DELAY,
+    TANK_REVALIDATION_INTERVAL, TANK_TIME_SYNC_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS,
+    SOFT_REFRESH_RETRY_DELAY,
 )
 from .coordinator import (
     MobiusDeviceCoordinator, _find_in_bluetooth_cache, discover_mesh_address, discover_tank_for_serial,
@@ -399,6 +400,69 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         await _merge_device_into_entry(hass, entry, peer.serial)
 
 
+async def _async_sync_tank_time(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
+    """
+    Periodic per-entry write, run every TANK_TIME_SYNC_INTERVAL -- calls
+    MobiusDevice.set_time_to_now() (Epoch, reserved-byte group=1) once
+    against this tank's own current gateway. python-mobius's own
+    docstring for that method has the full confirmation, but in short:
+    a single write appears to genuinely propagate the new time to every
+    OTHER device on the same mesh, confirmed via real hardware testing
+    -- so this deliberately writes ONCE per tank, to whichever device
+    is currently the gateway, matching the app's own approach, not
+    every device individually.
+
+    Mirrors _async_revalidate_tank()'s own resolution pattern exactly
+    (registry lookup, pan_id, group) but is otherwise fully independent
+    of it -- this doesn't touch mesh membership, sensor entities, or
+    connection health checks, just the one write. Reuses the tank's own
+    existing gateway connection (group.gateway_connection) -- no new
+    BLE connect/disconnect cycle in the common case, since the gateway
+    is already connected most of the time for its own regular polling.
+
+    Runs for a single-device ("ad-hoc") tank too, not just genuine
+    multi-tank setups -- a lone device's own clock can still drift on
+    its own, with nothing else to propagate from/to, but that's still
+    worth fixing on its own.
+
+    A failed write (no gateway currently available, connection failure,
+    device rejected the write) is logged and skipped, not retried
+    immediately -- the next scheduled run acts as its own retry,
+    matching the same "one bad round proves nothing" philosophy
+    _async_revalidate_tank() itself already uses.
+    """
+    registry: GatewayRegistry | None = hass.data.get(DOMAIN, {}).get("gateway_registry")
+    if registry is None:
+        return
+    pan_id = entry.data.get(CONF_PAN_ID)
+    if pan_id is None:
+        return
+    group = registry.group(pan_id)
+    if group is None or group.gateway_serial is None:
+        _LOGGER.debug(
+            "Tank %r: no gateway currently available for time sync this cycle "
+            "-- will retry next scheduled run", entry.title,
+        )
+        return
+
+    _LOGGER.debug(
+        "Tank %r: syncing time via gateway %s (pan_id %#06x)",
+        entry.title, group.gateway_serial, pan_id,
+    )
+    try:
+        device = await group.gateway_connection.ensure_connected()
+        await device.set_time_to_now()
+    except Exception as err:
+        _LOGGER.warning(
+            "Tank %r: time sync via gateway %s failed (%s) -- will retry next "
+            "scheduled run", entry.title, group.gateway_serial, err,
+        )
+        return
+    _LOGGER.debug(
+        "Tank %r: time sync via gateway %s succeeded", entry.title, group.gateway_serial,
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Mobius from a config entry -- one Thread mesh/"tank" (see
     gateway_registry.py's own docstring for why pan_id is the
@@ -644,6 +708,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             lambda now: hass.create_task(_async_revalidate_tank(hass, entry, now)),
             TANK_REVALIDATION_INTERVAL,
+        )
+    )
+
+    # Same async_on_unload()/hass.create_task() reasoning as immediately
+    # above -- a separate, independent periodic task (see
+    # _async_sync_tank_time()'s own docstring), not a job folded into
+    # the revalidation cycle above, since it runs on its own, much
+    # longer interval.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            lambda now: hass.create_task(_async_sync_tank_time(hass, entry, now)),
+            TANK_TIME_SYNC_INTERVAL,
         )
     )
 

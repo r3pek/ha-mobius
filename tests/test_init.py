@@ -1301,10 +1301,164 @@ async def test_setup_entry_registers_periodic_revalidation(hass):
         mock_track_interval.return_value = lambda: None
         await hass.config_entries.async_setup(entry.entry_id)
 
-    assert mock_track_interval.call_count == 1
-    call_args = mock_track_interval.call_args
-    assert call_args[0][0] is hass
-    assert call_args[0][2] == TANK_REVALIDATION_INTERVAL
+    # Two independent periodic tasks now -- see _async_sync_tank_time()'s
+    # own docstring for why that one is separate rather than folded into
+    # revalidation.
+    assert mock_track_interval.call_count == 2
+    revalidation_call = next(
+        c for c in mock_track_interval.call_args_list if c[0][2] == TANK_REVALIDATION_INTERVAL
+    )
+    assert revalidation_call[0][0] is hass
+
+
+async def test_setup_entry_registers_periodic_time_sync(hass):
+    """Same confirmation as test_setup_entry_registers_periodic_revalidation
+    above, for the separate time-sync periodic task."""
+    from custom_components.mobius.const import TANK_TIME_SYNC_INTERVAL
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    fake_device = _fake_pump_device()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=fake_device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        "custom_components.mobius.async_track_time_interval",
+    ) as mock_track_interval:
+        mock_track_interval.return_value = lambda: None
+        await hass.config_entries.async_setup(entry.entry_id)
+
+    time_sync_call = next(
+        c for c in mock_track_interval.call_args_list if c[0][2] == TANK_TIME_SYNC_INTERVAL
+    )
+    assert time_sync_call[0][0] is hass
+
+
+# --------------------------------------------------------------------------
+# _async_sync_tank_time() -- the hourly per-tank time-sync write. See its
+# own docstring for the full reasoning; these tests confirm it actually
+# writes via the tank's own gateway connection, fails soft (log and skip,
+# no raise) on every real-world failure mode, and runs for a single-device
+# tank exactly the same way as a multi-device one.
+# --------------------------------------------------------------------------
+
+from custom_components.mobius import _async_sync_tank_time
+
+
+async def test_sync_tank_time_writes_via_the_gateway_connection(hass):
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    fake_device = group.gateway_connection._device
+    fake_device.set_time_to_now = AsyncMock()
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)
+
+    fake_device.set_time_to_now.assert_awaited_once()
+
+
+async def test_sync_tank_time_works_for_a_single_device_tank(hass):
+    """Explicitly confirms a single-device ("ad-hoc") tank still gets
+    its own clock synced -- not just multi-device tanks with something
+    to propagate to. The registry helper already only ever registers
+    one member as it is, but this makes the requirement explicit rather
+    than incidental."""
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    assert len(group.members) == 1  # confirms this really is single-device
+    fake_device = group.gateway_connection._device
+    fake_device.set_time_to_now = AsyncMock()
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)
+
+    fake_device.set_time_to_now.assert_awaited_once()
+
+
+async def test_sync_tank_time_skips_cleanly_if_no_group_exists_at_all(hass):
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["gateway_registry"] = GatewayRegistry(hass, asyncio.Semaphore(2))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)  # must not raise
+
+
+async def test_sync_tank_time_skips_cleanly_if_no_gateway_currently_available(hass):
+    hass.data.setdefault(DOMAIN, {})
+    registry = GatewayRegistry(hass, asyncio.Semaphore(2))
+    hass.data[DOMAIN]["gateway_registry"] = registry
+    registry._groups[PAN_ID] = PanGroup(pan_id=PAN_ID, gateway_serial=None)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)  # must not raise
+
+
+async def test_sync_tank_time_logs_and_skips_on_write_failure(hass):
+    """A failed write (device rejected it, connection dropped mid-write,
+    anything) must not raise out of this function -- same "log and
+    skip, next scheduled run retries" philosophy as
+    _async_revalidate_tank() itself already uses."""
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    fake_device = group.gateway_connection._device
+    fake_device.set_time_to_now = AsyncMock(side_effect=IOError("device rejected the write"))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)  # must not raise despite the failure
+
+
+async def test_sync_tank_time_skips_cleanly_on_connection_failure(hass):
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    group.gateway_connection.ensure_connected = AsyncMock(side_effect=IOError("connect failed"))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    await _async_sync_tank_time(hass, entry)  # must not raise
 
 
 # --------------------------------------------------------------------------

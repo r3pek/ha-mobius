@@ -172,6 +172,16 @@ SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds between attempts
 # scheduled run acting as its own retry, same as before.
 TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 
+# How often each tank's own clock gets nudged back to the current time --
+# see _async_sync_tank_time()'s own docstring for the full reasoning and
+# confirmation behind this feature. An hour is frequent enough that a
+# device's own drift never has room to become the kind of multi-minute
+# mismatch that visibly desyncs schedule behavior (lights turning on at
+# the wrong time relative to the rest of a tank), without writing to
+# every device's own flash needlessly often for a problem that, once
+# fixed, doesn't recur quickly on its own.
+TANK_TIME_SYNC_INTERVAL = timedelta(hours=1)
+
 # --------------------------------------------------------------------------
 # Tank-level config entries -- one config entry per Thread mesh/"tank"
 # (see gateway_registry.py's own docstring for why pan_id is the
