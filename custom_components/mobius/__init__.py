@@ -34,7 +34,7 @@ from .gateway_registry import GatewayRegistry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 
 # This integration is config-entry-only (config_flow: true in manifest.json,
 # devices discovered via Bluetooth or added manually through the UI) -- no

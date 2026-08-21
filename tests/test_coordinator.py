@@ -25,7 +25,9 @@ from custom_components.mobius.coordinator import (
     discover_mesh_address, discover_tank_for_serial,
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
+from homeassistant.exceptions import HomeAssistantError
 from mobius import PrimitiveType, Tank, MeshPeer, Model
+from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
 PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
@@ -593,6 +595,65 @@ async def test_fails_cleanly_when_group_has_no_gateway(hass):
     await coordinator.async_refresh()
 
     assert coordinator.last_update_success is False
+
+
+# --------------------------------------------------------------------------
+# async_get_connected_device() -- the shared gateway-vs-relay resolution
+# _fetch() itself uses, factored out for one-off actions against a
+# specific device (e.g. a button press) that need the same resolution
+# without duplicating it or triggering _fetch()'s own poll-cycle
+# bookkeeping (record_gateway_success()/record_relay_success()/etc).
+# --------------------------------------------------------------------------
+
+async def test_async_get_connected_device_returns_direct_connection_when_gateway(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+    assert group.gateway_serial == PUMP_SERIAL  # confirms this really is the gateway case
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        device = await coordinator.async_get_connected_device()
+
+    assert device is fake_device
+
+
+async def test_async_get_connected_device_returns_relayed_connection_when_not_gateway(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)  # elected gateway
+    await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-80)  # NOT the gateway
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+    fake_gateway_device = _make_fake_pump_device()
+    group = registry.group(PAN_ID)
+    assert group.gateway_serial == PUMP_SERIAL  # confirms LIGHT_SERIAL really is relayed here
+    fake_mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")
+    with patch.object(
+        group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
+    ), patch.object(
+        coordinator, "_resolve_own_mesh_peer", AsyncMock(return_value=MeshPeer(
+            serial=LIGHT_SERIAL, model_raw=0, model=None,
+            short_address=0x5678, address=fake_mesh_address,
+        )),
+    ):
+        device = await coordinator.async_get_connected_device()
+
+    assert isinstance(device, RelayedMobiusDevice)
+    assert device.gateway is fake_gateway_device
+    assert device.peer.serial == LIGHT_SERIAL
+
+
+async def test_async_get_connected_device_raises_if_no_gateway_available(hass):
+    registry = _make_registry(hass)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+    # Deliberately never joined -- registry.group(PAN_ID) is None.
+
+    with pytest.raises(HomeAssistantError, match="No gateway currently available"):
+        await coordinator.async_get_connected_device()
 
 
 # --------------------------------------------------------------------------

@@ -79,6 +79,11 @@
       "gateway_device": {
         "name": "Gateway device"
       }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
+      }
     }
   }
 }

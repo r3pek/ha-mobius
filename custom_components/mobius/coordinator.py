@@ -75,6 +75,7 @@ from typing import Any, Optional
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -548,6 +549,41 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if updates:
             device_registry.async_update_device(device_entry.id, **updates)
 
+    async def async_get_connected_device(self) -> "MobiusDevice":
+        """
+        Resolves and returns an already-connected MobiusDevice (direct,
+        if this coordinator's own device is currently the gateway) or
+        RelayedMobiusDevice (otherwise) for THIS coordinator's own
+        device -- the same resolution _fetch() itself does for its own
+        regular poll cycle, factored out so a one-off action against
+        this specific device (e.g. a button press -- see button.py)
+        can reuse it without duplicating the gateway-vs-relay decision.
+
+        Deliberately does NOT do any of _fetch()'s own poll-cycle
+        bookkeeping (record_gateway_success()/record_relay_success()/
+        mark_disconnected() etc, all specific to what a regular,
+        recurring read failure should mean for the registry's own
+        gateway-health tracking) -- a one-off action failing doesn't
+        necessarily mean the same thing a poll failing does (e.g. a
+        device can perfectly well reject a specific write while its
+        connection is completely healthy), so a caller of this method
+        is expected to handle its own failure differently, not treat
+        it as a regular poll failure.
+
+        Raises HomeAssistantError if no gateway is currently available
+        for this device's own pan_id group at all.
+        """
+        group = self.registry.group(self.pan_id)
+        if group is None or group.gateway_serial is None:
+            raise HomeAssistantError(
+                f"No gateway currently available for pan_id {self.pan_id:#06x}"
+            )
+        if group.gateway_serial == self.serial:
+            return await group.gateway_connection.ensure_connected()
+        gateway_device = await group.gateway_connection.ensure_connected()
+        peer = await self._resolve_own_mesh_peer(group)
+        return RelayedMobiusDevice(gateway_device, peer)
+
     async def _fetch(self) -> dict[str, Any]:
         group = self.registry.group(self.pan_id)
         if group is None or group.gateway_serial is None:
@@ -560,16 +596,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "%s polling as %s", self.serial, "gateway" if is_gateway else "relayed",
         )
         try:
+            device = await self.async_get_connected_device()
             if is_gateway:
-                device = await group.gateway_connection.ensure_connected()
                 data = await _fetch_all(device)
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
             else:
-                gateway_device = await group.gateway_connection.ensure_connected()
-                peer = await self._resolve_own_mesh_peer(group)
-                relayed = RelayedMobiusDevice(gateway_device, peer)
-                data = await _fetch_all(relayed)
+                data = await _fetch_all(device)
                 self.registry.record_relay_success(self.pan_id, self.serial)
         except Exception as err:
             # A READ can fail even after ensure_connected() reported

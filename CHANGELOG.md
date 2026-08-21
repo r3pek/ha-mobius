@@ -9,6 +9,8 @@
   hour, via one write to its own current gateway. Fixes devices
   occasionally losing sync with each other. Requires an unreleased
   python-mobius with set_time_to_now().
+- Added a reboot button for every device. Requires an unreleased
+  python-mobius with reboot().
 
 ## 0.3.4
 
