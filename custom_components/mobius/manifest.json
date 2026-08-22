@@ -3,7 +3,8 @@
   "name": "Mobius",
   "bluetooth": [
     { "local_name": "MOBIUS" },
-    { "manufacturer_id": 514 }
+    { "manufacturer_id": 514 },
+    { "manufacturer_id": 1 }
   ],
   "codeowners": ["@r3pek"],
   "config_flow": true,

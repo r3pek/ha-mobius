@@ -20,8 +20,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
-
 from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
     TANK_REVALIDATION_INTERVAL, TANK_TIME_SYNC_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS,
@@ -29,6 +27,7 @@ from .const import (
 )
 from .coordinator import (
     MobiusDeviceCoordinator, _find_in_bluetooth_cache, discover_mesh_address, discover_tank_for_serial,
+    parsed_advertisement,
 )
 from .gateway_registry import GatewayRegistry
 
@@ -98,10 +97,7 @@ def _current_rssi(hass: HomeAssistant, serial: str) -> int | None:
     finding one just means this device's join() proceeds without RSSI
     info, matching the registry's own graceful fallback."""
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
+        parsed = parsed_advertisement(info.manufacturer_data)
         if parsed and parsed.serial == serial:
             return info.rssi
     return None
@@ -787,10 +783,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     addresses_by_serial: dict[str, str] = {}
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
+        parsed = parsed_advertisement(info.manufacturer_data)
         if parsed and parsed.serial in known_serials:
             addresses_by_serial[parsed.serial] = info.address
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added support for AquaIllumination devices (company ID 0x0001, not
+  just EcoTech Marine's 0x0202) -- these were previously discovered by
+  name but never actually identified, since every manufacturer-data
+  lookup across this integration only ever checked the EcoTech
+  company ID. Also adds a second `manufacturer_id` bluetooth matcher
+  to manifest.json, matching the existing one for EcoTech Marine.
+  Requires an unreleased python-mobius (MOBIUS_COMPANY_ID is also
+  renamed to MOBIUS_COMPANY_ID_ECOTECH there -- a breaking change for
+  anyone importing the old name).
 - New sensors for VorTech's own "Local Control"/"Led Auto Dim" and
   Radion's own "Max Fan Speed"/"Fan Shutdown" settings, when a device
   actually supports them.

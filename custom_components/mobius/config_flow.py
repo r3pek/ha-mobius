@@ -57,17 +57,16 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
-from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data, Tank
+from mobius import Tank
 
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX, MAX_CONCURRENT_CONNECTIONS
-from .coordinator import discover_tank_for_serial
+from .coordinator import discover_tank_for_serial, parsed_advertisement
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _parsed_info_for(discovery: BluetoothServiceInfoBleak):
-    payload = discovery.manufacturer_data.get(MOBIUS_COMPANY_ID)
-    return parse_manufacturer_data(payload) if payload else None
+    return parsed_advertisement(discovery.manufacturer_data)
 
 
 def _title_for(discovery: BluetoothServiceInfoBleak) -> str:
@@ -226,7 +225,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # have incomplete manufacturer data -- e.g. matched via the
         # local_name matcher before a scan-response merge completed).
         latest = async_last_service_info(self.hass, discovery_info.address, connectable=True)
-        if latest is not None and latest.manufacturer_data.get(MOBIUS_COMPANY_ID):
+        if latest is not None and parsed_advertisement(latest.manufacturer_data) is not None:
             discovery_info = latest
 
         info = _parsed_info_for(discovery_info)
@@ -250,9 +249,9 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # advertisement carrying manufacturer data for the first time
             # does NOT reliably re-trigger a fresh discovery step on its
             # own once this address has already matched via local_name
-            # (see manifest.json's own "bluetooth" matchers -- both
-            # local_name and manufacturer_id are registered there
-            # independently). Clearing this address's own match history
+            # (see manifest.json's own "bluetooth" matchers -- local_name
+            # and each confirmed company ID's own manufacturer_id are
+            # all registered there independently). Clearing this address's own match history
             # here, rather than just aborting and hoping, is what
             # actually lets the next advertisement -- even one that,
             # superficially, looks like something already seen -- get a
@@ -372,8 +371,12 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         usually more complete, and use it if it's actually better.
 
         Only overwrites self._discovery_info with the new snapshot when
-        it's actually at least as good (comparing whether each snapshot
-        has manufacturer data at all) -- a perfectly good initial
+        it's actually at least as good (comparing whether each snapshot's
+        manufacturer data actually parses into a usable
+        MobiusAdvertisement, under any confirmed company ID -- not just
+        whether SOME bytes happen to be present under one specific
+        company ID, which could be a garbled/partial payload that
+        wouldn't actually be usable) -- a perfectly good initial
         snapshot (WITH manufacturer data) must never be silently
         downgraded to a worse one (WITHOUT it), which real BLE devices
         can otherwise cause: they often rotate between several
@@ -391,8 +394,8 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         latest = async_last_service_info(self.hass, self._discovery_info.address, connectable=True)
         if latest is None:
             return
-        old_has_data = bool(self._discovery_info.manufacturer_data.get(MOBIUS_COMPANY_ID))
-        new_has_data = bool(latest.manufacturer_data.get(MOBIUS_COMPANY_ID))
+        old_has_data = parsed_advertisement(self._discovery_info.manufacturer_data) is not None
+        new_has_data = parsed_advertisement(latest.manufacturer_data) is not None
         if not new_has_data:
             # Never downgrade -- whatever we already have (even if it
             # also lacks data) is at least as good as this one.

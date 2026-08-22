@@ -82,7 +82,7 @@ from homeassistant.util import dt as dt_util
 
 from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
-    MOBIUS_COMPANY_ID, parse_manufacturer_data, discover_tank,
+    MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
     PRIMITIVE_SIZE, extract_short_address,
 )
@@ -93,16 +93,36 @@ from .gateway_registry import GatewayRegistry, PanGroup
 _LOGGER = logging.getLogger(__name__)
 
 
+def parsed_advertisement(manufacturer_data: dict) -> Optional[MobiusAdvertisement]:
+    """
+    Tries every confirmed Mobius company ID (python-mobius's own
+    MOBIUS_COMPANY_IDS -- currently EcoTech Marine and
+    AquaIllumination) against a BluetoothServiceInfoBleak's own
+    manufacturer_data dict, returning the first one that parses. A real
+    device advertises under exactly one company ID, never more than
+    one at once. Shared here (not duplicated per call site) since
+    fixing a real, confirmed bug once in one place -- rather than
+    catching every place that used to hardcode a single company ID --
+    is the whole point: a device advertising under any OTHER confirmed
+    company ID used to come back unparsed everywhere in this
+    integration, not just in one spot.
+    """
+    for company_id in MOBIUS_COMPANY_IDS:
+        payload = manufacturer_data.get(company_id)
+        if payload:
+            parsed = parse_manufacturer_data(payload)
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def _find_in_bluetooth_cache(hass: HomeAssistant, serial: str):
     """Searches Home Assistant's own Bluetooth cache once for a
     currently-visible advertisement matching serial, by manufacturer
     data. Returns the matching BluetoothServiceInfoBleak, or None if
     serial isn't currently present in the cache at all."""
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
+        parsed = parsed_advertisement(info.manufacturer_data)
         if parsed and parsed.serial == serial:
             return info
     return None

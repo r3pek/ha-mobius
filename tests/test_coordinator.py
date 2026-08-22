@@ -38,16 +38,21 @@ PAN_ID = 0x3D0F
 # python-mobius's own tests) -- serial replaced with an obviously-fake
 # placeholder of the same byte length.
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3030303030303030303030303031")
-MOBIUS_COMPANY_ID = 0x0202
+# A real captured AI Axis 20 pump advertisement (serial swapped for a
+# placeholder, same convention as the payload above) -- see
+# python-mobius's own test_manufacturer.py for the full confirmation.
+REAL_AI_AXIS_PAYLOAD = bytes.fromhex("0501010100000026f446414b4553455249414c41493031")
+MOBIUS_COMPANY_ID_ECOTECH = 0x0202
+MOBIUS_COMPANY_ID_AQUAILLUMINATION = 0x0001
 
 
-def _fake_discovery_info(address: str, payload: bytes):
+def _fake_discovery_info(address: str, payload: bytes, company_id: int = MOBIUS_COMPANY_ID_ECOTECH):
     """A minimal stand-in for BluetoothServiceInfoBleak -- only the
     attributes MobiusConnectionManager._resolve_current_ble_device()
     actually reads."""
     info = MagicMock()
     info.address = address
-    info.manufacturer_data = {MOBIUS_COMPANY_ID: payload}
+    info.manufacturer_data = {company_id: payload}
     return info
 
 
@@ -109,6 +114,35 @@ async def test_resolve_current_ble_device_matches_by_serial(hass):
     assert result is not None
     assert result.address == PUMP_ADDRESS
     mock_from_address.assert_called_once_with(hass, PUMP_ADDRESS, connectable=True)
+
+
+async def test_resolve_current_ble_device_matches_aquaillumination_device(hass):
+    """The actual bug this confirms is fixed: an AquaIllumination
+    device (company ID 0x0001, not EcoTech Marine's 0x0202) used to
+    come back from _find_in_bluetooth_cache() as not found at all,
+    since only company ID 0x0202 was ever checked -- regardless of the
+    device being perfectly visible in Home Assistant's own Bluetooth
+    cache."""
+    ai_serial = "FAKESERIALAI01"
+    ai_address = "AA:AA:AA:AA:AA:09"
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, ai_serial, semaphore)
+
+    discovered = [_fake_discovery_info(
+        ai_address, REAL_AI_AXIS_PAYLOAD, company_id=MOBIUS_COMPANY_ID_AQUAILLUMINATION,
+    )]
+
+    with patch(
+        "custom_components.mobius.coordinator.bluetooth.async_discovered_service_info",
+        return_value=discovered,
+    ), patch(
+        "custom_components.mobius.coordinator.bluetooth.async_ble_device_from_address",
+        return_value=MagicMock(address=ai_address),
+    ):
+        result = await manager._resolve_current_ble_device()
+
+    assert result is not None
+    assert result.address == ai_address
 
 
 async def test_resolve_current_ble_device_returns_none_when_not_found(hass, caplog):

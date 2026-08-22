@@ -1469,13 +1469,13 @@ async def test_sync_tank_time_skips_cleanly_on_connection_failure(hass):
 # documentation, which recommends exactly this for exactly this scenario).
 # --------------------------------------------------------------------------
 
-def _fake_discovery(address: str, serial: str):
+def _fake_discovery(address: str, serial: str, company_id: int = 0x0202):
     """A minimal stand-in for BluetoothServiceInfoBleak -- only the two
     attributes async_remove_entry() actually reads."""
     payload = bytes.fromhex("2a0001000000000f3d") + serial.encode("ascii")
     info = MagicMock()
     info.address = address
-    info.manufacturer_data = {0x0202: payload}  # MOBIUS_COMPANY_ID
+    info.manufacturer_data = {company_id: payload}  # MOBIUS_COMPANY_ID_ECOTECH by default
     return info
 
 
@@ -1498,6 +1498,35 @@ async def test_remove_entry_triggers_rediscovery_for_currently_visible_devices(h
         await async_remove_entry(hass, entry)
 
     mock_rediscover.assert_called_once_with(hass, PUMP_ADDRESS)
+
+
+async def test_remove_entry_triggers_rediscovery_for_aquaillumination_device(hass):
+    """The actual bug this confirms is fixed: an AquaIllumination
+    device (company ID 0x0001, not EcoTech Marine's 0x0202) used to
+    come back from this function's own manufacturer-data lookup as not
+    found at all, since only company ID 0x0202 was ever checked --
+    meaning its own rediscovery on entry removal silently never
+    happened, regardless of the device being perfectly visible."""
+    from custom_components.mobius import async_remove_entry
+
+    ai_serial = "FAKESERIALAI01"
+    ai_address = "AA:AA:AA:AA:AA:09"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: ai_serial}]},
+        unique_id=ai_serial,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.bluetooth.async_discovered_service_info",
+        return_value=[_fake_discovery(ai_address, ai_serial, company_id=0x0001)],
+    ), patch(
+        "custom_components.mobius.bluetooth.async_rediscover_address",
+    ) as mock_rediscover:
+        await async_remove_entry(hass, entry)
+
+    mock_rediscover.assert_called_once_with(hass, ai_address)
 
 
 async def test_remove_entry_skips_a_device_not_currently_advertising(hass):

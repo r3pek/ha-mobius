@@ -22,7 +22,12 @@ from mobius import Tank, MeshPeer, Model
 # an obviously-fake placeholder of the same byte length.
 REAL_PUMP_PAYLOAD = bytes.fromhex("2a0001000000000f3d3030303030303030303030303032")
 REAL_LIGHT_PAYLOAD = bytes.fromhex("b30001000000000f3d46414b4553455249414c30303031")
-MOBIUS_COMPANY_ID = 0x0202
+# A real captured AI Axis 20 pump advertisement (serial swapped for a
+# placeholder, same convention as the payloads above) -- see
+# python-mobius's own test_manufacturer.py for the full confirmation.
+REAL_AI_AXIS_PAYLOAD = bytes.fromhex("0501010100000026f446414b4553455249414c41493031")
+MOBIUS_COMPANY_ID_ECOTECH = 0x0202
+MOBIUS_COMPANY_ID_AQUAILLUMINATION = 0x0001
 PUMP_ADDRESS = "AA:AA:AA:AA:AA:02"
 LIGHT_ADDRESS = "AA:AA:AA:AA:AA:03"
 # Serials decoded from the payloads above -- confirms unique_id ends up
@@ -42,13 +47,15 @@ PAN_ID = 0x3D0F
 MLPREFIX = bytes.fromhex("fdaaaaaaaaaaaaaa")
 
 
-def _make_discovery_info(address: str, payload: bytes) -> BluetoothServiceInfoBleak:
+def _make_discovery_info(
+    address: str, payload: bytes, company_id: int = MOBIUS_COMPANY_ID_ECOTECH
+) -> BluetoothServiceInfoBleak:
     device = BLEDevice(address, "MOBIUS", {})
     return BluetoothServiceInfoBleak(
         name="MOBIUS",
         address=address,
         rssi=-60,
-        manufacturer_data={MOBIUS_COMPANY_ID: payload},
+        manufacturer_data={company_id: payload},
         service_data={},
         service_uuids=["01ff0100-ba5e-f4ee-5ca1-eb1e5e4b1ce0"],
         source="local",
@@ -134,6 +141,34 @@ async def test_bluetooth_discovery_creates_entry(hass):
     # and-address-stability.md) MAC address.
     assert result2["title"] == f"VorTechMP40wG3QD ({PUMP_SERIAL})"
     assert PUMP_ADDRESS not in result2["title"]
+
+
+async def test_bluetooth_discovery_of_aquaillumination_device_creates_entry(hass):
+    """The actual bug this confirms is fixed: an AquaIllumination device
+    (company ID 0x0001, not EcoTech Marine's 0x0202) used to come back
+    from _parsed_info_for() as None, indistinguishable from a device
+    that genuinely lacks manufacturer data -- aborting discovery
+    entirely (see test_bluetooth_discovery_aborts_without_manufacturer_
+    data below for that exact abort path) despite the device being
+    perfectly real and identifiable."""
+    ai_address = "AA:AA:AA:AA:AA:09"
+    discovery_info = _make_discovery_info(
+        ai_address, REAL_AI_AXIS_PAYLOAD, company_id=MOBIUS_COMPANY_ID_AQUAILLUMINATION,
+    )
+
+    with _mock_tank_discovery(_no_tank()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=discovery_info
+        )
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+
+        result2 = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["data"][CONF_DEVICES] == [{CONF_SERIAL: "FAKESERIALAI01", CONF_ADDRESS: ai_address}]
+    assert result2["data"][CONF_PAN_ID] == 0xF426
+    assert result2["result"].unique_id == "FAKESERIALAI01"
+    assert "Axis20" in result2["title"]
 
 
 async def test_bluetooth_discovery_light_title(hass):

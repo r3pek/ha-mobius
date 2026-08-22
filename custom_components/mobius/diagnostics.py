@@ -27,9 +27,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
-from mobius import MOBIUS_COMPANY_ID, parse_manufacturer_data
-
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
+from .coordinator import parsed_advertisement
 from .gateway_registry import GatewayRegistry
 
 # BLE MAC addresses -- both the top-level CONF_ADDRESS an ad-hoc device's
@@ -110,10 +109,7 @@ def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> d
     "definitely not broadcasting anything".
     """
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        payload = info.manufacturer_data.get(MOBIUS_COMPANY_ID)
-        if not payload:
-            continue
-        parsed = parse_manufacturer_data(payload)
+        parsed = parsed_advertisement(info.manufacturer_data)
         if parsed and parsed.serial == serial:
             return {
                 "found_by_serial": True,
