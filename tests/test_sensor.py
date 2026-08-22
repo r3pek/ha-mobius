@@ -49,7 +49,10 @@ def _fake_pump_device():
         "name": "MP40QD Right", "serial": "00000000000001",
         "primitive_type": "VorTechV1", "error_state": "NoError", "mac_address": None,
     })
-    device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
+    device.get_pump_telemetry = AsyncMock(return_value={
+        "speed": 447, "speed_percent": 44.7, "gph": 2272,
+        "gph_reliable": True, "minimum_gph": 200, "maximum_gph": 2500,
+    })
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.get_advanced_features = AsyncMock(return_value=None)
@@ -172,6 +175,9 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert flow is not None
     assert flow.state == "2272"
     assert flow.attributes["unit_of_measurement"] == "gal/h"
+    assert flow.attributes["flow_reliable"] is True
+    assert flow.attributes["minimum_flow"] == 200
+    assert flow.attributes["maximum_flow"] == 2500
 
     mode = hass.states.get("sensor.mp40qd_right_current_mode")
     assert mode is not None
@@ -235,6 +241,49 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # isn't a meaningful question for a single, ad-hoc device anyway.
     gateway_states = [s for s in hass.states.async_all("sensor") if "gateway_device" in s.entity_id]
     assert gateway_states == []
+
+
+async def test_pump_entry_setup_skips_flow_sensor_when_gph_unreliable(hass):
+    """The actual real-world bug this confirms is fixed: a pump (like a
+    real, reported AI Axis 20) that reports a raw gph value but doesn't
+    support a min/max flow range -- the app itself would never trust
+    or display this value, so this integration must not create a
+    sensor for it either, rather than showing a number confirmed (via
+    the app's own spec sheet) to be wildly wrong."""
+    device = _fake_pump_device()
+    device.get_pump_telemetry = AsyncMock(return_value={
+        "speed": 600, "speed_percent": 60.0, "gph": 1460,
+        "gph_reliable": False, "minimum_gph": None, "maximum_gph": None,
+    })
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.mp40qd_right_estimated_flow") is None
+    # Every OTHER pump sensor still gets created normally -- confirms
+    # this is specifically about the flow sensor, not a broader failure.
+    assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
+    assert hass.states.get("sensor.mp40qd_right_current_mode") is not None
 
 
 async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):

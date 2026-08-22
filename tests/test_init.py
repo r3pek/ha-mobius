@@ -133,7 +133,10 @@ def _fake_pump_device():
         "name": "Pump", "serial": PUMP_SERIAL, "primitive_type": "VorTechV1",
         "error_state": "NoError", "mac_address": None,
     })
-    fake_device.get_pump_telemetry = AsyncMock(return_value={"speed": 100, "speed_percent": 10.0, "gph": 500})
+    fake_device.get_pump_telemetry = AsyncMock(return_value={
+        "speed": 100, "speed_percent": 10.0, "gph": 500,
+        "gph_reliable": True, "minimum_gph": 100, "maximum_gph": 800,
+    })
     fake_device.get_operation_state = AsyncMock()
     fake_device.get_operation_state.return_value.name = "Schedule"
     fake_device.get_advanced_features = AsyncMock(return_value=None)
@@ -1648,7 +1651,7 @@ class TestEnsureSensorsExist:
     async def test_creates_missing_type_specific_entities_when_data_becomes_available(self, hass):
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-1")
         entry.add_to_hass(hass)
-        data = {"support": "pump", "telemetry": {"speed_percent": 50, "gph": 1200}}
+        data = {"support": "pump", "telemetry": {"speed_percent": 50, "gph": 1200, "gph_reliable": True}}
         runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, data)
 
         await _async_ensure_sensors_exist(hass, entry)

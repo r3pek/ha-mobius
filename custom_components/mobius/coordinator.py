@@ -387,9 +387,28 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     except KeyError:
         primitive = None
 
+    # Needed earlier than firmware_versions() (its own, pre-existing use
+    # below) now that get_pump_telemetry() also takes it -- see that
+    # method's own docstring for why: distinguishing the Nero3/Nero5/
+    # Nero7 exception from every other pump requires knowing the model,
+    # not just the primitive type.
+    model_raw = info.get("model_raw")
+    try:
+        model = Model(model_raw) if model_raw is not None else None
+    except ValueError:
+        model = None
+
     if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
         info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
-        info["telemetry"] = await device.get_pump_telemetry()
+        info["telemetry"] = await device.get_pump_telemetry(model=model, primitive=primitive)
+        if info["telemetry"].get("gph") is not None and not info["telemetry"].get("gph_reliable"):
+            _LOGGER.debug(
+                "%s: gph reading (%s) is not considered reliable for this "
+                "device (model=%s, primitive=%s) -- see get_pump_telemetry()'s "
+                "own docstring in python-mobius for why; the flow sensor "
+                "won't be created for this reason if it's missing",
+                info.get("serial"), info["telemetry"]["gph"], model, primitive,
+            )
         info["operation_state"] = (await device.get_operation_state()).name
     elif primitive in LIGHT_PRIMITIVES:
         info["support"] = "light"
@@ -408,11 +427,6 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
 
-    model_raw = info.get("model_raw")
-    try:
-        model = Model(model_raw) if model_raw is not None else None
-    except ValueError:
-        model = None
     info["firmware_versions"] = await device.get_firmware_versions(model=model)
     info["hardware_info"] = await device.get_hardware_info()
 

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The estimated flow sensor is no longer created for a pump the app
+  itself wouldn't trust a flow reading for (a real AI Axis 20 reported
+  ~8x its own rated max flow). Adds flow_reliable/minimum_flow/
+  maximum_flow as its own attributes. Requires an unreleased
+  python-mobius.
 - Added support for AquaIllumination devices (company ID 0x0001) --
   previously discovered by name but never identified, since every
   manufacturer-data lookup only checked EcoTech's own 0x0202. Requires

@@ -210,6 +210,22 @@ class MotorSpeedSensor(MobiusEntity):
 class FlowRateSensor(MobiusEntity):
     """Pump devices only. Estimated flow (GPH), confirmed live-queried by the app.
 
+    Only created when python-mobius's own get_pump_telemetry() reports
+    gph_reliable=True for this device (see _build_type_specific_entities()'s
+    own comment, and that method's docstring in python-mobius, for the
+    full confirmation) -- a device the app itself wouldn't trust a raw
+    gph reading for (no supported flow range) doesn't get this entity
+    at all, rather than showing a number the app itself would never
+    display.
+
+    Exposes flow_reliable/minimum_flow/maximum_flow as this entity's own
+    extra state attributes -- named generically ("flow", not "gph"),
+    deliberately not matching python-mobius's own gph-prefixed dict keys
+    one-to-one: this entity's own native_unit_of_measurement can be
+    overridden per-entity to something other than gal/h (see below), and
+    these attribute names shouldn't be locked to a specific unit that
+    might no longer match what's actually displayed.
+
     native_unit_of_measurement stays "gal/h" -- that's the actual native
     value the protocol reports, not a display preference.
 
@@ -248,6 +264,17 @@ class FlowRateSensor(MobiusEntity):
     def native_value(self):
         telemetry = (self.coordinator.data or {}).get("telemetry") or {}
         return telemetry.get("gph")
+
+    @property
+    def extra_state_attributes(self):
+        telemetry = (self.coordinator.data or {}).get("telemetry") or {}
+        minimum_flow = telemetry.get("minimum_gph")
+        maximum_flow = telemetry.get("maximum_gph")
+        attributes = {"flow_reliable": telemetry.get("gph_reliable")}
+        if minimum_flow is not None or maximum_flow is not None:
+            attributes["minimum_flow"] = minimum_flow
+            attributes["maximum_flow"] = maximum_flow
+        return attributes
 
 
 class SchedulePointCountSensor(MobiusEntity):
@@ -748,12 +775,24 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
     the full story of why a second call, later, with fresher data, is
     sometimes necessary at all."""
     if support.startswith("pump"):
-        return [
+        entities: list[SensorEntity] = [
             OperationStateSensor(coordinator, serial, device_info),
             MotorSpeedSensor(coordinator, serial, device_info),
-            FlowRateSensor(coordinator, serial, device_info),
             CurrentPumpModeSensor(coordinator, serial, device_info),
         ]
+        # Confirmed via the app's own support-check logic for its live
+        # flow gauge (see get_pump_telemetry()'s own docstring in
+        # python-mobius): the app itself doesn't trust or display a raw
+        # gph reading without a supported flow range (with a narrow
+        # exception for a few old Nero pumps) -- there's no reason for
+        # this integration to expose a sensor for a value the app
+        # itself wouldn't show. gph_reliable missing entirely (no
+        # telemetry fetched yet) is treated the same as False here --
+        # _async_ensure_sensors_exist() (see __init__.py) picks this
+        # entity up once real data confirms it's actually reliable.
+        if (data.get("telemetry") or {}).get("gph_reliable"):
+            entities.append(FlowRateSensor(coordinator, serial, device_info))
+        return entities
     elif support == "light":
         entities: list[SensorEntity] = []
         channel_names = data.get("channels") or []
