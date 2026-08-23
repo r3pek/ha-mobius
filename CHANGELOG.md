@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Fixed minimum_flow/maximum_flow (the flow sensor's own attributes)
   not converting to match a per-entity display unit override -- HA's
