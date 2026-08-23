@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Added a "Bluetooth proxy hardware" section to the README, plus a
   validated ESPHome config for using an ESP32-S3 as one
@@ -8,21 +8,17 @@
 - The estimated flow sensor is no longer created for a pump the app
   itself wouldn't trust a flow reading for (a real AI Axis 20 reported
   ~8x its own rated max flow). Adds flow_reliable/minimum_flow/
-  maximum_flow as its own attributes. Requires an unreleased
-  python-mobius.
+  maximum_flow as its own attributes.
 - Added support for AquaIllumination devices (company ID 0x0001) --
   previously discovered by name but never identified, since every
-  manufacturer-data lookup only checked EcoTech's own 0x0202. Requires
-  an unreleased python-mobius.
+  manufacturer-data lookup only checked EcoTech's own 0x0202.
 - New sensors for VorTech's own "Local Control"/"Led Auto Dim" and
   Radion's own "Max Fan Speed"/"Fan Shutdown" settings, when a device
   actually supports them.
 - Each tank's clock now gets nudged back to the current time once an
   hour, via one write to its own current gateway. Fixes devices
-  occasionally losing sync with each other. Requires an unreleased
-  python-mobius with set_time_to_now().
-- Added a reboot button for every device. Requires an unreleased
-  python-mobius with reboot().
+  occasionally losing sync with each other.
+- Added a reboot button for every device.
 
 ## 0.3.4
 
