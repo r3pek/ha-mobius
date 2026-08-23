@@ -8,13 +8,15 @@ Not affiliated with or endorsed by any of these companies. See
 `python-mobius`'s own documentation for the full protocol writeup this is
 built on.
 
-## Status: read-only
+## Status
 
-This integration currently does **discovery and status reporting only** —
-no control (starting scenes, changing schedules) yet. That's a deliberate
-choice, not a limitation of the underlying library: control support is
-being kept in lockstep with `python-mobius` itself as it grows write
-capabilities, rather than getting ahead of it.
+This integration does discovery and status reporting for every supported
+device, plus two narrow write operations: a reboot button for every
+device, and an automatic hourly clock sync for each tank. General control
+(starting scenes, changing schedules) isn't implemented yet — that's a
+deliberate choice, not a limitation of the underlying library: control
+support is being kept in lockstep with `python-mobius` itself as it grows
+write capabilities, rather than getting ahead of it.
 
 ### Development / running the tests
 
