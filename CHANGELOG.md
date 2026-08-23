@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a "Bluetooth proxy hardware" section to the README, plus a
+  validated ESPHome config for using an ESP32-S3 as one
+  (`esphome/mobius-bt-proxy.yaml`).
 - The estimated flow sensor is no longer created for a pump the app
   itself wouldn't trust a flow reading for (a real AI Axis 20 reported
   ~8x its own rated max flow). Adds flow_reliable/minimum_flow/

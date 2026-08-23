@@ -102,6 +102,35 @@ directory, then restart Home Assistant.
 Or manually: in HACS, Settings → Custom repositories → add
 `https://github.com/r3pek/ha-mobius` (type: Integration).
 
+## Bluetooth proxy hardware
+
+Every Mobius device needs to be within Bluetooth range of *something* Home
+Assistant can talk to — either the HA host's own adapter, or an [ESPHome
+Bluetooth proxy](https://esphome.io/components/bluetooth_proxy.html). A tank
+is rarely right next to the server, so a proxy placed near the tank itself
+is the practical way to get reliable connections and RSSI-based gateway
+election (see "Polling design" above).
+
+What's actually been used and confirmed working, for reference — not the
+only option, just one that works:
+
+- 2x [ESP32-S3 DevKitC-1 N16R8 development
+  boards](https://amzn.to/4gOtYEE) — one per tank/area is a reasonable
+  starting point; more give better coverage and more gateway candidates
+  for the election logic to choose from.
+- [Waterproof junction box / cable connection
+  box](https://amzn.to/4qtQKF6) — reef tanks mean humidity; housing the
+  board in something water-resistant is worth doing even indoors.
+
+(Amazon affiliate links)
+
+An example ESPHome configuration for the ESP32-S3 board as a Bluetooth
+proxy is in [`esphome/mobius-bt-proxy.yaml`](./esphome/mobius-bt-proxy.yaml).
+The important setting in it is `bluetooth_proxy: active: true` — this
+integration needs actual GATT connections (reading/writing attributes),
+not just advertisement forwarding, so a proxy in passive-only mode isn't
+enough.
+
 ## Dependencies
 
 `python-mobius` and `bleak-retry-connector` are declared in `manifest.json`
