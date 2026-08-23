@@ -116,8 +116,8 @@ election (see "Polling design" above).
 What's actually been used and confirmed working, for reference — not the
 only option, just one that works:
 
-- 2x [ESP32-S3 DevKitC-1 N16R8 development
-  boards](https://amzn.to/4gOtYEE) — one per tank/area is a reasonable
+- [ESP32-S3 DevKitC-1 N16R8 development
+  board](https://amzn.to/4gOtYEE) — one per tank/area is a reasonable
   starting point; more give better coverage and more gateway candidates
   for the election logic to choose from.
 - [Waterproof junction box / cable connection
