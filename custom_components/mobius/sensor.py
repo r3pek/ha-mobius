@@ -23,6 +23,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util.unit_conversion import VolumeFlowRateConverter
 from homeassistant.util import dt as dt_util
 
 from . import MobiusRuntimeData, tank_device_identifier
@@ -226,6 +227,19 @@ class FlowRateSensor(MobiusEntity):
     these attribute names shouldn't be locked to a specific unit that
     might no longer match what's actually displayed.
 
+    minimum_flow/maximum_flow are actively converted (via
+    VolumeFlowRateConverter, the same converter HA's own SensorEntity
+    uses internally) to whatever unit is CURRENTLY effectively displayed
+    -- i.e. self.unit_of_measurement, which accounts for a per-entity
+    override, not native_unit_of_measurement, which never changes.
+    Confirmed via a real, reported case: HA's own native_value -> state
+    conversion (see below) does NOT extend to extra_state_attributes at
+    all -- these are plain values an integration returns directly, with
+    no framework involvement -- so without this, overriding this
+    entity's own display unit (e.g. to L/h) converts the visible state
+    correctly but silently leaves minimum_flow/maximum_flow in gal/h,
+    unconverted and unlabeled as such.
+
     native_unit_of_measurement stays "gal/h" -- that's the actual native
     value the protocol reports, not a display preference.
 
@@ -272,6 +286,23 @@ class FlowRateSensor(MobiusEntity):
         maximum_flow = telemetry.get("maximum_gph")
         attributes = {"flow_reliable": telemetry.get("gph_reliable")}
         if minimum_flow is not None or maximum_flow is not None:
+            # HA's own native_value -> state unit conversion (see this
+            # class's own docstring) does NOT extend to
+            # extra_state_attributes -- these are plain values this
+            # integration returns directly, with no involvement from HA's
+            # conversion framework at all. self.unit_of_measurement (NOT
+            # native_unit_of_measurement) is the currently-EFFECTIVE unit,
+            # accounting for any per-entity override the user has set
+            # (see this class's own docstring on how) -- converting these
+            # two values here, manually, the same way HA's own `state`
+            # property converts native_value, keeps them consistent with
+            # whatever unit the entity's own state is actually showing.
+            display_unit = self.unit_of_measurement
+            native_unit = self.native_unit_of_measurement
+            if minimum_flow is not None:
+                minimum_flow = VolumeFlowRateConverter.convert(minimum_flow, native_unit, display_unit)
+            if maximum_flow is not None:
+                maximum_flow = VolumeFlowRateConverter.convert(maximum_flow, native_unit, display_unit)
             attributes["minimum_flow"] = minimum_flow
             attributes["maximum_flow"] = maximum_flow
         return attributes

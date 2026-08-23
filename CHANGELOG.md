@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed minimum_flow/maximum_flow (the flow sensor's own attributes)
+  not converting to match a per-entity display unit override -- HA's
+  own unit conversion only applies to the sensor's state, not its
+  attributes, so this is now done manually to match.
+
 ## 0.4.0
 
 - Added a "Bluetooth proxy hardware" section to the README, plus a

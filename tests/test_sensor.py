@@ -10,6 +10,8 @@ import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
@@ -284,6 +286,43 @@ async def test_pump_entry_setup_skips_flow_sensor_when_gph_unreliable(hass):
     # this is specifically about the flow sensor, not a broader failure.
     assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
     assert hass.states.get("sensor.mp40qd_right_current_mode") is not None
+
+
+async def test_flow_sensor_converts_min_max_to_the_effective_display_unit(hass):
+    """The actual real-world bug this confirms is fixed: HA's own
+    native_value -> state unit conversion does NOT extend to
+    extra_state_attributes -- a real, reported case had a user override
+    this entity's own display unit to L/h, and the visible state
+    correctly converted, but minimum_flow/maximum_flow silently stayed
+    in gal/h, unconverted. Uses PropertyMock to directly simulate the
+    effective (possibly per-entity-overridden) unit HA itself would
+    report via self.unit_of_measurement, rather than going through the
+    full entity-registry-options machinery for a per-entity override --
+    this is what the fix actually reads, so this is what needs to
+    change for the test to mean anything."""
+    from custom_components.mobius.sensor import FlowRateSensor
+
+    fake_coordinator = MagicMock()
+    fake_coordinator.data = {
+        "telemetry": {
+            "gph": 2272, "gph_reliable": True,
+            "minimum_gph": 200, "maximum_gph": 2500,
+        }
+    }
+
+    sensor = FlowRateSensor(fake_coordinator, PUMP_SERIAL, device_info=MagicMock())
+
+    with patch.object(
+        type(sensor), "unit_of_measurement",
+        new_callable=lambda: property(lambda self: "L/h"),
+    ):
+        attrs = sensor.extra_state_attributes
+
+    # Exact values from HA's own VolumeFlowRateConverter.convert(): 200
+    # gal/h == 757.0823568 L/h, 2500 gal/h == 9463.52946 L/h.
+    assert attrs["minimum_flow"] == pytest.approx(757.0823568)
+    assert attrs["maximum_flow"] == pytest.approx(9463.52946)
+    assert attrs["flow_reliable"] is True
 
 
 async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):
