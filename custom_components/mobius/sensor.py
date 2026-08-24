@@ -875,13 +875,17 @@ async def async_setup_entry(
     device_records = entry.data.get(CONF_DEVICES, [])
     registry = hass.data.get(DOMAIN, {}).get("gateway_registry")
 
-    # via_device grouping only applies to a genuine multi-device tank --
-    # matches __init__.py's own _register_tank_device() condition exactly
-    # (a single ad-hoc device, or a tank entry that currently has only
-    # one device merged into it, has no synthetic tank/"hub" device to
-    # group under in the first place).
-    tank_identifier = tank_device_identifier(mlprefix_hex) if mlprefix_hex is not None else None
-    via_device = tank_identifier if tank_identifier is not None and len(device_records) > 1 else None
+    # Every entry now has a synthetic tank device to link to, including
+    # an ad-hoc single device -- see tank_device_identifier()'s own
+    # docstring in __init__.py. Previously conditional on mlprefix_hex/
+    # len(device_records) > 1; no longer needed now that
+    # tank_device_identifier() always resolves to something. The
+    # MeshPrefixSensor/GatewayDeviceSensor condition further below is
+    # separate and unchanged -- those two genuinely still need a
+    # confirmed mesh prefix and multi-device gateway election
+    # respectively, unlike via_device grouping itself.
+    tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
+    via_device = tank_identifier
 
     entities: list[SensorEntity] = []
     for device_record in device_records:
@@ -949,10 +953,13 @@ async def async_setup_entry(
         runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific + advanced_features)
 
     # The tank-level prefix sensor, attached to the synthetic tank device
-    # itself, not any one real device -- same condition as via_device
-    # above (only for a genuine multi-device tank, matching
-    # __init__.py's own _register_tank_device()).
-    if tank_identifier is not None and len(device_records) > 1:
+    # itself, not any one real device. Deliberately still gated on
+    # mlprefix_hex/len(device_records) directly (not tank_identifier's
+    # own nullness, since that's now always set -- see above): a
+    # MeshPrefixSensor with no real mesh prefix to show, or a
+    # GatewayDeviceSensor for a device that's trivially always its own
+    # gateway, would be sensors with nothing meaningful to report.
+    if mlprefix_hex is not None and len(device_records) > 1:
         entities.append(MeshPrefixSensor(entry, mlprefix_hex, tank_identifier))
         if registry is not None and pan_id is not None:
             entities.append(GatewayDeviceSensor(entry, pan_id, registry, runtime.coordinators, tank_identifier))

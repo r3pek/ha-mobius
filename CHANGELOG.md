@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Every entry now gets a synthetic tank device, including a single,
+  ad-hoc one -- confirmed via the app's own device-onboarding logic
+  that every device always belongs to a real tank there, even a lone
+  one. Previously only multi-device tanks got one.
+
 ## 0.4.1
 
 - Fixed minimum_flow/maximum_flow (the flow sensor's own attributes)

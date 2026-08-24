@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData, tank_device_identifier
-from .const import CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX
+from .const import CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_PAN_ID
 from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
 from .sensor import _device_info
 
@@ -93,10 +93,15 @@ async def async_setup_entry(
     entity logic, since every device gets exactly one of these."""
     runtime: MobiusRuntimeData = entry.runtime_data
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
+    pan_id = entry.data.get(CONF_PAN_ID)
     device_records = entry.data.get(CONF_DEVICES, [])
 
-    tank_identifier = tank_device_identifier(mlprefix_hex) if mlprefix_hex is not None else None
-    via_device = tank_identifier if tank_identifier is not None and len(device_records) > 1 else None
+    # Every entry now has a synthetic tank device to link to, including
+    # an ad-hoc single device -- see tank_device_identifier()'s own
+    # docstring in __init__.py. Previously conditional on mlprefix_hex/
+    # len(device_records) > 1; no longer needed now that
+    # tank_device_identifier() always resolves to something.
+    via_device = tank_device_identifier(mlprefix_hex, pan_id)
 
     entities: list[RebootButton] = []
     for device_record in device_records:

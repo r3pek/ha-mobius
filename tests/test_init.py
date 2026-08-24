@@ -817,22 +817,28 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
         await hass.config_entries.async_setup(entry.entry_id)
 
     device_registry = dr.async_get(hass)
-    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX)})
+    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX, PAN_ID)})
     assert tank_device is not None
     assert tank_device.name == "Mobius Tank (2 devices)"
 
 
-async def test_single_device_ad_hoc_entry_skips_synthetic_tank_device(hass):
-    """A single, ad-hoc device (no CONF_MLPREFIX at all) must NOT get a
-    synthetic tank device -- a "hub" with one (or zero real) child
-    devices would just be UI noise, not useful grouping. Only checks
+async def test_single_device_ad_hoc_entry_still_registers_synthetic_tank_device(hass):
+    """Confirmed via the app's own device-onboarding logic
+    (ConfiguredDeviceProcess.java): every device always belongs to a
+    real Tank object there, even a lone one -- a fresh device with no
+    existing match gets a brand-new Tank containing just itself, rather
+    than staying tankless. This integration now reflects that: a single,
+    ad-hoc device (no CONF_MLPREFIX at all) still gets its own synthetic
+    tank device, using tank_device_identifier()'s own pan_id-based
+    fallback since there's no real mesh prefix to key on. Only checks
     what __init__.py itself directly controls (_register_tank_device()
-    is called, or isn't) -- the real device's own registration happens
-    via the sensor platform's own DeviceInfo, which async_forward_
-    entry_setups is mocked away here, so it's out of scope for this
-    specific test (covered instead by test_sensor.py's own full
-    happy-path setup)."""
+    is called with the right identifier) -- the real device's own
+    registration happens via the sensor platform's own DeviceInfo, which
+    async_forward_entry_setups is mocked away here, so it's out of scope
+    for this specific test (covered instead by test_sensor.py's own
+    full happy-path setup)."""
     from homeassistant.helpers import device_registry as dr
+    from custom_components.mobius import tank_device_identifier
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -864,11 +870,14 @@ async def test_single_device_ad_hoc_entry_skips_synthetic_tank_device(hass):
     devices_for_entry = [
         d for d in device_registry.devices.values() if entry.entry_id in d.config_entries
     ]
-    # No synthetic tank device was registered at all -- with the real
-    # sensor platform mocked away, this list should be empty (not "the
-    # one real device"), since nothing in __init__.py itself registers
-    # the real device directly.
-    assert devices_for_entry == []
+    # Exactly one device was registered at all -- with the real sensor
+    # platform mocked away, this must be the synthetic tank device
+    # itself (nothing in __init__.py registers the real device
+    # directly), keyed on the pan_id-based fallback identifier since
+    # this entry has no CONF_MLPREFIX.
+    assert len(devices_for_entry) == 1
+    assert devices_for_entry[0].identifiers == {tank_device_identifier(None, PAN_ID)}
+    assert devices_for_entry[0].model == "Tank"
 
 
 # --------------------------------------------------------------------------

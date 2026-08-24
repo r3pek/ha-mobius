@@ -236,11 +236,19 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     assert device.sw_version == "2.1.5"
     assert hass.states.get("sensor.mp40qd_right_calibration") is None
 
-    # No synthetic tank device for a single, ad-hoc entry.
-    assert device.via_device_id is None
-    # No gateway-device sensor either -- there's no synthetic tank
-    # device for it to attach to, and "which device is the gateway"
-    # isn't a meaningful question for a single, ad-hoc device anyway.
+    # Every entry now gets a synthetic tank device to link to, including
+    # this single, ad-hoc entry -- via the pan_id-based fallback
+    # identifier since there's no CONF_MLPREFIX here (see
+    # tank_device_identifier()'s own docstring).
+    assert device.via_device_id is not None
+    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(None, PAN_ID)})
+    assert tank_device is not None
+    assert device.via_device_id == tank_device.id
+    # Still no gateway-device sensor, and no mesh-prefix sensor either --
+    # those two remain gated on an actual confirmed mesh prefix/genuine
+    # multi-device gateway election, neither of which apply here even
+    # though a tank device now exists (see sensor.py's own comment on
+    # that condition).
     gateway_states = [s for s in hass.states.async_all("sensor") if "gateway_device" in s.entity_id]
     assert gateway_states == []
 
@@ -571,7 +579,7 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     assert entry.state.value == "loaded"
 
     device_registry = dr.async_get(hass)
-    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX)})
+    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX, PAN_ID)})
     assert tank_device is not None
 
     pump_device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_SERIAL)})

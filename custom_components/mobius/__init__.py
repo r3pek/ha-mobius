@@ -47,7 +47,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
-def tank_device_identifier(mlprefix_hex: str) -> tuple[str, str]:
+def tank_device_identifier(mlprefix_hex: Optional[str], pan_id: int) -> tuple[str, str]:
     """The synthetic tank device's own device-registry identifier -- a
     real device_registry entry with no coordinator/entities of its own,
     existing purely so every real device's own DeviceInfo can point
@@ -55,11 +55,33 @@ def tank_device_identifier(mlprefix_hex: str) -> tuple[str, str]:
     child devices" grouping this whole feature was designed against (a
     Home Assistant Bluetooth/DHCP/etc-discovered hub with sub-devices --
     not a Mobius-specific mechanism, see this integration's own design
-    notes). Shared here (rather than inlined at each of the two call
-    sites -- registration below, and via_device in sensor.py) so both
-    sides can never drift apart on the exact identifier shape.
+    notes). Shared here (rather than inlined at each of the several call
+    sites -- registration below, and via_device in button.py/sensor.py)
+    so all sides can never drift apart on the exact identifier shape.
+
+    Confirmed via the app's own device-onboarding logic
+    (ConfiguredDeviceProcess.java): every device always belongs to a
+    real Tank object there, even a lone one -- if no existing tank
+    matches, the app creates a brand-new one containing just that single
+    device, rather than leaving it tankless. mlprefix_hex being None
+    doesn't mean "no tank" at the protocol level, only "no confirmed
+    Thread mesh prefix yet" (an ad-hoc single device that's never formed
+    a multi-device mesh permanently has none -- see config_flow.py's own
+    _async_create_entry()) -- this integration should reflect the app's
+    own model, not stop short of it. pan_id is used as the fallback
+    identifier basis for that case specifically, since it's already
+    validated as always present for every entry (see
+    async_setup_entry()'s own pan_id check) regardless of mesh state.
+
+    mlprefix_hex, when present, is kept as the identifier basis
+    unchanged -- an already-registered multi-device tank's own identity
+    (and any user customization on it: area assignment, a renamed
+    device, etc.) must not shift just because this function grew a
+    fallback for a case that didn't have an identifier before.
     """
-    return (DOMAIN, f"tank_{mlprefix_hex}")
+    if mlprefix_hex is not None:
+        return (DOMAIN, f"tank_{mlprefix_hex}")
+    return (DOMAIN, f"tank_panid_{pan_id:04x}")
 
 
 @dataclass
@@ -103,10 +125,13 @@ def _current_rssi(hass: HomeAssistant, serial: str) -> int | None:
     return None
 
 
-def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex: str, device_count: int) -> None:
+def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex: Optional[str],
+                           pan_id: int, device_count: int) -> None:
     """Registers (or updates) the synthetic tank device real devices'
     own DeviceInfo will point via_device at -- see tank_device_identifier()
-    for why this exists at all. Idempotent: safe to call on every setup
+    for why this exists at all, and why it's now called unconditionally
+    (every entry gets one, including an ad-hoc single device -- see that
+    function's own docstring). Idempotent: safe to call on every setup
     (including every Home Assistant restart, not just first-ever setup),
     since async_get_or_create() is itself idempotent. device_count isn't
     stored directly (it would just duplicate what the entry's own,
@@ -117,7 +142,7 @@ def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex:
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={tank_device_identifier(mlprefix_hex)},
+        identifiers={tank_device_identifier(mlprefix_hex, pan_id)},
         name=entry.title,
         manufacturer="EcoTech Marine",
         model="Tank",
@@ -501,16 +526,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
-    # Only registers a synthetic tank ("hub") device -- and therefore
-    # only gets real devices' own via_device grouping under it, see
-    # sensor.py -- for a genuine multi-device tank. A single ad-hoc
-    # device (no confirmed tank prefix at all, or a tank entry that
-    # currently only has one device in it e.g. right after the first of
-    # a two-device tank was added but before the second was merged in)
-    # skips this entirely: a "hub" with one child device (or none real
-    # yet) would just be UI noise, not useful grouping.
-    if mlprefix_hex is not None and len(devices) > 1:
-        _register_tank_device(hass, entry, mlprefix_hex, len(devices))
+    # Every entry gets a synthetic tank device now, including an ad-hoc
+    # single device -- see tank_device_identifier()'s own docstring for
+    # why this reflects the app's own device model (every device always
+    # belongs to a real Tank there, even a lone one) rather than
+    # stopping short of it. Previously gated on mlprefix_hex is not None
+    # and len(devices) > 1 -- neither check is needed anymore now that
+    # tank_device_identifier() has its own pan_id-based fallback for the
+    # case that gate used to exist for.
+    _register_tank_device(hass, entry, mlprefix_hex, pan_id, len(devices))
 
     # Two-phase setup, deliberately: first, PROBE devices (strongest
     # RSSI first, not just CONF_DEVICES' own stored order, so a single

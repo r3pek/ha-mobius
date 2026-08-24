@@ -212,7 +212,7 @@ CONF_DEVICES = "devices"
 # stable identity (see python-mobius's mobius.discovery.discover_tank()):
 # an 8-byte Thread mesh-local prefix, stored here as its hex string. Used
 # as the tank config entry's unique_id, and as the synthetic tank
-# device's own identifier (see __init__.py's _tank_device_identifier())
+# device's own identifier (see __init__.py's tank_device_identifier())
 # for via_device grouping -- more stable than pan_id for this purpose,
 # since pan_id is only ever meant to disambiguate at the BLE-advertisement
 # level, not serve as a long-term stable identity. None (not present in
