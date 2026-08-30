@@ -158,6 +158,24 @@ class PanGroup:
     # that cycle: every member gets a real turn before anyone is
     # reconsidered.
     recently_failed_gateways: set[str] = field(default_factory=set)
+    # Bumped every time _assign_gateway() runs (initial election, any
+    # promotion, or leave()'s own reassignment) -- lets a fetch that
+    # started under an OLDER generation recognize, when it eventually
+    # fails, that the gateway state it was acting on has since been
+    # superseded by a concurrent change. See record_gateway_failure()/
+    # record_relay_failure()'s own docstrings for why this matters: a
+    # fetch's failure can arrive well after the promotion that actually
+    # made it meaningless (a relay attempt through a gateway that's
+    # since been torn down doesn't fail instantly just because the
+    # connection died -- it keeps waiting for a response that will
+    # never come until its own, separate timeout elapses), and without
+    # this, that late failure gets misattributed against whatever the
+    # CURRENT gateway happens to be by the time it's finally recorded --
+    # a real, confirmed production incident where the resulting log
+    # line read "gateway X failed to relay to X", and where each such
+    # misattributed failure could itself trigger another promotion,
+    # compounding into a loop that never settles.
+    generation: int = 0
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -288,13 +306,22 @@ class GatewayRegistry:
     def _assign_gateway(self, group: PanGroup, serial: Optional[str]) -> None:
         """Internal: must be called with group.lock held. Sets up (or
         clears, if serial is None) group.gateway_serial/gateway_connection
-        and resets the failure counter for the new gateway."""
+        and resets the failure counter for the new gateway. Also bumps
+        group.generation unconditionally -- even a "reassignment" to
+        the SAME serial (e.g. leave() re-picking the current gateway
+        because it's still the best candidate) counts as a fresh
+        generation, since the point isn't tracking WHO the gateway is,
+        it's giving every already-in-flight fetch elsewhere a clear,
+        unambiguous signal that whatever they're doing predates this
+        decision -- unconditional is simpler to reason about than
+        trying to special-case "did anything actually change."""
         # Local import to avoid a circular import -- coordinator.py
         # imports GatewayRegistry.
         from .coordinator import MobiusConnectionManager
 
         group.gateway_serial = serial
         group.consecutive_gateway_failures = 0
+        group.generation += 1
         group.gateway_connection = (
             MobiusConnectionManager(self.hass, serial, self.semaphore)
             if serial is not None else None
@@ -396,7 +423,7 @@ class GatewayRegistry:
             await old_connection.disconnect()
         return new_gateway
 
-    async def record_gateway_failure(self, pan_id: int) -> bool:
+    async def record_gateway_failure(self, pan_id: int, expected_generation: int) -> bool:
         """
         Call when the CURRENT gateway's OWN connection/read fails. Returns
         True if this triggered a promotion (the GATEWAY_FAILURE_THRESHOLDth
@@ -404,6 +431,22 @@ class GatewayRegistry:
         logging/tests; the promotion itself already updates
         group.gateway_serial/gateway_connection, so callers don't need to
         branch on the return value to behave correctly.
+
+        expected_generation is the group.generation the caller's own
+        fetch captured back when it STARTED (see coordinator.py's own
+        _fetch()) -- required, not optional, since silently skipping
+        this check is exactly the bug this parameter exists to prevent.
+        If the group has already moved on to a newer generation by the
+        time this failure is finally being recorded (a real, confirmed
+        production case: a fetch that started before a promotion can
+        still be sitting in its own timeout well after that promotion
+        already happened, since a torn-down connection doesn't make an
+        in-flight read fail instantly), this failure no longer means
+        anything about the group's CURRENT gateway and is dropped
+        entirely -- not counted toward any threshold, and specifically
+        never allowed to trigger a second promotion on top of one
+        that's already superseded it. Returns False in that case, same
+        as an ordinary sub-threshold failure.
 
         For a RELAYED read to some other member failing, through a
         gateway whose own reads are still succeeding, see
@@ -414,6 +457,14 @@ class GatewayRegistry:
         if group is None:
             return False
         async with group.lock:
+            if group.generation != expected_generation:
+                _LOGGER.debug(
+                    "Ignoring stale gateway failure for pan_id %#06x -- the group has "
+                    "already moved on to generation %d (this failure was from generation "
+                    "%d, whatever gateway was current back then)",
+                    pan_id, group.generation, expected_generation,
+                )
+                return False
             group.consecutive_gateway_failures += 1
             if group.consecutive_gateway_failures < GATEWAY_FAILURE_THRESHOLD:
                 # Every individual failure logged, not just the one that
@@ -435,7 +486,7 @@ class GatewayRegistry:
             )
             return True
 
-    async def record_relay_failure(self, pan_id: int, target_serial: str) -> bool:
+    async def record_relay_failure(self, pan_id: int, target_serial: str, expected_generation: int) -> bool:
         """
         Call when a RELAYED read to target_serial fails, through a
         gateway whose OWN reads are still succeeding -- see
@@ -445,6 +496,15 @@ class GatewayRegistry:
         gateway is genuinely the best recovery lever available here, not
         just the easiest one.
 
+        expected_generation -- see record_gateway_failure()'s own
+        docstring above for the full reasoning; same staleness check,
+        same reason it's required rather than optional. This is
+        specifically what prevents the confirmed production case where
+        a relay attempt that started through the OLD gateway, before a
+        promotion, finally times out and reports a failure -- which by
+        then can read as the (already promoted) NEW gateway "failing to
+        relay to" a target that, confusingly, might even be itself.
+
         Returns True if this triggered a promotion, matching
         record_gateway_failure()'s own return-value convention.
         """
@@ -452,6 +512,14 @@ class GatewayRegistry:
         if group is None:
             return False
         async with group.lock:
+            if group.generation != expected_generation:
+                _LOGGER.debug(
+                    "Ignoring stale relay failure (target %s) for pan_id %#06x -- the "
+                    "group has already moved on to generation %d (this failure was from "
+                    "generation %d, whatever gateway was current back then)",
+                    target_serial, pan_id, group.generation, expected_generation,
+                )
+                return False
             member = group.members.get(target_serial)
             if member is None:
                 return False

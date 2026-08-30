@@ -19,7 +19,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
     discover_mesh_address, discover_tank_for_serial,
@@ -464,6 +464,66 @@ async def test_gateway_read_failure_after_successful_connect_also_reports_and_ma
     assert coordinator.last_update_success is False
     assert registry.group(PAN_ID).consecutive_gateway_failures == 1
     mock_mark.assert_called_once()
+
+
+async def test_gateway_failure_stale_after_concurrent_promotion_is_dropped(hass):
+    """The actual fix for a real, confirmed production incident: two
+    devices in one tank, gateway election alternating indefinitely
+    (see gateway_registry.py's own TestGenerationFencing for the full
+    incident writeup and the exact self-relay log line it produced).
+    Simulates a promotion happening WHILE this coordinator's own fetch
+    is already in flight -- confirms the resulting failure is
+    recognized as stale (via the generation captured at fetch-start)
+    and dropped entirely: neither the NEW gateway's own failure
+    counter nor its connection's mark_disconnected() should be
+    touched by a failure that predates the promotion.
+
+    Watches MobiusConnectionManager.mark_disconnected() at the CLASS
+    level, not on a specific instance -- the new gateway's own
+    connection object doesn't exist yet at patch-setup time (it's only
+    created by the promotion that happens mid-test), and watching a
+    specific pre-existing instance would only prove mark_disconnected()
+    wasn't called on THAT one, trivially true regardless of whether the
+    fix works, since the bug this fix prevents calls it on the NEW
+    connection instead."""
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    await registry.join(PAN_ID, "other", rssi=-40)
+    entry = MagicMock()
+    coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+    broken_device = MagicMock()
+    broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+
+    group = registry.group(PAN_ID)
+    old_gateway_connection = group.gateway_connection
+
+    async def _ensure_connected_but_promote_first(*args, **kwargs):
+        # Simulates a DIFFERENT coordinator's own concurrent promotion
+        # completing while THIS fetch was already past its own
+        # generation-capture point, but before its own read actually
+        # fails -- exactly the real incident's own timing.
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await registry.record_gateway_failure(PAN_ID, group.generation)
+        return broken_device
+
+    with patch.object(
+        old_gateway_connection, "ensure_connected", side_effect=_ensure_connected_but_promote_first,
+    ), patch.object(MobiusConnectionManager, "mark_disconnected") as mock_mark:
+        await coordinator.async_refresh()
+
+    # The promotion above already happened -- confirm it actually did,
+    # or this test isn't exercising the scenario it claims to.
+    assert registry.group(PAN_ID).gateway_serial == "other"
+    new_gateway_connection = registry.group(PAN_ID).gateway_connection
+    assert new_gateway_connection is not old_gateway_connection
+
+    # The actual point: this coordinator's own (now-stale) failure must
+    # NOT have touched the NEW gateway's state at all -- neither its
+    # failure counter nor mark_disconnected(), on EITHER connection
+    # object (class-level patch catches both).
+    assert registry.group(PAN_ID).consecutive_gateway_failures == 0
+    mock_mark.assert_not_called()
 
 
 # --------------------------------------------------------------------------

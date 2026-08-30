@@ -18,6 +18,26 @@ PAN_A = 0x3D0F
 PAN_B = 0x1234
 
 
+async def _fail_gateway(registry, pan_id):
+    """Fetches the group's own CURRENT generation right before the
+    call, matching exactly how a real coordinator captures it at its
+    own fetch-start (see coordinator.py's own _fetch()) -- correct for
+    every call in a test, including the threshold-reaching one itself
+    (the promotion it triggers hasn't happened yet at the moment this
+    reads group.generation), and for round-robin tests where multiple
+    promotions happen across the test (each subsequent batch of calls
+    picks up whatever the NEW, post-promotion generation now is)."""
+    group = registry.group(pan_id)
+    return await registry.record_gateway_failure(pan_id, group.generation if group else 0)
+
+
+async def _fail_relay(registry, pan_id, target_serial):
+    """Same reasoning as _fail_gateway() above, for the relay-specific
+    counterpart."""
+    group = registry.group(pan_id)
+    return await registry.record_relay_failure(pan_id, target_serial, group.generation if group else 0)
+
+
 @pytest.fixture
 def registry():
     hass = MagicMock()
@@ -102,7 +122,7 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "backup", rssi=-40)
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD - 1):
-            triggered = await registry.record_gateway_failure(PAN_A)
+            triggered = await _fail_gateway(registry, PAN_A)
             assert triggered is False
 
         group = registry.group(PAN_A)
@@ -121,7 +141,7 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "backup", rssi=-40)
 
         for i in range(1, GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
             assert f"failed ({i}/{GATEWAY_FAILURE_THRESHOLD} consecutive)" in caplog.text
 
     @pytest.mark.asyncio
@@ -131,7 +151,7 @@ class TestGatewayFailover:
 
         triggered = None
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            triggered = await registry.record_gateway_failure(PAN_A)
+            triggered = await _fail_gateway(registry, PAN_A)
 
         assert triggered is True
         group = registry.group(PAN_A)
@@ -145,7 +165,7 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "strong_backup", rssi=-30)
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
 
         assert registry.group(PAN_A).gateway_serial == "strong_backup"
 
@@ -167,13 +187,13 @@ class TestGatewayFailover:
         assert registry.group(PAN_A).gateway_serial == "strong_a"
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
         # strong_b is the next-best remaining candidate -- expected,
         # same as the existing by-RSSI test above.
         assert registry.group(PAN_A).gateway_serial == "strong_b"
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
         # The actual point: NOT strong_a again (the old, buggy
         # behavior) -- both strong members have now failed since the
         # last success, so a weak one gets a real turn.
@@ -192,7 +212,7 @@ class TestGatewayFailover:
         seen_as_gateway = {registry.group(PAN_A).gateway_serial}
         for _ in range(3):  # 3 more promotions covers the remaining 3 members
             for _ in range(GATEWAY_FAILURE_THRESHOLD):
-                await registry.record_gateway_failure(PAN_A)
+                await _fail_gateway(registry, PAN_A)
             seen_as_gateway.add(registry.group(PAN_A).gateway_serial)
 
         assert seen_as_gateway == {"a", "b", "c", "d"}
@@ -206,7 +226,7 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "b", rssi=-35)
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
         assert registry.group(PAN_A).gateway_serial == "b"
         assert "a" in registry.group(PAN_A).recently_failed_gateways
 
@@ -214,7 +234,7 @@ class TestGatewayFailover:
         assert registry.group(PAN_A).recently_failed_gateways == set()
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
         # "a" is eligible again -- it's the only other member, so if it
         # weren't, this would have to fall back to gatewayless instead.
         assert registry.group(PAN_A).gateway_serial == "a"
@@ -232,7 +252,7 @@ class TestGatewayFailover:
         promotions = []
         for _ in range(6):  # 3 full ping-pong cycles between the only 2 members
             for _ in range(GATEWAY_FAILURE_THRESHOLD):
-                await registry.record_gateway_failure(PAN_A)
+                await _fail_gateway(registry, PAN_A)
             promotions.append(registry.group(PAN_A).gateway_serial)
 
         # Never gatewayless, never stuck -- alternates cleanly between
@@ -247,13 +267,13 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "backup", rssi=-40)
 
-        await registry.record_gateway_failure(PAN_A)
-        await registry.record_gateway_failure(PAN_A)
+        await _fail_gateway(registry, PAN_A)
+        await _fail_gateway(registry, PAN_A)
         registry.record_gateway_success(PAN_A)
 
         # Counter reset -- should take another full threshold's worth of
         # failures to trigger promotion, not just one more.
-        triggered = await registry.record_gateway_failure(PAN_A)
+        triggered = await _fail_gateway(registry, PAN_A)
         assert triggered is False
         assert registry.group(PAN_A).gateway_serial == "gw"
 
@@ -262,7 +282,7 @@ class TestGatewayFailover:
         await registry.join(PAN_A, "solo", rssi=-50)
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
 
         group = registry.group(PAN_A)
         assert group.gateway_serial is None
@@ -273,7 +293,7 @@ class TestGatewayFailover:
 
     @pytest.mark.asyncio
     async def test_failure_on_nonexistent_group_is_a_safe_noop(self, registry):
-        triggered = await registry.record_gateway_failure(0x9999)
+        triggered = await _fail_gateway(registry, 0x9999)
         assert triggered is False
 
     @pytest.mark.asyncio
@@ -300,7 +320,7 @@ class TestRelayFailover:
         await registry.join(PAN_A, "backup", rssi=-30)
 
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
-            triggered = await registry.record_relay_failure(PAN_A, "target")
+            triggered = await _fail_relay(registry, PAN_A, "target")
             assert triggered is False
 
         assert registry.group(PAN_A).gateway_serial == "gw"
@@ -318,7 +338,7 @@ class TestRelayFailover:
 
         for _ in range(RELAY_FAILURE_THRESHOLD):
             registry.record_gateway_success(PAN_A)  # gateway's own reads keep succeeding
-            await registry.record_relay_failure(PAN_A, "target")
+            await _fail_relay(registry, PAN_A, "target")
 
         group = registry.group(PAN_A)
         assert group.gateway_serial != "gw"
@@ -333,7 +353,7 @@ class TestRelayFailover:
         await registry.join(PAN_A, "target", rssi=-40)
 
         for _ in range(RELAY_FAILURE_THRESHOLD + 5):
-            await registry.record_relay_failure(PAN_A, "target")
+            await _fail_relay(registry, PAN_A, "target")
 
         assert registry.group(PAN_A).consecutive_gateway_failures == 0
 
@@ -344,14 +364,14 @@ class TestRelayFailover:
         await registry.join(PAN_A, "backup", rssi=-30)
 
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
-            await registry.record_relay_failure(PAN_A, "target")
+            await _fail_relay(registry, PAN_A, "target")
         registry.record_relay_success(PAN_A, "target")
         assert registry.group(PAN_A).members["target"].consecutive_relay_failures == 0
 
         # Now needs the FULL threshold again -- confirms the count
         # actually reset, not just got close and stalled.
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
-            triggered = await registry.record_relay_failure(PAN_A, "target")
+            triggered = await _fail_relay(registry, PAN_A, "target")
             assert triggered is False
         assert registry.group(PAN_A).gateway_serial == "gw"
 
@@ -368,9 +388,9 @@ class TestRelayFailover:
         # "other" has some accumulated (but not yet threshold-reached)
         # relay trouble of its own, separate from "target".
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
-            await registry.record_relay_failure(PAN_A, "other")
+            await _fail_relay(registry, PAN_A, "other")
         for _ in range(RELAY_FAILURE_THRESHOLD):
-            await registry.record_relay_failure(PAN_A, "target")
+            await _fail_relay(registry, PAN_A, "target")
 
         group = registry.group(PAN_A)
         assert group.gateway_serial != "gw"
@@ -379,13 +399,13 @@ class TestRelayFailover:
 
     @pytest.mark.asyncio
     async def test_failure_on_nonexistent_group_is_a_safe_noop(self, registry):
-        triggered = await registry.record_relay_failure(0x9999, "nobody")
+        triggered = await _fail_relay(registry, 0x9999, "nobody")
         assert triggered is False
 
     @pytest.mark.asyncio
     async def test_failure_for_nonexistent_member_is_a_safe_noop(self, registry):
         await registry.join(PAN_A, "gw", rssi=-50)
-        triggered = await registry.record_relay_failure(PAN_A, "nonexistent")
+        triggered = await _fail_relay(registry, PAN_A, "nonexistent")
         assert triggered is False
 
     def test_success_on_nonexistent_group_is_a_safe_noop(self, registry):
@@ -449,6 +469,114 @@ class TestUpdateMeshAddress:
         assert registry.group(PAN_A).members["gw"].mesh_address is None
 
 
+class TestGenerationFencing:
+    """The actual fix for a real, confirmed production incident: two
+    devices in one tank, gateway election alternating indefinitely, one
+    log line reading "gateway X failed to relay to X". Root cause: a
+    fetch that started before a promotion can still be sitting in its
+    own timeout well after that promotion already happened (a torn-down
+    connection doesn't make an in-flight read fail instantly) -- when
+    it finally fails, is_gateway (captured back at fetch-start) is
+    stale, so the failure gets misattributed against whatever the
+    CURRENT gateway happens to be by then, which can itself trigger
+    ANOTHER promotion on top of one that already superseded it. These
+    tests confirm a failure carrying an outdated generation number is
+    recognized and dropped, not misattributed."""
+
+    @pytest.mark.asyncio
+    async def test_assign_gateway_bumps_generation(self, registry):
+        await registry.join(PAN_A, "a", rssi=-50)
+        gen_after_join = registry.group(PAN_A).generation
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await _fail_gateway(registry, PAN_A)
+
+        # "a" was solo -- no promotion possible, but _assign_gateway()
+        # still ran (to clear the gateway), so generation still bumps.
+        assert registry.group(PAN_A).generation > gen_after_join
+
+    @pytest.mark.asyncio
+    async def test_stale_gateway_failure_is_dropped_not_recorded(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "backup", rssi=-40)
+        stale_generation = registry.group(PAN_A).generation - 1  # deliberately outdated
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            triggered = await registry.record_gateway_failure(PAN_A, stale_generation)
+            assert triggered is False
+
+        # Even GATEWAY_FAILURE_THRESHOLD calls with a stale generation
+        # must never promote -- the counter itself should never move.
+        group = registry.group(PAN_A)
+        assert group.gateway_serial == "gw"
+        assert group.consecutive_gateway_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_relay_failure_is_dropped_not_recorded(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "target", rssi=-40)
+        stale_generation = registry.group(PAN_A).generation - 1
+
+        for _ in range(RELAY_FAILURE_THRESHOLD):
+            triggered = await registry.record_relay_failure(PAN_A, "target", stale_generation)
+            assert triggered is False
+
+        group = registry.group(PAN_A)
+        assert group.gateway_serial == "gw"  # never promoted away
+        assert group.members["target"].consecutive_relay_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_reproduces_the_real_incident_self_relay_scenario(self, registry):
+        """The exact production sequence: a relay attempt starts under
+        the CURRENT generation, a concurrent promotion happens (bumping
+        the generation) before that attempt's own failure is recorded,
+        and the failure -- captured with the OLD generation, exactly as
+        coordinator.py's own _fetch() would -- must be dropped rather
+        than counted against whichever gateway is current by the time
+        it's finally recorded."""
+        await registry.join(PAN_A, "AAAA", rssi=-50)
+        await registry.join(PAN_A, "BBBB", rssi=-40)
+        assert registry.group(PAN_A).gateway_serial == "AAAA"
+
+        # AAAA's own coordinator "starts a relay attempt to BBBB"
+        # (there is no actual connection here -- this test is purely
+        # about the registry's own bookkeeping) and captures the
+        # CURRENT generation, exactly as _fetch() does.
+        captured_generation = registry.group(PAN_A).generation
+
+        # While that relay attempt is still "in flight", AAAA's OWN
+        # gateway health fails independently and promotes BBBB.
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await _fail_gateway(registry, PAN_A)
+        assert registry.group(PAN_A).gateway_serial == "BBBB"
+
+        # The original relay attempt (to BBBB, captured back when AAAA
+        # was still gateway) NOW fails, and reports it using the
+        # generation it captured back at its own start -- stale by now.
+        for _ in range(RELAY_FAILURE_THRESHOLD):
+            triggered = await registry.record_relay_failure(PAN_A, "BBBB", captured_generation)
+            assert triggered is False
+
+        # The actual point: BBBB must still be gateway -- the stale
+        # relay failure must NOT have promoted anyone else (which, in
+        # the real incident, could cascade into an oscillating loop).
+        assert registry.group(PAN_A).gateway_serial == "BBBB"
+
+    @pytest.mark.asyncio
+    async def test_current_generation_failure_still_promotes_normally(self, registry):
+        """Confirms the fencing check doesn't just always return False
+        -- a failure carrying the group's ACTUAL current generation
+        still counts and can still promote, same as before this fix."""
+        await registry.join(PAN_A, "gw", rssi=-50)
+        await registry.join(PAN_A, "backup", rssi=-40)
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            triggered = await _fail_gateway(registry, PAN_A)
+
+        assert triggered is True
+        assert registry.group(PAN_A).gateway_serial == "backup"
+
+
 class TestCrossGroupIsolation:
     @pytest.mark.asyncio
     async def test_two_groups_are_fully_independent(self, registry):
@@ -457,7 +585,7 @@ class TestCrossGroupIsolation:
         await registry.join(PAN_B, "b1", rssi=-50)
 
         for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await registry.record_gateway_failure(PAN_A)
+            await _fail_gateway(registry, PAN_A)
 
         group_a = registry.group(PAN_A)
         group_b = registry.group(PAN_B)

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed gateway election oscillating indefinitely in some multi-device
+  tanks -- a stale, in-flight failure could get misattributed against
+  whatever gateway was current by the time it was recorded, sometimes
+  triggering another promotion on top of one that had already
+  superseded it. Fetches now carry a generation number; a failure
+  whose generation is already stale is dropped rather than counted.
 - **Breaking**: LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
   FanShutdownEnabled are now switch/select entities (writable), not
   read-only sensors -- requires a python-mobius version with

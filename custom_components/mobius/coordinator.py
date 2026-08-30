@@ -626,6 +626,16 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         is_gateway = group.gateway_serial == self.serial
+        # Captured alongside is_gateway, at the exact same moment, for
+        # the exact same reason: a fetch's failure can arrive well after
+        # the underlying gateway state it was acting on has already been
+        # superseded by a concurrent promotion elsewhere (a torn-down
+        # connection doesn't make an in-flight read fail instantly -- it
+        # keeps waiting for a response that will never come until its
+        # own, separate timeout elapses). See PanGroup.generation's own
+        # docstring in gateway_registry.py for the full reasoning and the
+        # real, confirmed production incident this fixes.
+        expected_generation = group.generation
         _LOGGER.debug(
             "%s polling as %s", self.serial, "gateway" if is_gateway else "relayed",
         )
@@ -639,36 +649,55 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data = await _fetch_all(device)
                 self.registry.record_relay_success(self.pan_id, self.serial)
         except Exception as err:
-            # A READ can fail even after ensure_connected() reported
-            # success (the connection can drop in between) -- this needs
-            # to mark the connection disconnected in that case too, not
-            # just when ensure_connected() itself raises, or the next
-            # poll cycle would keep reusing the same dead connection
-            # forever instead of ever actually reconnecting.
-            #
-            # A relayed device's own failure never touches the shared
-            # gateway CONNECTION's state (mark_disconnected()) -- it
-            # might be specific to this one device/target, not the
-            # gateway connection itself, which the gateway's own
-            # coordinator already detects and handles independently on
-            # its own cycle. It DOES still count toward a separate,
-            # per-target failure tally (record_relay_failure()) though --
-            # a real, confirmed production incident showed a gateway can
-            # be perfectly healthy for its own reads, and for relaying to
-            # OTHER members, while persistently failing to relay to one
-            # specific target for 40+ minutes straight. See
-            # RELAY_FAILURE_THRESHOLD's own docstring in const.py for why
-            # this is a genuinely different symptom from the gateway's
-            # own health, kept as a deliberately separate mechanism.
             _LOGGER.debug(
                 "%s poll (%s) failed: %s", self.serial,
                 "gateway" if is_gateway else "relayed", err,
             )
-            if is_gateway:
+            if group.generation != expected_generation:
+                # A promotion already happened elsewhere while this
+                # fetch was still in flight -- is_gateway (and whichever
+                # connection this fetch actually used) reflect a gateway
+                # state that's already been superseded, so nothing here
+                # says anything meaningful about the group's CURRENT
+                # gateway. Deliberately skips mark_disconnected() too,
+                # not just the registry calls below it: group.
+                # gateway_connection read now would be the NEW
+                # connection (a different object than whatever this
+                # fetch actually used), and marking THAT one
+                # disconnected would incorrectly flag a connection that
+                # was never actually part of this failure at all.
+                _LOGGER.debug(
+                    "%s's own fetch started under generation %d, but pan_id %#06x is "
+                    "now on generation %d -- not recording this failure against the "
+                    "current gateway.",
+                    self.serial, expected_generation, self.pan_id, group.generation,
+                )
+            elif is_gateway:
+                # A READ can fail even after ensure_connected() reported
+                # success (the connection can drop in between) -- this
+                # needs to mark the connection disconnected in that case
+                # too, not just when ensure_connected() itself raises,
+                # or the next poll cycle would keep reusing the same
+                # dead connection forever instead of ever actually
+                # reconnecting.
                 group.gateway_connection.mark_disconnected()
-                await self.registry.record_gateway_failure(self.pan_id)
+                await self.registry.record_gateway_failure(self.pan_id, expected_generation)
             else:
-                await self.registry.record_relay_failure(self.pan_id, self.serial)
+                # A relayed device's own failure never touches the shared
+                # gateway CONNECTION's state (mark_disconnected()) -- it
+                # might be specific to this one device/target, not the
+                # gateway connection itself, which the gateway's own
+                # coordinator already detects and handles independently on
+                # its own cycle. It DOES still count toward a separate,
+                # per-target failure tally (record_relay_failure()) though --
+                # a real, confirmed production incident showed a gateway can
+                # be perfectly healthy for its own reads, and for relaying to
+                # OTHER members, while persistently failing to relay to one
+                # specific target for 40+ minutes straight. See
+                # RELAY_FAILURE_THRESHOLD's own docstring in const.py for why
+                # this is a genuinely different symptom from the gateway's
+                # own health, kept as a deliberately separate mechanism.
+                await self.registry.record_relay_failure(self.pan_id, self.serial, expected_generation)
             raise
 
         # Every device -- gateway and relayed alike -- picks up its own,
