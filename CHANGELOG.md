@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Breaking**: LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
+  FanShutdownEnabled are now switch/select entities (writable), not
+  read-only sensors -- requires a python-mobius version with
+  set_advanced_features(). The old sensor.* entities won't be
+  re-created; remove them manually from the entity registry and
+  update any automations/dashboards to the new switch.*/select.*
+  entity_ids.
 - Every entry now gets a synthetic tank device, including a single,
   ad-hoc one -- confirmed via the app's own device-onboarding logic
   that every device always belongs to a real tank there, even a lone

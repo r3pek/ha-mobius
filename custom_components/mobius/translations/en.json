@@ -52,18 +52,6 @@
       "calibration": {
         "name": "Calibration"
       },
-      "local_control_enabled": {
-        "name": "Local control"
-      },
-      "auto_dim_timeout": {
-        "name": "LED auto-dim timeout"
-      },
-      "max_fan_speed": {
-        "name": "Max fan speed"
-      },
-      "fan_shutdown_enabled": {
-        "name": "Fan shutdown"
-      },
       "firmware_version": {
         "name": "Firmware version"
       },
@@ -83,6 +71,22 @@
     "button": {
       "reboot": {
         "name": "Reboot"
+      }
+    },
+    "switch": {
+      "local_control_enabled": {
+        "name": "Local control"
+      },
+      "fan_shutdown_enabled": {
+        "name": "Fan shutdown"
+      }
+    },
+    "select": {
+      "auto_dim_timeout": {
+        "name": "LED auto-dim timeout"
+      },
+      "max_fan_speed": {
+        "name": "Max fan speed"
       }
     }
   }

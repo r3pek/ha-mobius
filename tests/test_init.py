@@ -823,8 +823,8 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
 
 
 async def test_single_device_ad_hoc_entry_still_registers_synthetic_tank_device(hass):
-    """Confirmed via the app's own device-onboarding logic
-    (ConfiguredDeviceProcess.java): every device always belongs to a
+    """Confirmed via reverse engineering the app's own device-onboarding
+    logic: every device always belongs to a
     real Tank object there, even a lone one -- a fresh device with no
     existing match gets a brand-new Tank containing just itself, rather
     than staying tankless. This integration now reflects that: a single,
@@ -1736,29 +1736,3 @@ class TestEnsureSensorsExist:
         # entry.runtime_data deliberately never set at all.
 
         await _async_ensure_sensors_exist(hass, entry)  # must not raise
-
-    async def test_creates_missing_advanced_feature_entities_when_data_becomes_available(self, hass):
-        """The same healing mechanism, for AdvancedFeatures specifically
-        -- confirms _build_advanced_feature_entities() is genuinely
-        wired into the healing path too, not just initial setup.
-        Deliberately Radion-style data (support="light") to also
-        confirm these aren't gated on "support" the way type-specific
-        entities are -- see that function's own docstring."""
-        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-7")
-        entry.add_to_hass(hass)
-        data = {
-            "support": "light", "channels": [], "current_intensities": {}, "calibration": None,
-            "advanced_features": {
-                "local_control_enabled": None, "auto_dim_timeout": None,
-                "max_fan_speed": 60.0, "fan_shutdown_enabled": False,
-            },
-        }
-        runtime = _make_runtime_for_healing_test(hass, entry, LIGHT_SERIAL, data)
-
-        await _async_ensure_sensors_exist(hass, entry)
-
-        runtime.sensor_add_entities.assert_called_once()
-        added = runtime.sensor_add_entities.call_args[0][0]
-        assert {e.unique_id for e in added} == {
-            f"{LIGHT_SERIAL}_max_fan_speed", f"{LIGHT_SERIAL}_fan_shutdown_enabled",
-        }

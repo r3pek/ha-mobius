@@ -33,7 +33,7 @@ from .gateway_registry import GatewayRegistry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT]
 
 # This integration is config-entry-only (config_flow: true in manifest.json,
 # devices discovered via Bluetooth or added manually through the UI) -- no
@@ -59,8 +59,8 @@ def tank_device_identifier(mlprefix_hex: Optional[str], pan_id: int) -> tuple[st
     sites -- registration below, and via_device in button.py/sensor.py)
     so all sides can never drift apart on the exact identifier shape.
 
-    Confirmed via the app's own device-onboarding logic
-    (ConfiguredDeviceProcess.java): every device always belongs to a
+    Confirmed via reverse engineering the app's own device-onboarding
+    logic: every device always belongs to a
     real Tank object there, even a lone one -- if no existing tank
     matches, the app creates a brand-new one containing just that single
     device, rather than leaving it tankless. mlprefix_hex being None
@@ -193,7 +193,7 @@ async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -
     # Local import: sensor.py itself imports from this module
     # (MobiusRuntimeData, tank_device_identifier) -- a top-level import
     # here would be circular.
-    from .sensor import _build_type_specific_entities, _build_advanced_feature_entities
+    from .sensor import _build_type_specific_entities
 
     new_entities = []
     for serial, coordinator in runtime.coordinators.items():
@@ -205,14 +205,14 @@ async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -
         if not support:
             continue  # still nothing to build from -- next cycle's own retry
         candidates = _build_type_specific_entities(coordinator, serial, device_info, support, data)
-        # Independent of "support" entirely -- see _build_advanced_feature_
-        # entities()'s own docstring for why gating this on pump/light type
-        # would reintroduce exactly the per-device-type hardcoding this was
-        # built to avoid. Still gated on the same "not support: continue"
-        # above, though -- that's really just a proxy for "has this device's
-        # coordinator ever completed a successful fetch at all", which
-        # get_advanced_features() itself depends on regardless.
-        candidates += _build_advanced_feature_entities(coordinator, serial, device_info, data)
+        # AdvancedFeatures (LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
+        # FanShutdownEnabled) used to be healed here too -- moved to
+        # switch.py/select.py now that python-mobius supports writing
+        # them, and this healing mechanism doesn't cover those two
+        # platforms yet (see switch.py's own module docstring for the
+        # known gap this leaves: a relayed device whose data snapshot
+        # was still empty at initial setup won't get its advanced-
+        # feature switches/selects until a full Home Assistant restart).
         missing = [e for e in candidates if e.unique_id not in runtime.created_sensor_unique_ids]
         if missing:
             new_entities += missing
