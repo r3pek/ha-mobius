@@ -87,7 +87,7 @@ from mobius import (
     PRIMITIVE_SIZE, extract_short_address,
 )
 
-from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN
+from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
 from .gateway_registry import GatewayRegistry, PanGroup
 
 _LOGGER = logging.getLogger(__name__)
@@ -373,8 +373,8 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
 
 
 async def _fetch_all(
-    device, minute_of_day_now=None, cached_supported_attribute_ids=None,
-) -> tuple[dict[str, Any], set[int]]:
+    device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
+) -> tuple[dict[str, Any], set[int], bool]:
     """
     The actual read logic, covering both status (identity + live
     telemetry) and schedule (programmed schedule + firmware version) in
@@ -382,21 +382,29 @@ async def _fetch_all(
     MobiusDevice or a RelayedMobiusDevice -- identical either way, since
     RelayedMobiusDevice implements the same interface transparently.
 
-    Returns (info, supported_attribute_ids) -- the second element is
-    NOT part of info/coordinator.data (diagnostics.py dumps that dict
-    directly, and a raw set of attribute IDs has no business leaking
-    into a user-submitted diagnostic report) -- it's specifically for
-    the caller (MobiusDeviceCoordinator._fetch()) to cache on itself
-    across poll cycles. See get_metadata_batch()'s own docstring in
-    python-mobius for why this caching matters: a device's own
-    attribute support essentially never changes across a session, so
-    fetching it once and reusing it indefinitely avoids paying for a
-    whole extra round-trip every single poll, forever.
+    Returns (info, supported_attribute_ids, used_batch) -- the second
+    and third elements are NOT part of info/coordinator.data
+    (diagnostics.py dumps that dict directly, and neither a raw set of
+    attribute IDs nor an internal bookkeeping flag has any business
+    leaking into a user-submitted diagnostic report) -- both are
+    specifically for the caller (MobiusDeviceCoordinator._fetch()) to
+    track on itself across poll cycles. See get_metadata_batch()'s own
+    docstring in python-mobius for why the first caching matters: a
+    device's own attribute support essentially never changes across a
+    session, so fetching it once and reusing it indefinitely avoids
+    paying for a whole extra round-trip every single poll, forever.
 
     cached_supported_attribute_ids -- pass whatever the coordinator
     already has cached from a PRIOR call to skip fetching it again this
     time. None (the default, and always the case on a coordinator's own
     very first poll) means fetch it fresh.
+
+    batch_disabled -- pass True once the coordinator has confirmed (via
+    used_batch coming back False BATCH_FAILURE_THRESHOLD times running)
+    that this specific device's batch mechanism doesn't work at all --
+    passed straight through as get_metadata_batch()'s own
+    force_individual_reads, skipping a batch attempt already known to
+    be doomed rather than paying for it every single poll forever.
     """
     info = await device.get_device_info()
     primitive_name = info.get("primitive_type")
@@ -463,6 +471,7 @@ async def _fetch_all(
             supported_attribute_ids = set()
     metadata = await device.get_metadata_batch(
         model=model, supported_attribute_ids=supported_attribute_ids,
+        force_individual_reads=batch_disabled,
     )
 
     info["firmware_versions"] = metadata.firmware_versions
@@ -514,7 +523,7 @@ async def _fetch_all(
     # whichever devices support none of the four underlying attributes.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    return info, supported_attribute_ids
+    return info, supported_attribute_ids, metadata.used_batch
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -537,6 +546,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # so this avoids paying for a whole extra get_supported_attributes()
         # round-trip on every single poll, forever, once it's known.
         self._supported_attribute_ids: Optional[set[int]] = None
+        # Both reset to these defaults on every Home Assistant restart
+        # or config-entry reload -- MobiusDeviceCoordinator instances
+        # are always freshly created (see async_setup_entry()'s own
+        # for-loop), never reused across one, so there's no separate
+        # reset path needed for that.
+        self._consecutive_batch_failures = 0
+        self._batch_disabled = False
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -661,6 +677,41 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         peer = await self._resolve_own_mesh_peer(group)
         return RelayedMobiusDevice(gateway_device, peer)
 
+    def _record_batch_result(self, used_batch: bool) -> None:
+        """
+        Tracks whether get_metadata_batch()'s own batched request is
+        actually working for THIS device -- see BATCH_FAILURE_THRESHOLD's
+        own docstring in const.py for the full reasoning. Only ever
+        called after a successful poll (used_batch only means something
+        once _fetch_all() has actually returned) -- a poll that fails
+        entirely (the connection itself down, say) never reaches this at
+        all, and correctly leaves whatever was already tracked here
+        untouched.
+        """
+        if used_batch:
+            if self._consecutive_batch_failures > 0:
+                _LOGGER.debug(
+                    "%s: batched metadata read succeeded again after %d consecutive "
+                    "failure(s) -- resetting the counter",
+                    self.serial, self._consecutive_batch_failures,
+                )
+            self._consecutive_batch_failures = 0
+            return
+
+        self._consecutive_batch_failures += 1
+        _LOGGER.debug(
+            "%s: batched metadata read failed this poll (the individual-reads "
+            "fallback was used instead, successfully) -- %d/%d consecutive",
+            self.serial, self._consecutive_batch_failures, BATCH_FAILURE_THRESHOLD,
+        )
+        if self._consecutive_batch_failures >= BATCH_FAILURE_THRESHOLD and not self._batch_disabled:
+            self._batch_disabled = True
+            _LOGGER.debug(
+                "%s: disabling batched metadata reads after %d consecutive failures -- "
+                "using individual reads for every future poll on this device instead",
+                self.serial, self._consecutive_batch_failures,
+            )
+
     async def _fetch(self) -> dict[str, Any]:
         group = self.registry.group(self.pan_id)
         if group is None or group.gateway_serial is None:
@@ -685,15 +736,19 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             device = await self.async_get_connected_device()
             if is_gateway:
-                data, self._supported_attribute_ids = await _fetch_all(
+                data, self._supported_attribute_ids, used_batch = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                    batch_disabled=self._batch_disabled,
                 )
+                self._record_batch_result(used_batch)
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
             else:
-                data, self._supported_attribute_ids = await _fetch_all(
+                data, self._supported_attribute_ids, used_batch = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                    batch_disabled=self._batch_disabled,
                 )
+                self._record_batch_result(used_batch)
                 self.registry.record_relay_success(self.pan_id, self.serial)
         except Exception as err:
             _LOGGER.debug(

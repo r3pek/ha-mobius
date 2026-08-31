@@ -111,6 +111,19 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # different problems actually happened when read back from logs later.
 RELAY_FAILURE_THRESHOLD = 3
 
+# Consecutive times get_metadata_batch()'s own batched read fails (its
+# own individual-reads fallback still succeeding each time -- see that
+# method's own docstring in python-mobius) before this integration
+# stops even attempting the batch on this device and goes straight to
+# individual reads every poll from then on. Deliberately small and
+# deliberately gated on the FALLBACK succeeding each time -- a single
+# batch failure could be a one-off (a transient BLE hiccup unrelated to
+# batch support at all), but this specific device's batch mechanism is
+# genuinely unsupported (old firmware, or an untested device family)
+# once it's failed this many times in a row while everything else
+# about the connection was clearly fine.
+BATCH_FAILURE_THRESHOLD = 2
+
 # How long any single device (gateway or relayed) can go without a
 # successful read before its entities are marked unavailable. The general
 # backstop for every device -- GATEWAY_FAILURE_THRESHOLD above is a

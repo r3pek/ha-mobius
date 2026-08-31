@@ -613,7 +613,7 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
     fake_pump_device = _fake_pump_device()
     fetch_all_calls = {"n": 0}
 
-    async def flaky_fetch_all(device, minute_of_day_now=None, cached_supported_attribute_ids=None):
+    async def flaky_fetch_all(device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False):
         # PUMP_SERIAL (the gateway) always succeeds; LIGHT_SERIAL's own
         # relayed fetch fails on its first call, then succeeds on retry.
         if device is fake_pump_device:
@@ -622,11 +622,11 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
                 "telemetry": {"speed_percent": 10.0, "gph": 500},
                 "current_pump_mode": "TidalSwell", "current_pump_params": {},
                 "schedule_point_count": 1, "firmware_versions": {}, "hardware_info": {},
-            }, set()
+            }, set(), True
         fetch_all_calls["n"] += 1
         if fetch_all_calls["n"] == 1:
             raise IOError("transient relay hiccup")
-        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}, set()
+        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}, set(), True
 
     with patch(
         "custom_components.mobius.discover_tank_for_serial",

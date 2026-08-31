@@ -19,7 +19,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD
+from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
     discover_mesh_address, discover_tank_for_serial,
@@ -461,7 +461,7 @@ class TestSupportedAttributeIdCaching:
         # And the cached set was genuinely what got passed through --
         # confirms this isn't just "never called again" by coincidence.
         fake_device.get_metadata_batch.assert_awaited_with(
-            model=Model.VorTechMP40wG3QD, supported_attribute_ids={300},
+            model=Model.VorTechMP40wG3QD, supported_attribute_ids={300}, force_individual_reads=False,
         )
 
     async def test_cache_not_updated_on_a_failed_poll(self, hass):
@@ -482,6 +482,101 @@ class TestSupportedAttributeIdCaching:
 
         assert coordinator.last_update_success is False
         assert coordinator._supported_attribute_ids == {999}  # untouched
+
+
+class TestBatchFailureThreshold:
+    """See BATCH_FAILURE_THRESHOLD's own docstring in const.py for the
+    full reasoning: get_metadata_batch()'s own batched request failing
+    (its individual-reads fallback still succeeding each time) should
+    disable further batch attempts on this specific device after
+    BATCH_FAILURE_THRESHOLD consecutive such failures -- but a single
+    failure shouldn't disable anything yet, and a success in between
+    should reset the streak rather than letting failures accumulate
+    across it.
+
+    Most of these call _record_batch_result() directly -- it's a pure,
+    synchronous method, and testing it this way is far more direct
+    than driving a full async_refresh() cycle just to exercise its own
+    internal counter logic.
+    """
+
+    def test_single_failure_does_not_disable_batching_yet(self, hass):
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        coordinator._record_batch_result(used_batch=False)
+
+        assert coordinator._consecutive_batch_failures == 1
+        assert coordinator._batch_disabled is False
+
+    def test_reaching_the_threshold_disables_batching(self, hass):
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        for _ in range(BATCH_FAILURE_THRESHOLD):
+            coordinator._record_batch_result(used_batch=False)
+
+        assert coordinator._consecutive_batch_failures == BATCH_FAILURE_THRESHOLD
+        assert coordinator._batch_disabled is True
+
+    def test_success_in_between_resets_the_streak(self, hass):
+        """Fail, succeed, fail -- must NOT disable batching, since the
+        success in between resets the counter. Confirms failures don't
+        accumulate across a success the way a naive lifetime counter
+        would."""
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        coordinator._record_batch_result(used_batch=False)
+        coordinator._record_batch_result(used_batch=True)
+        coordinator._record_batch_result(used_batch=False)
+
+        assert coordinator._consecutive_batch_failures == 1
+        assert coordinator._batch_disabled is False
+
+    def test_success_after_disabling_would_still_leave_it_disabled(self, hass):
+        """Once disabled, this integration commits to individual reads
+        for that device going forward -- a later used_batch=True isn't
+        actually possible in practice once force_individual_reads=True
+        is being passed (get_metadata_batch() wouldn't even attempt the
+        batch), but confirms _record_batch_result() itself doesn't
+        un-disable on a stray True either, since that would contradict
+        the whole point of having decided the mechanism doesn't work
+        for this device."""
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._batch_disabled = True
+        coordinator._consecutive_batch_failures = BATCH_FAILURE_THRESHOLD
+
+        coordinator._record_batch_result(used_batch=True)
+
+        assert coordinator._consecutive_batch_failures == 0
+        assert coordinator._batch_disabled is True  # NOT reset -- stays disabled
+
+    async def test_once_disabled_the_next_fetch_requests_individual_reads(self, hass):
+        """The actual end-to-end point of all this bookkeeping: once
+        disabled, the NEXT poll must ask get_metadata_batch() for
+        force_individual_reads=True, not just track the state
+        internally without ever acting on it."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._batch_disabled = True  # simulate having already crossed the threshold
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        fake_device.get_metadata_batch.assert_awaited_with(
+            model=Model.VorTechMP40wG3QD, supported_attribute_ids=set(), force_individual_reads=True,
+        )
 
 
 async def test_gateway_read_success_resets_registry_failure_counter(hass):

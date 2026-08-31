@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A device whose batched metadata read fails 2 polls in a row (e.g. no
+  batch support at all -- old firmware, or an untested device family)
+  now falls back to individual reads permanently for that device,
+  logged at debug level, instead of retrying a doomed batch forever.
+  Requires a python-mobius version with get_metadata_batch()'s own
+  individual-reads fallback.
 - Coordinators now fetch AdvancedFeatures/CalibrationInfo/hardware/
   firmware/channels in one round-trip (get_metadata_batch()) instead
   of five separate ones -- confirmed 6-14x faster over relay on real
