@@ -473,15 +473,36 @@ async def _fetch_all(
         model=model, supported_attribute_ids=supported_attribute_ids,
         force_individual_reads=batch_disabled,
     )
+    # Combined across every batch attempt this poll makes (metadata,
+    # plus get_light_poll_batch() below for a light device) -- both use
+    # the same underlying batch-get mechanism, so a failure in either
+    # genuinely signals the same fact about this device ("its batch
+    # mechanism doesn't work"), tracked as one shared counter rather
+    # than two independent ones.
+    used_batch = metadata.used_batch
 
     info["firmware_versions"] = metadata.firmware_versions
     info["hardware_info"] = metadata.hardware_info
 
     if primitive in LIGHT_PRIMITIVES:
         info["channels"] = [c.name for c in metadata.supported_channels]
-        points = await device.get_light_schedule(which=1)
+        # ONE combined round-trip for the schedule itself plus every
+        # lunar/acclimation/insolation-related attribute
+        # process_light_intensities() might need -- replaces what used
+        # to be get_light_schedule() (for schedule_point_count) followed
+        # by a SEPARATE get_current_light_intensities() call that
+        # re-fetched that exact same schedule internally, on top of its
+        # own further, conditional round trips. See
+        # get_light_poll_batch()'s own docstring in python-mobius.
+        light_poll = await device.get_light_poll_batch(
+            which=1, minute_of_day=minute_of_day, now=now,
+            supported_attribute_ids=supported_attribute_ids,
+            force_individual_reads=batch_disabled,
+        )
+        used_batch = used_batch and light_poll.used_batch
+        points = light_poll.schedule_points
         info["schedule_point_count"] = len(points)
-        current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
+        current = light_poll.intensities
         info["current_intensities"] = {ch.name: v for ch, v in current.items()}
         # A real, confirmed need for this: the app applies a lunar-phase
         # reduction (or not) on top of the raw schedule-interpolated
@@ -504,7 +525,9 @@ async def _fetch_all(
     elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
         points = await device.get_pump_schedule(which=1)
         info["schedule_point_count"] = len(points)
-        block = await device.get_current_pump_block(which=1, minute_of_day=minute_of_day)
+        # Reuses the schedule already fetched above -- get_current_pump_block()
+        # would otherwise re-fetch that exact same attribute internally.
+        block = await device.get_current_pump_block(which=1, minute_of_day=minute_of_day, points=points)
         if block:
             info["current_pump_mode"] = block.pump.mode.name
             info["current_pump_params"] = {
@@ -523,7 +546,7 @@ async def _fetch_all(
     # whichever devices support none of the four underlying attributes.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    return info, supported_attribute_ids, metadata.used_batch
+    return info, supported_attribute_ids, used_batch
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -688,6 +711,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         all, and correctly leaves whatever was already tracked here
         untouched.
         """
+        _LOGGER.debug("%s: metadata fetch used_batch=%s", self.serial, used_batch)
         if used_batch:
             if self._consecutive_batch_failures > 0:
                 _LOGGER.debug(

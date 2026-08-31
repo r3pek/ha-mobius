@@ -17,7 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute
+from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute, LightPollResult
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -96,19 +96,19 @@ def _fake_light_device():
         c = MagicMock()
         c.name = name
         channel_objs.append(c)
-    device.get_light_schedule = AsyncMock(return_value=[MagicMock()] * 9)
 
     intensity_map = {}
     for name, value in REAL_LIGHT_INTENSITIES.items():
         key = MagicMock()
         key.name = name
         intensity_map[key] = value
-    device.get_current_light_intensities = AsyncMock(
-        return_value=LightIntensityResult(intensity_map, diagnostics={
+    device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+        schedule_points=[MagicMock()] * 9,
+        intensities=LightIntensityResult(intensity_map, diagnostics={
             "insolation_active": False, "is_night_segment": False,
             "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
-        })
-    )
+        }),
+    ))
 
     calibration = MagicMock()
     calibration.completed = True

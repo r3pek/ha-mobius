@@ -17,7 +17,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import Tank, AdvancedFeatures, MetadataSnapshot
+from mobius import Tank, AdvancedFeatures, MetadataSnapshot, LightPollResult, LightIntensityResult
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 
@@ -38,11 +38,13 @@ def _minimal_light_device(advanced_features_dict):
         "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
     })
     device.get_supported_channels = AsyncMock(return_value=[])
-    device.get_light_schedule = AsyncMock(return_value=[])
-    device.get_current_light_intensities = AsyncMock(return_value=MagicMock(diagnostics={
-        "insolation_active": False, "is_night_segment": False,
-        "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
-    }))
+    device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+        schedule_points=[],
+        intensities=LightIntensityResult({}, diagnostics={
+            "insolation_active": False, "is_night_segment": False,
+            "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
+        }),
+    ))
     device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
         advanced_features=AdvancedFeatures(**advanced_features_dict),
         calibration=None, hardware_info={}, firmware_versions={}, supported_channels=[],

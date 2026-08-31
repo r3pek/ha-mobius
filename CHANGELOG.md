@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Light devices now use get_light_poll_batch() -- one round-trip for
+  the schedule plus lunar/acclimation/insolation state, instead of
+  fetching the schedule once directly then again inside a separate
+  intensity calculation. Pumps similarly stop re-fetching their own
+  schedule for the current-block lookup. Requires a matching
+  python-mobius version.
+- Added a debug log confirming used_batch on every poll -- previously
+  only failures were logged, so a device that always batches
+  successfully produced no confirming log line at all.
+
 ## 0.5.0
 
 - Fixed three Home Assistant device_registry deprecations (async_get_device,

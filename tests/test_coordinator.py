@@ -26,7 +26,7 @@ from custom_components.mobius.coordinator import (
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
@@ -81,6 +81,28 @@ def _make_fake_pump_device():
             "Product OS": "2.1.5", "Product Bootloader": "1.0",
         },
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
+    return device
+
+
+def _make_fake_light_device():
+    device = MagicMock()
+    device.get_device_info = AsyncMock(return_value={
+        "model_raw": 179, "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
+        "name": "", "serial": LIGHT_SERIAL,
+        "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
+    })
+    device.identify_device_type = AsyncMock(return_value=PrimitiveType.VisualV1)
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
+    device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+        schedule_points=[],
+        intensities=LightIntensityResult({}, diagnostics={
+            "insolation_active": False, "is_night_segment": False,
+            "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
+        }),
     ))
     return device
 
@@ -518,6 +540,54 @@ class TestSupportedAttributeNames:
         assert "LocalControlEnabled" in names
         assert "unknown(99999)" in names
         assert len(names) == 2  # confirms it's rendered, not silently dropped
+
+
+class TestLightPollBatchWiring:
+    """The actual point of wiring get_light_poll_batch() into
+    _fetch_all(): a light device's own poll now makes this call, and
+    its own used_batch is combined with get_metadata_batch()'s --
+    both use the same underlying batch-get mechanism, so a failure in
+    EITHER is tracked as one shared counter rather than two
+    independent ones (see BATCH_FAILURE_THRESHOLD's own docstring)."""
+
+    async def test_light_poll_batch_is_called_and_its_data_used(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        fake_device.get_light_poll_batch.assert_awaited_once()
+        assert coordinator.data["schedule_point_count"] == 0
+        assert coordinator.data["current_intensities"] == {}
+
+    async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
+        """metadata batch succeeds, but the light-poll batch specifically
+        fails -- confirms the OVERALL used_batch (and therefore the
+        shared failure counter) reflects that failure, not just the
+        metadata batch's own success."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={}),
+            used_batch=False,
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator._consecutive_batch_failures == 1
 
 
 class TestBatchFailureThreshold:
