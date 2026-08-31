@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - Diagnostics now include the gateway registry's own generation
   counter and each device's own batch health (batch_disabled,
@@ -9,20 +9,19 @@
   attributes as an entity attribute, by name rather than raw IDs.
 - A device whose batched metadata read fails 2 polls running now
   falls back to individual reads permanently for that device, logged
-  at debug level. Requires a matching python-mobius version.
+  at debug level.
 - Coordinators now fetch AdvancedFeatures/CalibrationInfo/hardware/
   firmware/channels in one round-trip (get_metadata_batch()) instead
-  of five -- confirmed 6-14x faster over relay. Requires a matching
-  python-mobius version.
+  of five -- confirmed 6-14x faster over relay.
 - Fixed gateway election oscillating indefinitely in some multi-device
   tanks -- a stale, in-flight failure could get misattributed against
   the current gateway, sometimes triggering another promotion on top
   of one that already superseded it.
 - **Breaking**: LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
   FanShutdownEnabled are now switch/select entities, not read-only
-  sensors -- requires a matching python-mobius version. Old sensor.*
-  entities won't be re-created; remove them manually and update any
-  automations/dashboards to the new switch.*/select.* entity_ids.
+  sensors. Old sensor.* entities won't be re-created; remove them
+  manually and update any automations/dashboards to the new
+  switch.*/select.* entity_ids.
 - Every entry now gets a synthetic tank device, including a single,
   ad-hoc one -- previously only multi-device tanks got one.
 
