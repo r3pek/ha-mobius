@@ -21,7 +21,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
-from mobius import MeshPeer, Model, Tank, MetadataSnapshot
+from mobius import MeshPeer, Model, Tank, MetadataSnapshot, PrimitiveType
 
 MLPREFIX_BYTES = bytes.fromhex("fdaaaaaaaaaaaaaa")
 
@@ -613,7 +613,10 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
     fake_pump_device = _fake_pump_device()
     fetch_all_calls = {"n": 0}
 
-    async def flaky_fetch_all(device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False):
+    async def flaky_fetch_all(
+        device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
+        cached_primitive_type=None, cached_model=None,
+    ):
         # PUMP_SERIAL (the gateway) always succeeds; LIGHT_SERIAL's own
         # relayed fetch fails on its first call, then succeeds on retry.
         if device is fake_pump_device:
@@ -622,11 +625,14 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
                 "telemetry": {"speed_percent": 10.0, "gph": 500},
                 "current_pump_mode": "TidalSwell", "current_pump_params": {},
                 "schedule_point_count": 1, "firmware_versions": {}, "hardware_info": {},
-            }, set(), True
+            }, set(), True, PrimitiveType.VorTechV1, None
         fetch_all_calls["n"] += 1
         if fetch_all_calls["n"] == 1:
             raise IOError("transient relay hiccup")
-        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}, set(), True
+        return (
+            {"support": "light", "channels": [], "current_intensities": {}, "calibration": None},
+            set(), True, PrimitiveType.VisualV1, None,
+        )
 
     with patch(
         "custom_components.mobius.discover_tank_for_serial",

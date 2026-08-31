@@ -374,7 +374,8 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
 
 async def _fetch_all(
     device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
-) -> tuple[dict[str, Any], set[int], bool]:
+    cached_primitive_type=None, cached_model=None,
+) -> tuple[dict[str, Any], set[int], bool, Optional[PrimitiveType], Optional[Model]]:
     """
     The actual read logic, covering both status (identity + live
     telemetry) and schedule (programmed schedule + firmware version) in
@@ -382,51 +383,116 @@ async def _fetch_all(
     MobiusDevice or a RelayedMobiusDevice -- identical either way, since
     RelayedMobiusDevice implements the same interface transparently.
 
-    Returns (info, supported_attribute_ids, used_batch) -- the second
-    and third elements are NOT part of info/coordinator.data
-    (diagnostics.py dumps that dict directly, and neither a raw set of
-    attribute IDs nor an internal bookkeeping flag has any business
-    leaking into a user-submitted diagnostic report) -- both are
+    Returns (info, supported_attribute_ids, used_batch, primitive,
+    model) -- everything past `info` itself is NOT part of
+    info/coordinator.data (diagnostics.py dumps that dict directly,
+    and none of these internal bookkeeping values has any business
+    leaking into a user-submitted diagnostic report) -- all of it is
     specifically for the caller (MobiusDeviceCoordinator._fetch()) to
-    track on itself across poll cycles. See get_metadata_batch()'s own
-    docstring in python-mobius for why the first caching matters: a
-    device's own attribute support essentially never changes across a
-    session, so fetching it once and reusing it indefinitely avoids
-    paying for a whole extra round-trip every single poll, forever.
+    track on itself across poll cycles.
 
     cached_supported_attribute_ids -- pass whatever the coordinator
     already has cached from a PRIOR call to skip fetching it again this
     time. None (the default, and always the case on a coordinator's own
-    very first poll) means fetch it fresh.
+    very first poll) means fetch it fresh. See get_metadata_batch()'s
+    own docstring in python-mobius for why this caching matters: a
+    device's own attribute support essentially never changes across a
+    session, so fetching it once and reusing it indefinitely avoids
+    paying for a whole extra round-trip every single poll, forever.
 
     batch_disabled -- pass True once the coordinator has confirmed (via
     used_batch coming back False BATCH_FAILURE_THRESHOLD times running)
     that this specific device's batch mechanism doesn't work at all --
-    passed straight through as get_metadata_batch()'s own
-    force_individual_reads, skipping a batch attempt already known to
-    be doomed rather than paying for it every single poll forever.
-    """
-    info = await device.get_device_info()
-    primitive_name = info.get("primitive_type")
-    try:
-        primitive = PrimitiveType[primitive_name] if primitive_name else None
-    except KeyError:
-        primitive = None
+    passed straight through as force_individual_reads, skipping a
+    batch attempt already known to be doomed rather than paying for it
+    every single poll forever.
 
-    # Needed earlier than get_metadata_batch()'s own use below now that
-    # get_pump_telemetry() also takes it -- see that method's own
-    # docstring for why: distinguishing the Nero3/Nero5/Nero7 exception
-    # from every other pump requires knowing the model, not just the
-    # primitive type.
-    model_raw = info.get("model_raw")
-    try:
-        model = Model(model_raw) if model_raw is not None else None
-    except ValueError:
-        model = None
+    cached_primitive_type/cached_model -- pass whatever the coordinator
+    already has cached from a PRIOR call to skip identifying the
+    device all over again. Both None (the default, and always the case
+    on a coordinator's own very first poll) means neither is known yet
+    -- see get_full_poll_batch()'s own docstring in python-mobius for
+    the full rationale: a device's own PrimitiveType and Model are both
+    permanent for its whole lifetime (a light is a light forever, a
+    pump is a pump forever, and a physical unit's own model number
+    doesn't change), so once known, this fetches EVERYTHING ELSE this
+    poll needs (identity's own volatile fields, metadata, and
+    light/pump-specific state) in ONE combined round-trip via
+    get_full_poll_batch() -- confirmed 2-2.6x faster on real hardware
+    than the equivalent separate calls. Only the very first poll (when
+    both are still None) pays for get_device_info() directly, purely
+    to learn them for every poll after.
+    """
+    now = dt_util.now()
+    minute_of_day = now.hour * 60 + now.minute
+
+    if cached_supported_attribute_ids is not None:
+        supported_attribute_ids = cached_supported_attribute_ids
+    else:
+        try:
+            supported = await device.get_supported_attributes()
+            supported_attribute_ids = {s.attr_id for s in supported}
+        except Exception:
+            supported_attribute_ids = set()
+
+    pump_schedule_points = None  # populated by either path below, for pumps only
+
+    if cached_primitive_type is not None and cached_model is not None:
+        # STEADY STATE: identity is already known permanently -- ONE
+        # combined round-trip for literally everything else this poll
+        # needs. See get_full_poll_batch()'s own docstring in
+        # python-mobius for the full confirmed rationale.
+        primitive = cached_primitive_type
+        model = cached_model
+        full_poll = await device.get_full_poll_batch(
+            primitive=primitive, model=model, which=1, minute_of_day=minute_of_day, now=now,
+            supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
+        )
+        used_batch = full_poll.used_batch
+        info = dict(full_poll.device_info)
+        info["primitive_type"] = primitive.name
+        metadata = full_poll.metadata
+        light_poll = full_poll.light_poll
+        pump_telemetry_result = full_poll.pump_telemetry
+        pump_schedule_points = full_poll.pump_schedule_points
+    else:
+        # FIRST POLL ONLY: identity (including primitive_type/model)
+        # isn't known yet -- learn it directly, then use the original,
+        # separate metadata/light-poll/pump-telemetry calls for the
+        # rest of this one poll. Every poll AFTER this uses the
+        # combined batch above instead.
+        info = await device.get_device_info()
+        primitive_name = info.get("primitive_type")
+        try:
+            primitive = PrimitiveType[primitive_name] if primitive_name else None
+        except KeyError:
+            primitive = None
+        model_raw = info.get("model_raw")
+        try:
+            model = Model(model_raw) if model_raw is not None else None
+        except ValueError:
+            model = None
+
+        metadata = await device.get_metadata_batch(
+            model=model, supported_attribute_ids=supported_attribute_ids,
+            force_individual_reads=batch_disabled,
+        )
+        used_batch = metadata.used_batch
+        light_poll = None
+        pump_telemetry_result = None
+        if primitive in LIGHT_PRIMITIVES:
+            light_poll = await device.get_light_poll_batch(
+                which=1, minute_of_day=minute_of_day, now=now,
+                supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
+            )
+            used_batch = used_batch and light_poll.used_batch
+        elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
+            pump_schedule_points = await device.get_pump_schedule(which=1)
+            pump_telemetry_result = await device.get_pump_telemetry(model=model, primitive=primitive)
 
     if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
         info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
-        info["telemetry"] = await device.get_pump_telemetry(model=model, primitive=primitive)
+        info["telemetry"] = pump_telemetry_result
         if info["telemetry"].get("gph") is not None and not info["telemetry"].get("gph_reliable"):
             _LOGGER.debug(
                 "%s: gph reading (%s) is not considered reliable for this "
@@ -439,6 +505,11 @@ async def _fetch_all(
     elif primitive in LIGHT_PRIMITIVES:
         info["support"] = "light"
     else:
+        # Only reachable on this coordinator's own first poll -- once a
+        # real primitive_type is cached, every poll after this always
+        # matches one of the two branches above (see this function's
+        # own docstring for why that's permanent).
+        primitive_name = info.get("primitive_type")
         info["support"] = "unsupported"
         size = PRIMITIVE_SIZE.get(primitive) if primitive else None
         info["support_note"] = (
@@ -447,40 +518,6 @@ async def _fetch_all(
             f"PrimitiveType {primitive_name!r} has no parser implemented."
         )
 
-    # Use Home Assistant's configured timezone, not the container's system
-    # time -- these can differ, and the interpolation/block lookup is
-    # meaningless if "now" is wrong.
-    now = dt_util.now()
-    minute_of_day = now.hour * 60 + now.minute
-
-    # ONE combined round-trip for everything that used to be 5 separate
-    # ones (get_advanced_features/get_calibration_info/get_hardware_info/
-    # get_firmware_versions/get_supported_channels) -- confirmed against
-    # real hardware (a real light AND a real pump, both via relay) to be
-    # 6-14x faster than reading these individually. See
-    # get_metadata_batch()'s own docstring in python-mobius for the full
-    # confirmation and the one honest caveat (MinCalibratedSpeed/
-    # MaxCalibratedSpeed weren't part of that real-hardware comparison).
-    if cached_supported_attribute_ids is not None:
-        supported_attribute_ids = cached_supported_attribute_ids
-    else:
-        try:
-            supported = await device.get_supported_attributes()
-            supported_attribute_ids = {s.attr_id for s in supported}
-        except Exception:
-            supported_attribute_ids = set()
-    metadata = await device.get_metadata_batch(
-        model=model, supported_attribute_ids=supported_attribute_ids,
-        force_individual_reads=batch_disabled,
-    )
-    # Combined across every batch attempt this poll makes (metadata,
-    # plus get_light_poll_batch() below for a light device) -- both use
-    # the same underlying batch-get mechanism, so a failure in either
-    # genuinely signals the same fact about this device ("its batch
-    # mechanism doesn't work"), tracked as one shared counter rather
-    # than two independent ones.
-    used_batch = metadata.used_batch
-
     info["firmware_versions"] = metadata.firmware_versions
     info["hardware_info"] = metadata.hardware_info
 
@@ -488,18 +525,8 @@ async def _fetch_all(
         info["channels"] = [c.name for c in metadata.supported_channels]
         # ONE combined round-trip for the schedule itself plus every
         # lunar/acclimation/insolation-related attribute
-        # process_light_intensities() might need -- replaces what used
-        # to be get_light_schedule() (for schedule_point_count) followed
-        # by a SEPARATE get_current_light_intensities() call that
-        # re-fetched that exact same schedule internally, on top of its
-        # own further, conditional round trips. See
+        # process_light_intensities() might need -- see
         # get_light_poll_batch()'s own docstring in python-mobius.
-        light_poll = await device.get_light_poll_batch(
-            which=1, minute_of_day=minute_of_day, now=now,
-            supported_attribute_ids=supported_attribute_ids,
-            force_individual_reads=batch_disabled,
-        )
-        used_batch = used_batch and light_poll.used_batch
         points = light_poll.schedule_points
         info["schedule_point_count"] = len(points)
         current = light_poll.intensities
@@ -523,11 +550,15 @@ async def _fetch_all(
         info["calibration"] = metadata.calibration
 
     elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
-        points = await device.get_pump_schedule(which=1)
-        info["schedule_point_count"] = len(points)
-        # Reuses the schedule already fetched above -- get_current_pump_block()
-        # would otherwise re-fetch that exact same attribute internally.
-        block = await device.get_current_pump_block(which=1, minute_of_day=minute_of_day, points=points)
+        info["schedule_point_count"] = len(pump_schedule_points)
+        # Reuses the schedule already fetched above (either via
+        # get_full_poll_batch() in steady state, or get_pump_schedule()
+        # directly on this coordinator's own first poll) --
+        # get_current_pump_block() would otherwise re-fetch that exact
+        # same attribute internally.
+        block = await device.get_current_pump_block(
+            which=1, minute_of_day=minute_of_day, points=pump_schedule_points,
+        )
         if block:
             info["current_pump_mode"] = block.pump.mode.name
             info["current_pump_params"] = {
@@ -546,7 +577,7 @@ async def _fetch_all(
     # whichever devices support none of the four underlying attributes.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    return info, supported_attribute_ids, used_batch
+    return info, supported_attribute_ids, used_batch, primitive, model
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -576,6 +607,14 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # reset path needed for that.
         self._consecutive_batch_failures = 0
         self._batch_disabled = False
+        # A device's own PrimitiveType AND Model are both permanent for
+        # its whole lifetime (a light is a light forever, a pump is a
+        # pump forever, and a physical unit's own model number doesn't
+        # change) -- see get_full_poll_batch()'s own docstring in
+        # python-mobius. Both populated once, on this coordinator's own
+        # first successful poll, and never re-fetched after.
+        self._primitive_type: Optional[PrimitiveType] = None
+        self._model: Optional[Model] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -793,17 +832,19 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             device = await self.async_get_connected_device()
             if is_gateway:
-                data, self._supported_attribute_ids, used_batch = await _fetch_all(
+                data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
                     batch_disabled=self._batch_disabled,
+                    cached_primitive_type=self._primitive_type, cached_model=self._model,
                 )
                 self._record_batch_result(used_batch)
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
             else:
-                data, self._supported_attribute_ids, used_batch = await _fetch_all(
+                data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
                     batch_disabled=self._batch_disabled,
+                    cached_primitive_type=self._primitive_type, cached_model=self._model,
                 )
                 self._record_batch_result(used_batch)
                 self.registry.record_relay_success(self.pan_id, self.serial)

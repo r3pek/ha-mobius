@@ -10,7 +10,7 @@ failure handling.
 import asyncio
 import logging
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import pytest
 from homeassistant.const import CONF_ADDRESS
@@ -26,7 +26,7 @@ from custom_components.mobius.coordinator import (
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
@@ -82,6 +82,25 @@ def _make_fake_pump_device():
         },
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
     ))
+    device.get_full_poll_batch = AsyncMock(return_value=FullPollResult(
+        device_info={
+            "model_raw": 42, "model": "VorTechMP40wG3QD", "manufacturer": "EcoTech Marine",
+            "name": "MP40QD Right", "serial": PUMP_SERIAL,
+            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+        },
+        metadata=MetadataSnapshot(
+            advanced_features=None, calibration=None,
+            hardware_info={"Revision": 2},
+            firmware_versions={
+                "Radio": "4.0.21", "Radio Bootloader": "1.2",
+                "Product OS": "2.1.5", "Product Bootloader": "1.0",
+            },
+            supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+        ),
+        light_poll=None,
+        pump_telemetry={"speed": 447, "speed_percent": 44.7, "gph": 2272},
+        pump_schedule_points=[fake_point] * 11,
+    ))
     return device
 
 
@@ -103,6 +122,26 @@ def _make_fake_light_device():
             "insolation_active": False, "is_night_segment": False,
             "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
         }),
+    ))
+    device.get_full_poll_batch = AsyncMock(return_value=FullPollResult(
+        device_info={
+            "model_raw": 179, "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
+            "name": "", "serial": LIGHT_SERIAL,
+            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+        },
+        metadata=MetadataSnapshot(
+            advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
+            supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+        ),
+        light_poll=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={
+                "insolation_active": False, "is_night_segment": False,
+                "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
+            }),
+        ),
+        pump_telemetry=None,
+        pump_schedule_points=None,
     ))
     return device
 
@@ -540,6 +579,80 @@ class TestSupportedAttributeNames:
         assert "LocalControlEnabled" in names
         assert "unknown(99999)" in names
         assert len(names) == 2  # confirms it's rendered, not silently dropped
+
+
+class TestFullPollBatchWiring:
+    """The actual point of caching primitive_type/model on the
+    coordinator: the FIRST poll (identity not yet known) still learns
+    it via get_device_info(), but EVERY poll after that uses
+    get_full_poll_batch() exclusively -- no further identification
+    round-trip, ever, for that device's whole lifetime (see
+    get_full_poll_batch()'s own docstring in python-mobius)."""
+
+    async def test_first_poll_uses_device_info_not_full_poll_batch(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        assert coordinator._primitive_type is None
+        assert coordinator._model is None
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        fake_device.get_device_info.assert_awaited_once()
+        fake_device.get_full_poll_batch.assert_not_awaited()
+        assert coordinator._primitive_type == PrimitiveType.VorTechV1
+        assert coordinator._model == Model.VorTechMP40wG3QD
+
+    async def test_second_poll_uses_full_poll_batch_exclusively(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll -- learns identity
+            await coordinator.async_refresh()  # second poll -- should skip re-identifying
+
+        assert coordinator.last_update_success
+        # The actual point: only ONE get_device_info() call across BOTH
+        # polls, not two -- the second poll never re-identifies.
+        fake_device.get_device_info.assert_awaited_once()
+        fake_device.get_full_poll_batch.assert_awaited_once()
+        fake_device.get_full_poll_batch.assert_awaited_with(
+            primitive=PrimitiveType.VorTechV1, model=Model.VorTechMP40wG3QD,
+            which=1, minute_of_day=ANY, now=ANY,
+            supported_attribute_ids=ANY, force_individual_reads=False,
+        )
+        assert coordinator.data["telemetry"]["speed"] == 447
+        assert coordinator.data["schedule_point_count"] == 11
+
+    async def test_light_second_poll_uses_full_poll_batch_exclusively(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        fake_device.get_device_info.assert_awaited_once()
+        fake_device.get_full_poll_batch.assert_awaited_once_with(
+            primitive=PrimitiveType.VisualV1, model=Model.RadionXR15wG6Pro,
+            which=1, minute_of_day=ANY, now=ANY,
+            supported_attribute_ids=ANY, force_individual_reads=False,
+        )
+
 
 
 class TestLightPollBatchWiring:
