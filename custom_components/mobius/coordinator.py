@@ -372,13 +372,31 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
     return str(raw)
 
 
-async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
+async def _fetch_all(
+    device, minute_of_day_now=None, cached_supported_attribute_ids=None,
+) -> tuple[dict[str, Any], set[int]]:
     """
     The actual read logic, covering both status (identity + live
     telemetry) and schedule (programmed schedule + firmware version) in
     one pass. `device` can be a directly-connected
     MobiusDevice or a RelayedMobiusDevice -- identical either way, since
     RelayedMobiusDevice implements the same interface transparently.
+
+    Returns (info, supported_attribute_ids) -- the second element is
+    NOT part of info/coordinator.data (diagnostics.py dumps that dict
+    directly, and a raw set of attribute IDs has no business leaking
+    into a user-submitted diagnostic report) -- it's specifically for
+    the caller (MobiusDeviceCoordinator._fetch()) to cache on itself
+    across poll cycles. See get_metadata_batch()'s own docstring in
+    python-mobius for why this caching matters: a device's own
+    attribute support essentially never changes across a session, so
+    fetching it once and reusing it indefinitely avoids paying for a
+    whole extra round-trip every single poll, forever.
+
+    cached_supported_attribute_ids -- pass whatever the coordinator
+    already has cached from a PRIOR call to skip fetching it again this
+    time. None (the default, and always the case on a coordinator's own
+    very first poll) means fetch it fresh.
     """
     info = await device.get_device_info()
     primitive_name = info.get("primitive_type")
@@ -387,11 +405,11 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     except KeyError:
         primitive = None
 
-    # Needed earlier than firmware_versions() (its own, pre-existing use
-    # below) now that get_pump_telemetry() also takes it -- see that
-    # method's own docstring for why: distinguishing the Nero3/Nero5/
-    # Nero7 exception from every other pump requires knowing the model,
-    # not just the primitive type.
+    # Needed earlier than get_metadata_batch()'s own use below now that
+    # get_pump_telemetry() also takes it -- see that method's own
+    # docstring for why: distinguishing the Nero3/Nero5/Nero7 exception
+    # from every other pump requires knowing the model, not just the
+    # primitive type.
     model_raw = info.get("model_raw")
     try:
         model = Model(model_raw) if model_raw is not None else None
@@ -427,11 +445,31 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
 
-    info["firmware_versions"] = await device.get_firmware_versions(model=model)
-    info["hardware_info"] = await device.get_hardware_info()
+    # ONE combined round-trip for everything that used to be 5 separate
+    # ones (get_advanced_features/get_calibration_info/get_hardware_info/
+    # get_firmware_versions/get_supported_channels) -- confirmed against
+    # real hardware (a real light AND a real pump, both via relay) to be
+    # 6-14x faster than reading these individually. See
+    # get_metadata_batch()'s own docstring in python-mobius for the full
+    # confirmation and the one honest caveat (MinCalibratedSpeed/
+    # MaxCalibratedSpeed weren't part of that real-hardware comparison).
+    if cached_supported_attribute_ids is not None:
+        supported_attribute_ids = cached_supported_attribute_ids
+    else:
+        try:
+            supported = await device.get_supported_attributes()
+            supported_attribute_ids = {s.attr_id for s in supported}
+        except Exception:
+            supported_attribute_ids = set()
+    metadata = await device.get_metadata_batch(
+        model=model, supported_attribute_ids=supported_attribute_ids,
+    )
+
+    info["firmware_versions"] = metadata.firmware_versions
+    info["hardware_info"] = metadata.hardware_info
 
     if primitive in LIGHT_PRIMITIVES:
-        info["channels"] = [c.name for c in await device.get_supported_channels()]
+        info["channels"] = [c.name for c in metadata.supported_channels]
         points = await device.get_light_schedule(which=1)
         info["schedule_point_count"] = len(points)
         current = await device.get_current_light_intensities(which=1, minute_of_day=minute_of_day)
@@ -452,7 +490,7 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
         # Confirmed light-only via real device testing AND the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).
-        info["calibration"] = await device.get_calibration_info()
+        info["calibration"] = metadata.calibration
 
     elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
         points = await device.get_pump_schedule(which=1)
@@ -471,13 +509,12 @@ async def _fetch_all(device, minute_of_day_now=None) -> dict[str, Any]:
     # AutoDimTimeout) and Radion (MaxFanSpeed/FanShutdownEnabled) under
     # one umbrella, gated per-attribute rather than per-device-type (see
     # python-mobius's own get_advanced_features() docstring for the full
-    # confirmation) -- so this is called for every device, regardless of
-    # what "support" ended up being above, and simply returns None for
+    # confirmation) -- so this is populated for every device, regardless
+    # of what "support" ended up being above, and simply None for
     # whichever devices support none of the four underlying attributes.
-    features = await device.get_advanced_features()
-    info["advanced_features"] = asdict(features) if features else None
+    info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    return info
+    return info, supported_attribute_ids
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -494,6 +531,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.serial = serial
         self.pan_id = pan_id
         self._last_success: Optional[Any] = None
+        # Cached across every poll cycle for this device's own lifetime
+        # -- see _fetch_all()'s own docstring for why: a device's own
+        # attribute support essentially never changes across a session,
+        # so this avoids paying for a whole extra get_supported_attributes()
+        # round-trip on every single poll, forever, once it's known.
+        self._supported_attribute_ids: Optional[set[int]] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -642,11 +685,15 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             device = await self.async_get_connected_device()
             if is_gateway:
-                data = await _fetch_all(device)
+                data, self._supported_attribute_ids = await _fetch_all(
+                    device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                )
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
             else:
-                data = await _fetch_all(device)
+                data, self._supported_attribute_ids = await _fetch_all(
+                    device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                )
                 self.registry.record_relay_success(self.pan_id, self.serial)
         except Exception as err:
             _LOGGER.debug(

@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
+from mobius import MetadataSnapshot
+
 from custom_components.mobius.diagnostics import async_get_config_entry_diagnostics, _json_safe
 
 PUMP_SERIAL = "00000000000001"
@@ -32,14 +34,16 @@ def _fake_pump_device():
     device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
-    device.get_advanced_features = AsyncMock(return_value=None)
     fake_point = MagicMock()
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point])
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
-    device.get_firmware_versions = AsyncMock(return_value={"Product OS": "1.0"})
-    device.get_hardware_info = AsyncMock(return_value={"Revision": 2})
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={"Revision": 2}, firmware_versions={"Product OS": "1.0"},
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     return device
 
 

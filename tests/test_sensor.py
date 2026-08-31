@@ -17,7 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult
+from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -57,7 +57,6 @@ def _fake_pump_device():
     })
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
-    device.get_advanced_features = AsyncMock(return_value=None)
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
 
     fake_point = MagicMock()
@@ -65,13 +64,17 @@ def _fake_pump_device():
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
-    device.get_firmware_versions = AsyncMock(return_value={
-        "Radio": "4.0.21", "Radio Bootloader": "1.2",
-        "Product OS": "2.1.5", "Product Bootloader": "1.0",
-    })
-    device.get_hardware_info = AsyncMock(return_value={
-        "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
-    })
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={
+            "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
+        },
+        firmware_versions={
+            "Radio": "4.0.21", "Radio Bootloader": "1.2",
+            "Product OS": "2.1.5", "Product Bootloader": "1.0",
+        },
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")
     )
@@ -87,14 +90,12 @@ def _fake_light_device():
         "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
     })
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VisualV1)
-    device.get_advanced_features = AsyncMock(return_value=None)
 
     channel_objs = []
     for name in REAL_LIGHT_CHANNELS:
         c = MagicMock()
         c.name = name
         channel_objs.append(c)
-    device.get_supported_channels = AsyncMock(return_value=channel_objs)
     device.get_light_schedule = AsyncMock(return_value=[MagicMock()] * 9)
 
     intensity_map = {}
@@ -109,26 +110,29 @@ def _fake_light_device():
         })
     )
 
-    # Deliberately WITHOUT "Product OS" -- matches the confirmed real-world
-    # scenario this fixture is meant to represent: at least some real
-    # Radion lights simply don't report that FirmwareType at all (no
-    # MainMicroOS index in their FirmwareVersion response), unlike pumps
-    # which always have one. This is the actual bug derive_sw_version()'s
-    # fallback chain exists to cover -- see its own tests in
-    # test_coordinator.py for the fallback logic itself; this fixture
-    # confirms the full setup flow picks up the fallback correctly too.
-    device.get_firmware_versions = AsyncMock(return_value={
-        "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
-        "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
-    })
-    device.get_hardware_info = AsyncMock(return_value={"Revision": 1})
-
     calibration = MagicMock()
     calibration.completed = True
     calibration.date_of_last = 1756561525
     calibration.lower_bound = None
     calibration.upper_bound = None
-    device.get_calibration_info = AsyncMock(return_value=calibration)
+    # Deliberately WITHOUT "Product OS" in firmware_versions -- matches
+    # the confirmed real-world scenario this fixture is meant to
+    # represent: at least some real Radion lights simply don't report
+    # that FirmwareType at all (no MainMicroOS index in their
+    # FirmwareVersion response), unlike pumps which always have one.
+    # This is the actual bug derive_sw_version()'s fallback chain exists
+    # to cover -- see its own tests in test_coordinator.py for the
+    # fallback logic itself; this fixture confirms the full setup flow
+    # picks up the fallback correctly too.
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=calibration,
+        hardware_info={"Revision": 1},
+        firmware_versions={
+            "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
+            "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
+        },
+        supported_channels=channel_objs, error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")
     )

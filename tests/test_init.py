@@ -21,7 +21,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
-from mobius import MeshPeer, Model, Tank
+from mobius import MeshPeer, Model, Tank, MetadataSnapshot
 
 MLPREFIX_BYTES = bytes.fromhex("fdaaaaaaaaaaaaaa")
 
@@ -139,14 +139,16 @@ def _fake_pump_device():
     })
     fake_device.get_operation_state = AsyncMock()
     fake_device.get_operation_state.return_value.name = "Schedule"
-    fake_device.get_advanced_features = AsyncMock(return_value=None)
     fake_point = MagicMock()
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     fake_device.get_pump_schedule = AsyncMock(return_value=[fake_point])
     fake_device.get_current_pump_block = AsyncMock(return_value=fake_point)
-    fake_device.get_firmware_versions = AsyncMock(return_value={"Product OS": "1.0"})
-    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": 2})
+    fake_device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={"Revision": 2}, firmware_versions={"Product OS": "1.0"},
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     return fake_device
 
 
@@ -611,7 +613,7 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
     fake_pump_device = _fake_pump_device()
     fetch_all_calls = {"n": 0}
 
-    async def flaky_fetch_all(device, minute_of_day_now=None):
+    async def flaky_fetch_all(device, minute_of_day_now=None, cached_supported_attribute_ids=None):
         # PUMP_SERIAL (the gateway) always succeeds; LIGHT_SERIAL's own
         # relayed fetch fails on its first call, then succeeds on retry.
         if device is fake_pump_device:
@@ -620,11 +622,11 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
                 "telemetry": {"speed_percent": 10.0, "gph": 500},
                 "current_pump_mode": "TidalSwell", "current_pump_params": {},
                 "schedule_point_count": 1, "firmware_versions": {}, "hardware_info": {},
-            }
+            }, set()
         fetch_all_calls["n"] += 1
         if fetch_all_calls["n"] == 1:
             raise IOError("transient relay hiccup")
-        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}
+        return {"support": "light", "channels": [], "current_intensities": {}, "calibration": None}, set()
 
     with patch(
         "custom_components.mobius.discover_tank_for_serial",

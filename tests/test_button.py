@@ -20,7 +20,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank
+from mobius import PrimitiveType, Tank, MetadataSnapshot
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 from custom_components.mobius.button import RebootButton
@@ -50,13 +50,18 @@ def _fake_pump_device():
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
-    device.get_firmware_versions = AsyncMock(return_value={
-        "Radio": "4.0.21", "Radio Bootloader": "1.2",
-        "Product OS": "2.1.5", "Product Bootloader": "1.0",
-    })
-    device.get_hardware_info = AsyncMock(return_value={
-        "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
-    })
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None,
+        calibration=None,
+        hardware_info={
+            "Color": "Black", "Revision": 2, "ProductType": "VorTech", "RadioType": "QCA4020",
+        },
+        firmware_versions={
+            "Radio": "4.0.21", "Radio Bootloader": "1.2",
+            "Product OS": "2.1.5", "Product Bootloader": "1.0",
+        },
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")
     )

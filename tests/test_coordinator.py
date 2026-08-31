@@ -26,7 +26,7 @@ from custom_components.mobius.coordinator import (
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
@@ -66,8 +66,6 @@ def _make_fake_pump_device():
     device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
-    device.get_advanced_features = AsyncMock(return_value=None)
-
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
 
     fake_point = MagicMock()
@@ -75,11 +73,15 @@ def _make_fake_pump_device():
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
     device.get_current_pump_block = AsyncMock(return_value=fake_point)
-    device.get_firmware_versions = AsyncMock(return_value={
-        "Radio": "4.0.21", "Radio Bootloader": "1.2",
-        "Product OS": "2.1.5", "Product Bootloader": "1.0",
-    })
-    device.get_hardware_info = AsyncMock(return_value={"Revision": 2})
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={"Revision": 2},
+        firmware_versions={
+            "Radio": "4.0.21", "Radio Bootloader": "1.2",
+            "Product OS": "2.1.5", "Product Bootloader": "1.0",
+        },
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     return device
 
 
@@ -409,6 +411,77 @@ async def test_gateway_coordinator_fetches_merged_status_and_schedule(hass):
     assert coordinator.data["operation_state"] == "Schedule"
     assert coordinator.data["schedule_point_count"] == 11
     assert coordinator.data["current_pump_mode"] == "TidalSwell"
+
+
+class TestSupportedAttributeIdCaching:
+    """The actual new behavior get_metadata_batch() wiring introduces:
+    a device's own confirmed attribute support essentially never
+    changes across a session, so fetching it once and reusing it
+    indefinitely avoids a whole extra get_supported_attributes()
+    round-trip on every single poll, forever -- see _fetch_all()'s own
+    docstring for the full reasoning."""
+
+    async def test_first_poll_has_no_cache_and_populates_one(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        assert coordinator._supported_attribute_ids is None
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_supported_attributes = AsyncMock(return_value=[
+            SupportedAttribute(attr_id=300, indexes=[0]),
+            SupportedAttribute(attr_id=301, indexes=[0]),
+        ])
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator._supported_attribute_ids == {300, 301}
+        fake_device.get_supported_attributes.assert_awaited_once()
+
+    async def test_second_poll_reuses_the_cache_without_refetching(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_supported_attributes = AsyncMock(return_value=[
+            SupportedAttribute(attr_id=300, indexes=[0]),
+        ])
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll -- populates the cache
+            await coordinator.async_refresh()  # second poll -- should reuse it
+
+        # The actual point: only ONE call across BOTH polls, not two.
+        fake_device.get_supported_attributes.assert_awaited_once()
+        # And the cached set was genuinely what got passed through --
+        # confirms this isn't just "never called again" by coincidence.
+        fake_device.get_metadata_batch.assert_awaited_with(
+            model=Model.VorTechMP40wG3QD, supported_attribute_ids={300},
+        )
+
+    async def test_cache_not_updated_on_a_failed_poll(self, hass):
+        """A real, expected outcome: if a poll fails entirely, whatever
+        was already cached should survive untouched -- there's no new,
+        confirmed support information to replace it with."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._supported_attribute_ids = {999}  # pre-seed a fake prior cache
+
+        broken_device = MagicMock()
+        broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=broken_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success is False
+        assert coordinator._supported_attribute_ids == {999}  # untouched
 
 
 async def test_gateway_read_success_resets_registry_failure_counter(hass):
@@ -851,12 +924,16 @@ async def test_coordinator_syncs_device_registry_sw_and_hw_version_on_change(has
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()
-    fake_device.get_firmware_versions = AsyncMock(return_value={
-        "Radio": "4.0.22", "Radio Bootloader": "1.2",
-        "Product OS": "2.2.0",  # the NEW version, after the OTA update
-        "Product Bootloader": "1.0",
-    })
-    fake_device.get_hardware_info = AsyncMock(return_value={"Revision": 2})  # a board revision
+    fake_device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={"Revision": 2},  # a board revision
+        firmware_versions={
+            "Radio": "4.0.22", "Radio Bootloader": "1.2",
+            "Product OS": "2.2.0",  # the NEW version, after the OTA update
+            "Product Bootloader": "1.0",
+        },
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Coordinators now fetch AdvancedFeatures/CalibrationInfo/hardware/
+  firmware/channels in one round-trip (get_metadata_batch()) instead
+  of five separate ones -- confirmed 6-14x faster over relay on real
+  hardware. Requires a python-mobius version with get_metadata_batch().
+  A device's own confirmed attribute support is cached on its
+  coordinator after the first poll and reused indefinitely.
 - Fixed gateway election oscillating indefinitely in some multi-device
   tanks -- a stale, in-flight failure could get misattributed against
   whatever gateway was current by the time it was recorded, sometimes

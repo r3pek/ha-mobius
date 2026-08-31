@@ -17,7 +17,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import Tank, AdvancedFeatures
+from mobius import Tank, AdvancedFeatures, MetadataSnapshot
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 
@@ -43,7 +43,11 @@ def _minimal_light_device(advanced_features_dict):
         "insolation_active": False, "is_night_segment": False,
         "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 1.0,
     }))
-    device.get_advanced_features = AsyncMock(return_value=AdvancedFeatures(**advanced_features_dict))
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=AdvancedFeatures(**advanced_features_dict),
+        calibration=None, hardware_info={}, firmware_versions={}, supported_channels=[],
+        error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
     device.get_firmware_versions = AsyncMock(return_value={})
     device.get_hardware_info = AsyncMock(return_value={})
     calibration = MagicMock()
