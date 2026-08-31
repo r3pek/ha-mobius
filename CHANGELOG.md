@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Firmware version sensor now carries this device's own confirmed
+  supported attributes as an entity attribute (supported_attributes),
+  by name (e.g. "LocalControlEnabled") rather than raw numeric IDs.
 - A device whose batched metadata read fails 2 polls in a row (e.g. no
   batch support at all -- old firmware, or an untested device family)
   now falls back to individual reads permanently for that device,

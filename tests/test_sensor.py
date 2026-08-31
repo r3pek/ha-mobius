@@ -17,7 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot
+from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute
 
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -255,6 +255,48 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # that condition).
     gateway_states = [s for s in hass.states.async_all("sensor") if "gateway_device" in s.entity_id]
     assert gateway_states == []
+
+
+async def test_firmware_sensor_carries_supported_attribute_names(hass):
+    """The names, not the raw numeric IDs -- see coordinator.py's own
+    supported_attribute_names property docstring for why this is kept
+    separate from the private, numeric self._supported_attribute_ids
+    (which stays out of coordinator.data on purpose)."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    device = _fake_pump_device()
+    device.get_supported_attributes = AsyncMock(return_value=[
+        SupportedAttribute(attr_id=300, indexes=[0]),  # LocalControlEnabled
+        SupportedAttribute(attr_id=301, indexes=[0]),  # AutoDimTimeout
+    ])
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    firmware = hass.states.get("sensor.mp40qd_right_firmware_version")
+    assert firmware is not None
+    assert firmware.attributes["supported_attributes"] == ["LocalControlEnabled", "AutoDimTimeout"]
+    # The existing firmware breakdown must still be present too --
+    # confirms this is additive, not a replacement of what was there.
+    assert firmware.attributes["Radio"] == "4.0.21"
 
 
 async def test_pump_entry_setup_skips_flow_sensor_when_gph_unreliable(hass):

@@ -84,7 +84,7 @@ from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
     MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE, extract_short_address,
+    PRIMITIVE_SIZE, extract_short_address, C2Attribute,
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
@@ -711,6 +711,39 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "using individual reads for every future poll on this device instead",
                 self.serial, self._consecutive_batch_failures,
             )
+
+    @property
+    def supported_attribute_names(self) -> Optional[list[str]]:
+        """
+        This device's own confirmed supported-attribute set (see
+        self._supported_attribute_ids's own docstring above), as
+        sorted, human-readable C2Attribute names rather than the raw
+        numeric IDs -- deliberately a public property returning names,
+        not the private, numeric self._supported_attribute_ids itself:
+        that field stays out of coordinator.data on purpose
+        (diagnostics.py dumps that dict directly, and a raw set of
+        attribute IDs has no business leaking into a user-submitted
+        diagnostic report -- see _fetch_all()'s own docstring), but a
+        friendly, named list is genuinely useful surfaced to a user
+        (e.g. as an entity attribute), which is a different, deliberate
+        exposure rather than an accidental one.
+
+        Returns None until the first successful poll has populated the
+        underlying cache -- callers should treat that the same as "not
+        yet known", not "confirmed to support nothing". An ID this
+        library's own C2Attribute enum doesn't cover yet (newer
+        firmware reporting something not yet catalogued) renders as
+        "unknown(<id>)" rather than being silently dropped.
+        """
+        if self._supported_attribute_ids is None:
+            return None
+        names = []
+        for attr_id in sorted(self._supported_attribute_ids):
+            try:
+                names.append(C2Attribute(attr_id).name)
+            except ValueError:
+                names.append(f"unknown({attr_id})")
+        return names
 
     async def _fetch(self) -> dict[str, Any]:
         group = self.registry.group(self.pan_id)

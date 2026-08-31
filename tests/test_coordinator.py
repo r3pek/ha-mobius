@@ -484,6 +484,42 @@ class TestSupportedAttributeIdCaching:
         assert coordinator._supported_attribute_ids == {999}  # untouched
 
 
+class TestSupportedAttributeNames:
+    """supported_attribute_names -- the human-readable counterpart to
+    self._supported_attribute_ids, specifically for surfacing as an
+    entity attribute (see FirmwareVersionSensor's own
+    extra_state_attributes in sensor.py) without exposing the raw,
+    numeric set that's deliberately kept out of coordinator.data."""
+
+    def test_none_before_any_successful_poll(self, hass):
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        assert coordinator.supported_attribute_names is None
+
+    def test_converts_ids_to_sorted_names(self, hass):
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        # AutoDimTimeout=301, LocalControlEnabled=300 -- deliberately
+        # out of order here, to confirm the result comes back sorted.
+        coordinator._supported_attribute_ids = {301, 300}
+
+        assert coordinator.supported_attribute_names == ["LocalControlEnabled", "AutoDimTimeout"]
+
+    def test_unrecognized_id_renders_as_unknown_not_dropped(self, hass):
+        registry = _make_registry(hass)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._supported_attribute_ids = {300, 99999}
+
+        names = coordinator.supported_attribute_names
+        assert "LocalControlEnabled" in names
+        assert "unknown(99999)" in names
+        assert len(names) == 2  # confirms it's rendered, not silently dropped
+
+
 class TestBatchFailureThreshold:
     """See BATCH_FAILURE_THRESHOLD's own docstring in const.py for the
     full reasoning: get_metadata_batch()'s own batched request failing

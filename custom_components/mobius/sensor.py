@@ -459,7 +459,11 @@ class FirmwareVersionSensor(MobiusEntity):
 
     @property
     def extra_state_attributes(self):
-        return (self.coordinator.data or {}).get("firmware_versions") or {}
+        attrs = dict((self.coordinator.data or {}).get("firmware_versions") or {})
+        names = self.coordinator.supported_attribute_names
+        if names is not None:
+            attrs["supported_attributes"] = names
+        return attrs
 
 
 class HardwareRevisionSensor(MobiusEntity):
