@@ -26,7 +26,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.unit_conversion import VolumeFlowRateConverter
 from homeassistant.util import dt as dt_util
 
-from . import MobiusRuntimeData, tank_device_identifier
+from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_v
 
 def _device_info(serial: str, data: dict, address: str | None = None,
                   sw_version: str | None = None, hw_version: str | None = None,
-                  via_device: tuple[str, str] | None = None) -> DeviceInfo:
+                  via_device_id: str | None = None) -> DeviceInfo:
     """
     identifiers is SERIAL-based, not BLE-address-based -- a real,
     necessary fix, not incidental to this integration's move to
@@ -54,10 +54,14 @@ def _device_info(serial: str, data: dict, address: str | None = None,
     peer's own entry doesn't), is used only for the connections hint,
     not identity.
 
-    via_device, if given, is the synthetic tank device's own identifier
-    (see __init__.py's tank_device_identifier()) -- produces the "one
-    hub, N child devices" grouping this whole feature was designed
-    against. None for a single, ad-hoc device (no tank to group under).
+    via_device_id, if given, is the synthetic tank device's own
+    RESOLVED device_registry ID (see __init__.py's own
+    resolve_tank_device_id()) -- produces the "one hub, N child
+    devices" grouping this whole feature was designed against. None
+    for a single, ad-hoc device (no tank to group under). Deliberately
+    a resolved ID, not the tank's own raw identifier tuple (the
+    now-deprecated via_device field took that instead) -- confirmed
+    via a real Home Assistant deprecation turning into a hard error.
     """
     custom_name = data.get("name")
     model = data.get("model")
@@ -88,7 +92,7 @@ def _device_info(serial: str, data: dict, address: str | None = None,
         serial_number=serial,
         sw_version=sw_version,
         hw_version=hw_version,
-        via_device=via_device,
+        via_device_id=via_device_id,
     )
 
 
@@ -749,7 +753,7 @@ async def async_setup_entry(
     # confirmed mesh prefix and multi-device gateway election
     # respectively, unlike via_device grouping itself.
     tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
-    via_device = tank_identifier
+    via_device_id = resolve_tank_device_id(hass, entry.entry_id, tank_identifier)
 
     entities: list[SensorEntity] = []
     for device_record in device_records:
@@ -791,7 +795,7 @@ async def async_setup_entry(
         hw_version = derive_hw_version(data.get("hardware_info", {}))
         device_info = _device_info(
             serial, data, address=address, sw_version=sw_version, hw_version=hw_version,
-            via_device=via_device,
+            via_device_id=via_device_id,
         )
 
         entities += [

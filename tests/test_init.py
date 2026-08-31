@@ -819,7 +819,9 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
         await hass.config_entries.async_setup(entry.entry_id)
 
     device_registry = dr.async_get(hass)
-    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX, PAN_ID)})
+    tank_device = device_registry.async_get_device_by_identifier(
+        tank_device_identifier(MLPREFIX_HEX, PAN_ID), entry.entry_id,
+    )
     assert tank_device is not None
     assert tank_device.name == "Mobius Tank (2 devices)"
 
@@ -869,9 +871,7 @@ async def test_single_device_ad_hoc_entry_still_registers_synthetic_tank_device(
         await hass.config_entries.async_setup(entry.entry_id)
 
     device_registry = dr.async_get(hass)
-    devices_for_entry = [
-        d for d in device_registry.devices.values() if entry.entry_id in d.config_entries
-    ]
+    devices_for_entry = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
     # Exactly one device was registered at all -- with the real sensor
     # platform mocked away, this must be the synthetic tank device
     # itself (nothing in __init__.py registers the real device

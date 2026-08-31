@@ -235,7 +235,7 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # SERIAL-based identifiers now, not address-based -- a real, necessary
     # fix, not incidental to tank-aware entries (see sensor.py's own
     # _device_info() docstring for why).
-    device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_SERIAL)})
+    device = device_registry.async_get_device_by_identifier((DOMAIN, PUMP_SERIAL), entry.entry_id)
     assert device is not None
     assert device.sw_version == "2.1.5"
     assert hass.states.get("sensor.mp40qd_right_calibration") is None
@@ -245,7 +245,9 @@ async def test_pump_entry_setup_creates_expected_sensors(hass):
     # identifier since there's no CONF_MLPREFIX here (see
     # tank_device_identifier()'s own docstring).
     assert device.via_device_id is not None
-    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(None, PAN_ID)})
+    tank_device = device_registry.async_get_device_by_identifier(
+        tank_device_identifier(None, PAN_ID), entry.entry_id,
+    )
     assert tank_device is not None
     assert device.via_device_id == tank_device.id
     # Still no gateway-device sensor, and no mesh-prefix sensor either --
@@ -480,7 +482,7 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
     # created, since calibration is confirmed real/populated for lights
     # (unlike pumps).
     device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_SERIAL)})
+    device = device_registry.async_get_device_by_identifier((DOMAIN, LIGHT_SERIAL), entry.entry_id)
     assert device is not None
     assert device.sw_version == "1.5.103"
 
@@ -625,11 +627,13 @@ async def test_multi_device_tank_entry_wires_via_device_and_prefix_sensor(hass):
     assert entry.state.value == "loaded"
 
     device_registry = dr.async_get(hass)
-    tank_device = device_registry.async_get_device(identifiers={tank_device_identifier(MLPREFIX_HEX, PAN_ID)})
+    tank_device = device_registry.async_get_device_by_identifier(
+        tank_device_identifier(MLPREFIX_HEX, PAN_ID), entry.entry_id,
+    )
     assert tank_device is not None
 
-    pump_device = device_registry.async_get_device(identifiers={(DOMAIN, PUMP_SERIAL)})
-    light_device = device_registry.async_get_device(identifiers={(DOMAIN, LIGHT_SERIAL)})
+    pump_device = device_registry.async_get_device_by_identifier((DOMAIN, PUMP_SERIAL), entry.entry_id)
+    light_device = device_registry.async_get_device_by_identifier((DOMAIN, LIGHT_SERIAL), entry.entry_id)
     assert pump_device is not None
     assert light_device is not None
     assert pump_device.via_device_id == tank_device.id

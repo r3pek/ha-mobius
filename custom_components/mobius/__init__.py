@@ -84,6 +84,30 @@ def tank_device_identifier(mlprefix_hex: Optional[str], pan_id: int) -> tuple[st
     return (DOMAIN, f"tank_panid_{pan_id:04x}")
 
 
+def resolve_tank_device_id(hass: HomeAssistant, entry_id: str, tank_identifier: tuple[str, str]) -> Optional[str]:
+    """
+    The synthetic tank device's own device_registry ID, for
+    DeviceInfo's own via_device_id field -- confirmed via a real Home
+    Assistant deprecation turning into a hard error: via_device
+    (taking a raw identifier tuple directly, the way this integration
+    used to do it) is deprecated in favor of via_device_id (the
+    device's own resolved registry ID), since identifiers are no
+    longer guaranteed unique across config entries the way they used
+    to be.
+
+    Always called AFTER _register_tank_device() has already run for
+    this same entry (see async_setup_entry()'s own ordering: tank
+    registration happens before async_forward_entry_setups(), which is
+    what actually triggers each platform's own async_setup_entry()
+    that needs this) -- so a genuine multi-device tank's own lookup
+    here should never fail. None specifically for a single, ad-hoc
+    device with no real tank device to point at.
+    """
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_device_by_identifier(tank_identifier, entry_id)
+    return device_entry.id if device_entry is not None else None
+
+
 @dataclass
 class MobiusRuntimeData:
     """One entry, one-or-more devices -- see const.py's own module-level

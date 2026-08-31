@@ -623,8 +623,8 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not any([sw_version, hw_version, model, manufacturer, name]):
             return
         device_registry = dr.async_get(self.hass)
-        device_entry = device_registry.async_get_device(
-            identifiers={(DOMAIN, self.serial)}
+        device_entry = device_registry.async_get_device_by_identifier(
+            (DOMAIN, self.serial), self.config_entry.entry_id,
         )
         if device_entry is None:
             return

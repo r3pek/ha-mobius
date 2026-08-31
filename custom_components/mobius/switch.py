@@ -31,7 +31,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import MobiusRuntimeData, tank_device_identifier
+from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
 from .const import CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_PAN_ID
 from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
 from .sensor import _device_info
@@ -149,7 +149,8 @@ async def async_setup_entry(
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
     pan_id = entry.data.get(CONF_PAN_ID)
     device_records = entry.data.get(CONF_DEVICES, [])
-    via_device = tank_device_identifier(mlprefix_hex, pan_id)
+    tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
+    via_device_id = resolve_tank_device_id(hass, entry.entry_id, tank_identifier)
 
     entities: list[MobiusAdvancedFeatureSwitch] = []
     for device_record in device_records:
@@ -168,7 +169,7 @@ async def async_setup_entry(
         hw_version = derive_hw_version(data.get("hardware_info", {}))
         device_info = _device_info(
             serial, data, address=address, sw_version=sw_version, hw_version=hw_version,
-            via_device=via_device,
+            via_device_id=via_device_id,
         )
 
         entities += _build_advanced_feature_switches(coordinator, serial, device_info, data)

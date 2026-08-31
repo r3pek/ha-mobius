@@ -2,6 +2,9 @@
 
 ## 0.5.0
 
+- Fixed three Home Assistant device_registry deprecations (async_get_device,
+  the `via_device` DeviceInfo field, and iterating `.devices` directly)
+  that a newer core version turns into hard errors.
 - Diagnostics now include the gateway registry's own generation
   counter and each device's own batch health (batch_disabled,
   consecutive_batch_failures, supported_attributes).
