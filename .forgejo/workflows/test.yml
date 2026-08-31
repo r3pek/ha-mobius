@@ -33,7 +33,12 @@ jobs:
         with:
           python-version: "3.14"
           cache: "pip"
-          cache-dependency-path: requirements_test.txt
+          # Also covers manifest.json -- its own dependencies are
+          # installed separately below, and were left out of the cache
+          # key otherwise.
+          cache-dependency-path: |
+            requirements_test.txt
+            custom_components/mobius/manifest.json
 
       - name: Install test dependencies
         run: |
