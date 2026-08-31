@@ -749,7 +749,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entirely (the connection itself down, say) never reaches this at
         all, and correctly leaves whatever was already tracked here
         untouched.
+
+        Once self._batch_disabled is already True, this returns
+        immediately without touching the counter or logging anything
+        further -- a real, confirmed bug this fixes: every poll from
+        then on passes force_individual_reads=True, so used_batch comes
+        back False EVERY TIME by deliberate design, not because of a
+        fresh failure. Without this guard, the counter grew completely
+        unbounded (a real device was observed at 420/2 consecutive) and
+        the same misleading "X/2 consecutive" debug line kept firing on
+        every single poll forever, long after the threshold had already
+        been crossed and acted on.
         """
+        if self._batch_disabled:
+            return
         _LOGGER.debug("%s: metadata fetch used_batch=%s", self.serial, used_batch)
         if used_batch:
             if self._consecutive_batch_failures > 0:
@@ -767,7 +780,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "fallback was used instead, successfully) -- %d/%d consecutive",
             self.serial, self._consecutive_batch_failures, BATCH_FAILURE_THRESHOLD,
         )
-        if self._consecutive_batch_failures >= BATCH_FAILURE_THRESHOLD and not self._batch_disabled:
+        if self._consecutive_batch_failures >= BATCH_FAILURE_THRESHOLD:
             self._batch_disabled = True
             _LOGGER.debug(
                 "%s: disabling batched metadata reads after %d consecutive failures -- "

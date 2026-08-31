@@ -756,25 +756,29 @@ class TestBatchFailureThreshold:
         assert coordinator._consecutive_batch_failures == 1
         assert coordinator._batch_disabled is False
 
-    def test_success_after_disabling_would_still_leave_it_disabled(self, hass):
-        """Once disabled, this integration commits to individual reads
-        for that device going forward -- a later used_batch=True isn't
-        actually possible in practice once force_individual_reads=True
-        is being passed (get_metadata_batch() wouldn't even attempt the
-        batch), but confirms _record_batch_result() itself doesn't
-        un-disable on a stray True either, since that would contradict
-        the whole point of having decided the mechanism doesn't work
-        for this device."""
+    def test_once_disabled_further_calls_are_a_complete_no_op(self, hass):
+        """Once disabled, _record_batch_result() does nothing further
+        at all, regardless of used_batch's own value -- the real,
+        confirmed bug this guards against: every poll from then on
+        passes force_individual_reads=True, so used_batch comes back
+        False EVERY TIME by deliberate design, not a fresh failure.
+        Before this fix, that meant the counter grew completely
+        unbounded (a real device was observed at 420/2 consecutive)
+        and the same misleading debug line kept firing forever."""
         registry = _make_registry(hass)
         entry = MagicMock()
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
         coordinator._batch_disabled = True
         coordinator._consecutive_batch_failures = BATCH_FAILURE_THRESHOLD
 
+        coordinator._record_batch_result(used_batch=False)
+        coordinator._record_batch_result(used_batch=False)
         coordinator._record_batch_result(used_batch=True)
 
-        assert coordinator._consecutive_batch_failures == 0
-        assert coordinator._batch_disabled is True  # NOT reset -- stays disabled
+        # Untouched by any of the three calls above -- confirms this is
+        # a genuine no-op, not just "doesn't cross some other threshold".
+        assert coordinator._consecutive_batch_failures == BATCH_FAILURE_THRESHOLD
+        assert coordinator._batch_disabled is True
 
     async def test_once_disabled_the_next_fetch_requests_individual_reads(self, hass):
         """The actual end-to-end point of all this bookkeeping: once
@@ -796,6 +800,43 @@ class TestBatchFailureThreshold:
         fake_device.get_metadata_batch.assert_awaited_with(
             model=Model.VorTechMP40wG3QD, supported_attribute_ids=set(), force_individual_reads=True,
         )
+
+    async def test_repeated_polls_after_disabling_do_not_grow_the_counter(self, hass):
+        """The exact real-world scenario this fix addresses: once
+        disabled, get_full_poll_batch() itself correctly reports
+        used_batch=False on every poll (force_individual_reads=True is
+        being honored) -- confirms MANY such polls in a row leave the
+        counter exactly at the threshold, not growing without bound."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._batch_disabled = True
+        coordinator._consecutive_batch_failures = BATCH_FAILURE_THRESHOLD
+        coordinator._primitive_type = PrimitiveType.VorTechV1
+        coordinator._model = Model.VorTechMP40wG3QD
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_full_poll_batch = AsyncMock(return_value=FullPollResult(
+            device_info={"model_raw": 42, "serial": PUMP_SERIAL, "primitive_type": None, "error_state": "NoError"},
+            metadata=MetadataSnapshot(
+                advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
+                supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+                used_batch=False,
+            ),
+            light_poll=None,
+            pump_telemetry={"speed": 447, "speed_percent": 44.7, "gph": 2272},
+            pump_schedule_points=[],
+            used_batch=False,
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            for _ in range(5):
+                await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator._consecutive_batch_failures == BATCH_FAILURE_THRESHOLD
+        assert coordinator._batch_disabled is True
 
 
 async def test_gateway_read_success_resets_registry_failure_counter(hass):
