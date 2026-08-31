@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Diagnostics dump now includes the gateway registry's own generation
+  counter (climbing unexpectedly fast is the direct signal for a
+  gateway-election-oscillation incident happening again) and each
+  device's own batch health (batch_disabled, consecutive_batch_failures,
+  supported_attributes).
 - Firmware version sensor now carries this device's own confirmed
   supported attributes as an entity attribute (supported_attributes),
   by name (e.g. "LocalControlEnabled") rather than raw numeric IDs.

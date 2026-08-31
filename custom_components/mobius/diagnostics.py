@@ -5,8 +5,14 @@ three-dot menu > Download diagnostics) covering exactly the state
 that's mattered most for real debugging of this integration's own
 issues so far: which device currently holds the gateway connection,
 each member's own registry-tracked health (rssi, mesh address,
-consecutive gateway failures), each device's own latest coordinator
-data/error, AND -- critically for a "can't connect to anything at all"
+consecutive gateway failures, generation -- a real, confirmed
+production incident involved gateway election oscillating
+indefinitely, and generation climbing unexpectedly fast is the direct,
+at-a-glance signal for that happening again), each device's own
+latest coordinator data/error and get_metadata_batch() health
+(supported_attributes, batch_disabled, consecutive_batch_failures --
+whether this specific device's batch mechanism is known to work at
+all), AND -- critically for a "can't connect to anything at all"
 report -- a live snapshot of whether Home Assistant's own Bluetooth
 stack currently sees each configured device at all, independent of
 anything this integration itself has cached. A user attaching this to
@@ -154,6 +160,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "registry_rssi": member.rssi if member is not None else None,
             "registry_mesh_address": _mesh_address_str(member.mesh_address) if member is not None else None,
             "bluetooth_cache": _bluetooth_cache_snapshot(hass, serial, now),
+            "batch_disabled": coordinator._batch_disabled if coordinator is not None else None,
+            "consecutive_batch_failures": coordinator._consecutive_batch_failures if coordinator is not None else None,
+            "supported_attributes": coordinator.supported_attribute_names if coordinator is not None else None,
             "coordinator": coordinator_diag,
         })
 
@@ -185,6 +194,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
         "registry": {
             "gateway_serial": group.gateway_serial if group is not None else None,
             "consecutive_gateway_failures": group.consecutive_gateway_failures if group is not None else None,
+            "generation": group.generation if group is not None else None,
         } if group is not None else None,
         "bluetooth_cache_total_connectable_devices": connectable_count,
         "bluetooth_connectable_scanners_registered": connectable_scanner_count,

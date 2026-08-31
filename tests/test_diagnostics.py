@@ -120,6 +120,29 @@ async def test_diagnostics_includes_gateway_and_member_state(hass):
     assert devices_by_serial[LIGHT_SERIAL]["is_current_gateway"] is False
 
 
+async def test_diagnostics_includes_generation_and_batch_state(hass):
+    """Two real, confirmed-useful additions from this session's own
+    work: generation (the direct, at-a-glance signal for the gateway-
+    election-oscillation incident this same session's own fix
+    addressed -- climbing unexpectedly fast means it's happening
+    again), and each device's own get_metadata_batch() health
+    (whether its batch mechanism is known to work at all)."""
+    entry = await _setup_multi_device_tank_entry(hass)
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diagnostics["registry"]["generation"] == 1  # one join, one election -- one bump
+    devices_by_serial = {d["serial"]: d for d in diagnostics["devices"]}
+    pump_diag = devices_by_serial[PUMP_SERIAL]
+    assert pump_diag["batch_disabled"] is False
+    assert pump_diag["consecutive_batch_failures"] == 0
+    # The fixture's own get_metadata_batch mock doesn't populate a real
+    # supported set, so this device's own coordinator never learns any
+    # real support -- confirms the field is present and None, not that
+    # it's silently missing from the dump entirely.
+    assert "supported_attributes" in pump_diag
+
+
 async def test_diagnostics_redacts_mac_addresses(hass):
     """Both the top-level CONF_ADDRESS an ad-hoc entry might store, and
     "mac_address" nested inside a device's own raw coordinator data --
