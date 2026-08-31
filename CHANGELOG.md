@@ -2,43 +2,29 @@
 
 ## Unreleased
 
-- Diagnostics dump now includes the gateway registry's own generation
-  counter (climbing unexpectedly fast is the direct signal for a
-  gateway-election-oscillation incident happening again) and each
-  device's own batch health (batch_disabled, consecutive_batch_failures,
-  supported_attributes).
-- Firmware version sensor now carries this device's own confirmed
-  supported attributes as an entity attribute (supported_attributes),
-  by name (e.g. "LocalControlEnabled") rather than raw numeric IDs.
-- A device whose batched metadata read fails 2 polls in a row (e.g. no
-  batch support at all -- old firmware, or an untested device family)
-  now falls back to individual reads permanently for that device,
-  logged at debug level, instead of retrying a doomed batch forever.
-  Requires a python-mobius version with get_metadata_batch()'s own
-  individual-reads fallback.
+- Diagnostics now include the gateway registry's own generation
+  counter and each device's own batch health (batch_disabled,
+  consecutive_batch_failures, supported_attributes).
+- Firmware version sensor now carries this device's own supported
+  attributes as an entity attribute, by name rather than raw IDs.
+- A device whose batched metadata read fails 2 polls running now
+  falls back to individual reads permanently for that device, logged
+  at debug level. Requires a matching python-mobius version.
 - Coordinators now fetch AdvancedFeatures/CalibrationInfo/hardware/
   firmware/channels in one round-trip (get_metadata_batch()) instead
-  of five separate ones -- confirmed 6-14x faster over relay on real
-  hardware. Requires a python-mobius version with get_metadata_batch().
-  A device's own confirmed attribute support is cached on its
-  coordinator after the first poll and reused indefinitely.
+  of five -- confirmed 6-14x faster over relay. Requires a matching
+  python-mobius version.
 - Fixed gateway election oscillating indefinitely in some multi-device
   tanks -- a stale, in-flight failure could get misattributed against
-  whatever gateway was current by the time it was recorded, sometimes
-  triggering another promotion on top of one that had already
-  superseded it. Fetches now carry a generation number; a failure
-  whose generation is already stale is dropped rather than counted.
+  the current gateway, sometimes triggering another promotion on top
+  of one that already superseded it.
 - **Breaking**: LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
-  FanShutdownEnabled are now switch/select entities (writable), not
-  read-only sensors -- requires a python-mobius version with
-  set_advanced_features(). The old sensor.* entities won't be
-  re-created; remove them manually from the entity registry and
-  update any automations/dashboards to the new switch.*/select.*
-  entity_ids.
+  FanShutdownEnabled are now switch/select entities, not read-only
+  sensors -- requires a matching python-mobius version. Old sensor.*
+  entities won't be re-created; remove them manually and update any
+  automations/dashboards to the new switch.*/select.* entity_ids.
 - Every entry now gets a synthetic tank device, including a single,
-  ad-hoc one -- confirmed via the app's own device-onboarding logic
-  that every device always belongs to a real tank there, even a lone
-  one. Previously only multi-device tanks got one.
+  ad-hoc one -- previously only multi-device tanks got one.
 
 ## 0.4.1
 
