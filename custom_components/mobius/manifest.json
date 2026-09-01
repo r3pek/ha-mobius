@@ -13,6 +13,6 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://code.r3pek.org/r3pek/ha-mobius/issues",
-  "requirements": ["python-mobius~=0.6.0", "bleak-retry-connector>=3.0"],
-  "version": "0.5.0"
+  "requirements": ["python-mobius~=0.7.0", "bleak-retry-connector>=3.0"],
+  "version": "0.6.0"
 }

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - LED auto-dim timeout and Max fan speed now show friendly labels
   ("Off", "30 seconds", "100%") instead of bare numbers.
@@ -11,10 +11,9 @@
 - After the first poll, every device fetches identity + metadata +
   light/pump state in one round-trip via get_full_poll_batch() --
   PrimitiveType/Model are cached permanently, never re-fetched.
-  Requires a matching python-mobius version.
 - Light and pump devices now avoid re-fetching their own schedule a
   second time for the current-intensity/current-block lookup, via
-  get_light_poll_batch(). Requires a matching python-mobius version.
+  get_light_poll_batch().
 - Added a debug log confirming used_batch on every poll -- previously
   only failures were logged.
 
