@@ -79,6 +79,14 @@
       },
       "fan_shutdown_enabled": {
         "name": "Fan shutdown"
+      },
+      "time_sync_enabled": {
+        "name": "Time sync"
+      }
+    },
+    "number": {
+      "poll_interval": {
+        "name": "Poll interval"
       }
     },
     "select": {

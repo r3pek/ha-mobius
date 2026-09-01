@@ -121,6 +121,48 @@ async def test_fan_shutdown_switch_not_created_when_unsupported_pump(hass):
 
 
 @pytest.mark.asyncio
+async def test_time_sync_switch_created_on_tank_device_and_defaults_on(hass):
+    """Attached to the synthetic TANK device (see __init__.py's own
+    tank_device_identifier()), not the pump itself -- confirmed by
+    checking the entity_id, which comes from the tank's own name
+    ("Mock Title" here), not the pump's own ("MP40QD Right")."""
+    async with _pump_entry(hass, {
+        "local_control_enabled": True, "auto_dim_timeout": None,
+        "max_fan_speed": None, "fan_shutdown_enabled": None,
+    }) as (entry, device):
+        state = hass.states.get("switch.mock_title_time_sync")
+        assert state is not None
+        assert state.state == "on"
+        assert entry.runtime_data.time_sync_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_turning_off_time_sync_switch_disables_it_on_the_runtime_data(hass):
+    """The actual point of this whole entity: _async_sync_tank_time()
+    (in __init__.py) reads MobiusRuntimeData.time_sync_enabled before
+    every scheduled write -- confirms toggling the switch off actually
+    updates that shared field, not just the switch's own displayed
+    state."""
+    async with _pump_entry(hass, {
+        "local_control_enabled": True, "auto_dim_timeout": None,
+        "max_fan_speed": None, "fan_shutdown_enabled": None,
+    }) as (entry, device):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": "switch.mock_title_time_sync"}, blocking=True,
+        )
+
+        state = hass.states.get("switch.mock_title_time_sync")
+        assert state.state == "off"
+        assert entry.runtime_data.time_sync_enabled is False
+
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": "switch.mock_title_time_sync"}, blocking=True,
+        )
+        assert hass.states.get("switch.mock_title_time_sync").state == "on"
+        assert entry.runtime_data.time_sync_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_turning_on_switch_calls_set_advanced_features(hass):
     set_mock = AsyncMock(return_value={"local_control_enabled": None})
     async with _pump_entry(hass, {

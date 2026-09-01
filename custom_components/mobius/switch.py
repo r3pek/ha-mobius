@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
@@ -141,6 +142,58 @@ def _build_advanced_feature_switches(coordinator, serial, device_info, data) -> 
     return entities
 
 
+class TimeSyncSwitch(SwitchEntity, RestoreEntity):
+    """
+    Enable/disable this tank's own periodic clock sync (see
+    __init__.py's own _async_sync_tank_time(), which checks
+    MobiusRuntimeData.time_sync_enabled -- this switch's own job is
+    keeping that field in sync with the switch's own on/off state).
+    Attached to the synthetic TANK device, not any one real device,
+    since it governs one write covering the whole tank -- see that
+    function's own docstring for why a single write to the current
+    gateway is enough.
+
+    Persisted via RestoreEntity so a user's choice survives a Home
+    Assistant restart -- defaults to on (matching this integration's
+    own pre-existing, always-on behavior) if never toggled before.
+
+    Not a MobiusAdvancedFeatureSwitch/CoordinatorEntity -- this has no
+    coordinator of its own to poll or reflect a device-reported value;
+    it's a pure, user-set preference with no device-side state at all.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_should_poll = False
+
+    def __init__(self, entry: ConfigEntry, tank_identifier: tuple[str, str]) -> None:
+        self.entity_description = SwitchEntityDescription(
+            key="time_sync_enabled", translation_key="time_sync_enabled", icon="mdi:clock-check-outline",
+        )
+        self._attr_unique_id = f"{entry.entry_id}_time_sync_enabled"
+        self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
+        self._entry = entry
+        self._attr_is_on = True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self._attr_is_on = last_state.state == "on"
+        runtime: MobiusRuntimeData = self._entry.runtime_data
+        runtime.time_sync_enabled = self._attr_is_on
+
+    async def async_turn_on(self, **kwargs) -> None:
+        self._attr_is_on = True
+        self._entry.runtime_data.time_sync_enabled = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self._attr_is_on = False
+        self._entry.runtime_data.time_sync_enabled = False
+        self.async_write_ha_state()
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -152,7 +205,7 @@ async def async_setup_entry(
     tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
     via_device_id = resolve_tank_device_id(hass, entry.entry_id, tank_identifier)
 
-    entities: list[MobiusAdvancedFeatureSwitch] = []
+    entities: list[SwitchEntity] = [TimeSyncSwitch(entry, tank_identifier)]
     for device_record in device_records:
         serial = device_record[CONF_SERIAL]
         coordinator = runtime.coordinators.get(serial)

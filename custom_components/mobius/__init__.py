@@ -33,7 +33,7 @@ from .gateway_registry import GatewayRegistry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT, Platform.NUMBER]
 
 # This integration is config-entry-only (config_flow: true in manifest.json,
 # devices discovered via Bluetooth or added manually through the UI) -- no
@@ -116,6 +116,11 @@ class MobiusRuntimeData:
     in this integration already works (gateway_registry.PanGroup.members,
     for instance)."""
     coordinators: dict[str, MobiusDeviceCoordinator] = field(default_factory=dict)
+    # Read by _async_sync_tank_time() before every scheduled write, set
+    # by switch.py's own TimeSyncSwitch when toggled -- True (matching
+    # this integration's own pre-existing, always-on behavior) unless a
+    # RestoreEntity-persisted False from a prior session says otherwise.
+    time_sync_enabled: bool = True
     # The rest are populated once by sensor.py's own async_setup_entry(),
     # consulted later by _async_ensure_sensors_exist() below -- see that
     # function's own docstring for why it needs to exist at all.
@@ -475,7 +480,21 @@ async def _async_sync_tank_time(hass: HomeAssistant, entry: ConfigEntry, now=Non
     immediately -- the next scheduled run acts as its own retry,
     matching the same "one bad round proves nothing" philosophy
     _async_revalidate_tank() itself already uses.
+
+    Skipped entirely (logged, not retried immediately -- same
+    philosophy as every other skip condition here) if this entry's own
+    MobiusRuntimeData.time_sync_enabled is False -- see switch.py's own
+    TimeSyncSwitch, which a user can toggle off if they'd rather manage
+    a device's own clock some other way (e.g. the app itself).
     """
+    runtime: MobiusRuntimeData = entry.runtime_data
+    if not runtime.time_sync_enabled:
+        _LOGGER.debug(
+            "Tank %r: time sync is disabled (see its own switch entity) -- skipping this cycle",
+            entry.title,
+        )
+        return
+
     registry: GatewayRegistry | None = hass.data.get(DOMAIN, {}).get("gateway_registry")
     if registry is None:
         return

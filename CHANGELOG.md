@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New poll interval number entity on each tank device (10-300s,
+  default 30s) -- applies to every device on that tank.
+- New time sync switch on each tank device, to disable the hourly
+  clock sync if you'd rather manage it another way.
 - After the first poll, every device fetches identity + metadata +
   light/pump state in one round-trip via get_full_poll_batch() --
   PrimitiveType/Model are cached permanently, never re-fetched.

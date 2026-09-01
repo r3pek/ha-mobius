@@ -1390,6 +1390,7 @@ async def test_sync_tank_time_writes_via_the_gateway_connection(hass):
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)
 
@@ -1413,6 +1414,7 @@ async def test_sync_tank_time_works_for_a_single_device_tank(hass):
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)
 
@@ -1428,6 +1430,7 @@ async def test_sync_tank_time_skips_cleanly_if_no_group_exists_at_all(hass):
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)  # must not raise
 
@@ -1444,6 +1447,7 @@ async def test_sync_tank_time_skips_cleanly_if_no_gateway_currently_available(ha
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)  # must not raise
 
@@ -1463,6 +1467,7 @@ async def test_sync_tank_time_logs_and_skips_on_write_failure(hass):
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)  # must not raise despite the failure
 
@@ -1477,8 +1482,31 @@ async def test_sync_tank_time_skips_cleanly_on_connection_failure(hass):
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
 
     await _async_sync_tank_time(hass, entry)  # must not raise
+
+
+async def test_sync_tank_time_skips_entirely_when_disabled(hass):
+    """The actual point of switch.py's own TimeSyncSwitch: when a user
+    has toggled it off (MobiusRuntimeData.time_sync_enabled == False),
+    this function must not even attempt a connection/write, not just
+    handle a failure gracefully."""
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    fake_device = group.gateway_connection._device
+    fake_device.set_time_to_now = AsyncMock()
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={}, time_sync_enabled=False)
+
+    await _async_sync_tank_time(hass, entry)
+
+    fake_device.set_time_to_now.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------
