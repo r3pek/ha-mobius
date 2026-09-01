@@ -91,10 +91,27 @@
     },
     "select": {
       "auto_dim_timeout": {
-        "name": "LED auto-dim timeout"
+        "name": "LED auto-dim timeout",
+        "state": {
+          "0": "Off",
+          "30": "30 seconds",
+          "60": "60 seconds",
+          "300": "5 minutes",
+          "600": "10 minutes",
+          "1800": "30 minutes",
+          "3600": "1 hour"
+        }
       },
       "max_fan_speed": {
-        "name": "Max fan speed"
+        "name": "Max fan speed",
+        "state": {
+          "10": "10%",
+          "20": "20%",
+          "40": "40%",
+          "60": "60%",
+          "80": "80%",
+          "100": "100%"
+        }
       }
     }
   }

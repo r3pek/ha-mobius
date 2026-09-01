@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- LED auto-dim timeout and Max fan speed now show friendly labels
+  ("Off", "30 seconds", "100%") instead of bare numbers.
 - New poll interval number entity on each tank device (10-300s,
   default 30s) -- applies to every device on that tank.
 - New time sync switch on each tank device, to disable the hourly
