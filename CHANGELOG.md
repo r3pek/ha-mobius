@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- New scene selection combo box on each tank device -- activates a
+  scene tank-wide in one write; "None" resumes the normal schedule.
+- New per-device "Configured scenes" sensor: how many scene slots are
+  used, with the device's own total capacity and a compact scene list
+  as attributes.
+
 ## 0.6.0
 
 - LED auto-dim timeout and Max fan speed now show friendly labels

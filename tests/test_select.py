@@ -160,3 +160,124 @@ async def test_device_rejected_write_raises_home_assistant_error(hass):
                 {"entity_id": "select.radionxr15wg6pro_fakeserial0001_max_fan_speed", "option": "80"},
                 blocking=True,
             )
+
+
+# --------------------------------------------------------------------------
+# SceneSelectionSelect -- unit tests, constructed directly against a mocked
+# entry.runtime_data (multiple fake coordinators) rather than a full,
+# multi-device async_setup_entry(), since the actual behavior worth
+# confirming is the aggregation/selection logic itself.
+# --------------------------------------------------------------------------
+
+from custom_components.mobius import MobiusRuntimeData
+from custom_components.mobius.select import SceneSelectionSelect
+from mobius import Scene, ActiveScene, SceneID
+
+
+def _fake_coordinator(serial, scenes=None, current_scene=None):
+    coordinator = MagicMock()
+    coordinator.serial = serial
+    coordinator.data = {"configured_scenes": scenes or [], "current_scene": current_scene}
+    coordinator.async_get_connected_device = AsyncMock(return_value=AsyncMock())
+    coordinator.async_request_refresh = AsyncMock()
+    return coordinator
+
+
+def _entry_with_coordinators(*coordinators):
+    entry = MagicMock()
+    entry.runtime_data = MobiusRuntimeData(coordinators={c.serial: c for c in coordinators})
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_options_are_the_union_across_every_device():
+    """A scene configured only on the light and another only on the
+    pump both show up -- matching how the app itself builds its own
+    tank-wide scene list from separate, per-device reads."""
+    light_scene = Scene(index=0, id=100, scene_type=None, name="Sunrise",
+                         timeout=60, light=None, pump=None)
+    pump_scene = Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+                        name="Feed", timeout=30, light=None, pump=None)
+    entry = _entry_with_coordinators(
+        _fake_coordinator("light1", scenes=[light_scene]),
+        _fake_coordinator("pump1", scenes=[pump_scene]),
+    )
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.options == ["None", "Feed", "Sunrise"]
+
+
+@pytest.mark.asyncio
+async def test_empty_scene_slots_are_excluded_from_options():
+    empty_slot = Scene(index=0, id=int(SceneID.EmptyScene), scene_type=SceneID.EmptyScene,
+                        name="", timeout=0, light=None, pump=None)
+    entry = _entry_with_coordinators(_fake_coordinator("light1", scenes=[empty_slot]))
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.options == ["None"]
+
+
+@pytest.mark.asyncio
+async def test_current_option_reflects_whichever_device_reports_it_active():
+    pump_scene = Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+                        name="Feed", timeout=30, light=None, pump=None)
+    entry = _entry_with_coordinators(
+        _fake_coordinator("light1", scenes=[pump_scene]),
+        _fake_coordinator(
+            "pump1", scenes=[pump_scene],
+            current_scene=ActiveScene(id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=25),
+        ),
+    )
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.current_option == "Feed"
+
+
+@pytest.mark.asyncio
+async def test_current_option_defaults_to_none_when_nothing_active():
+    entry = _entry_with_coordinators(_fake_coordinator("light1"))
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.current_option == "None"
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_scene_writes_only_to_the_device_that_has_it():
+    """The actual point of start_scene()'s own broadcast=True: only ONE
+    device needs to be written to at all."""
+    pump_scene = Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+                        name="Feed", timeout=30, light=None, pump=None)
+    light_coord = _fake_coordinator("light1")  # does NOT have this scene
+    pump_coord = _fake_coordinator("pump1", scenes=[pump_scene])
+    entry = _entry_with_coordinators(light_coord, pump_coord)
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    await select.async_select_option("Feed")
+
+    light_coord.async_get_connected_device.assert_not_awaited()
+    pump_coord.async_get_connected_device.assert_awaited_once()
+    written_device = pump_coord.async_get_connected_device.return_value
+    written_device.start_scene.assert_awaited_once_with(int(SceneID.FeedMode), broadcast=True)
+
+
+@pytest.mark.asyncio
+async def test_selecting_none_resumes_the_schedule_on_every_device():
+    light_coord = _fake_coordinator("light1")
+    pump_coord = _fake_coordinator("pump1")
+    entry = _entry_with_coordinators(light_coord, pump_coord)
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    await select.async_select_option("None")
+
+    for coordinator in (light_coord, pump_coord):
+        device = coordinator.async_get_connected_device.return_value
+        device.resume_schedule.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_selecting_an_unknown_scene_raises():
+    entry = _entry_with_coordinators(_fake_coordinator("light1"))
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    with pytest.raises(HomeAssistantError):
+        await select.async_select_option("Nonexistent")

@@ -1,9 +1,10 @@
 """Sensor entities for Mobius devices.
 
-Read-only for now, deliberately -- kept in lockstep with what
-python-mobius itself supports rather than getting ahead of it. Control
-(scenes, schedule writes) will follow the same pattern once the underlying
-library grows write support.
+Read-only for the most part, deliberately -- kept in lockstep with
+what python-mobius itself supports rather than getting ahead of it.
+Scene activation itself is a select.py entity now that python-mobius
+has grown that write support; ConfiguredScenesSensor here stays purely
+informational (how many scene slots this device is actually using).
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.unit_conversion import VolumeFlowRateConverter
 from homeassistant.util import dt as dt_util
+
+from mobius import SceneID
 
 from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -327,6 +330,47 @@ class SchedulePointCountSensor(MobiusEntity):
     @property
     def native_value(self):
         return (self.coordinator.data or {}).get("schedule_point_count")
+
+
+def _used_scenes(coordinator) -> list:
+    """Every configured scene except a genuinely empty/unused slot
+    (EmptyScene id with no name at all)."""
+    scenes = (coordinator.data or {}).get("configured_scenes") or []
+    return [s for s in scenes if not (s.scene_type == SceneID.EmptyScene and not s.name)]
+
+
+class ConfiguredScenesSensor(MobiusEntity):
+    """State is how many of this device's own scene slots are actually
+    used, not the device's own total capacity (a real difference --
+    that capacity itself is device-reported and can vary by device
+    type, see total_slots below). Kept deliberately compact regardless
+    of channel count: each scene's own light/pump payload never
+    appears here, only its index/name/type."""
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "configured_scenes",
+            SensorEntityDescription(
+                key="configured_scenes", translation_key="configured_scenes", icon="mdi:palette-swatch",
+            ),
+            device_info,
+        )
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self):
+        return len(_used_scenes(self.coordinator))
+
+    @property
+    def extra_state_attributes(self):
+        all_scenes = (self.coordinator.data or {}).get("configured_scenes") or []
+        return {
+            "total_slots": len(all_scenes),
+            "scenes": [
+                f"{s.index}: {s.name} ({s.scene_type.name if s.scene_type else 'custom'})"
+                for s in _used_scenes(self.coordinator)
+            ],
+        }
 
 
 class CurrentPumpModeSensor(MobiusEntity):
@@ -806,6 +850,13 @@ async def async_setup_entry(
             HardwareRevisionSensor(coordinator, serial, device_info),
             MeshAddressSensor(coordinator, serial, device_info),
         ]
+        # get_configured_scenes() always returns one element per slot the
+        # device actually has (even a genuinely unused one) if it supports
+        # scenes at all, and an empty list if it doesn't -- a real signal,
+        # not a coincidence, so gate on it rather than creating this for
+        # every device unconditionally.
+        if data.get("configured_scenes"):
+            entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))
 
         type_specific = _build_type_specific_entities(coordinator, serial, device_info, support, data)
         entities += type_specific

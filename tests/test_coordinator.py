@@ -26,7 +26,7 @@ from custom_components.mobius.coordinator import (
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
@@ -579,6 +579,92 @@ class TestSupportedAttributeNames:
         assert "LocalControlEnabled" in names
         assert "unknown(99999)" in names
         assert len(names) == 2  # confirms it's rendered, not silently dropped
+
+
+class TestSceneWiring:
+    """Confirms _fetch_all() actually populates info["configured_scenes"]/
+    info["current_scene"] on a poll, and fails soft (empty list/None,
+    not an exception) when a device doesn't support scenes at all."""
+
+    async def test_configured_scenes_and_current_scene_populated(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        the_scene = Scene(
+            index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+            name="Feed", timeout=30, light=None, pump=None,
+        )
+        fake_device.get_configured_scenes = AsyncMock(return_value=[the_scene])
+        fake_device.get_current_scene = AsyncMock(return_value=ActiveScene(
+            id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=25,
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator.data["configured_scenes"] == [the_scene]
+        assert coordinator.data["current_scene"].scene_type == SceneID.FeedMode
+        assert coordinator.data["current_scene"].duration_seconds == 25
+
+    async def test_scene_reads_fail_soft_when_unsupported(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_configured_scenes = AsyncMock(side_effect=IOError("not supported"))
+        fake_device.get_current_scene = AsyncMock(side_effect=IOError("not supported"))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator.data["configured_scenes"] == []
+        assert coordinator.data["current_scene"] is None
+
+    async def test_steady_state_uses_the_batch_not_separate_calls(self, hass):
+        """The actual point of folding scenes into get_full_poll_batch():
+        once primitive_type/model are cached (the second poll onward),
+        get_configured_scenes()/get_current_scene() are never called
+        again at all -- this data comes from the same combined batch
+        as everything else."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        the_scene = Scene(
+            index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+            name="Feed", timeout=30, light=None, pump=None,
+        )
+        fake_device.get_full_poll_batch.return_value.configured_scenes = [the_scene]
+        fake_device.get_full_poll_batch.return_value.current_scene = ActiveScene(
+            id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=25,
+        )
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll -- learns identity, may call these
+
+            # From here on, any further call to either is the actual
+            # regression this test exists to catch.
+            fake_device.get_configured_scenes = AsyncMock(
+                side_effect=AssertionError("should never be called once primitive/model are cached")
+            )
+            fake_device.get_current_scene = AsyncMock(
+                side_effect=AssertionError("should never be called once primitive/model are cached")
+            )
+            await coordinator.async_refresh()  # second poll -- must NOT call these
+
+        assert coordinator.last_update_success
+        assert coordinator.data["configured_scenes"] == [the_scene]
+        assert coordinator.data["current_scene"].scene_type == SceneID.FeedMode
+        assert coordinator.data["current_scene"].duration_seconds == 25
 
 
 class TestFullPollBatchWiring:

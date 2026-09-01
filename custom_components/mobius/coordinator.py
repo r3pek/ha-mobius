@@ -455,6 +455,8 @@ async def _fetch_all(
         light_poll = full_poll.light_poll
         pump_telemetry_result = full_poll.pump_telemetry
         pump_schedule_points = full_poll.pump_schedule_points
+        configured_scenes = full_poll.configured_scenes
+        current_scene = full_poll.current_scene
     else:
         # FIRST POLL ONLY: identity (including primitive_type/model)
         # isn't known yet -- learn it directly, then use the original,
@@ -489,6 +491,20 @@ async def _fetch_all(
         elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
             pump_schedule_points = await device.get_pump_schedule(which=1)
             pump_telemetry_result = await device.get_pump_telemetry(model=model, primitive=primitive)
+
+        # Not part of any of the calls above yet on this, the FIRST poll
+        # only -- every poll after this one gets both for free as part
+        # of get_full_poll_batch() itself instead. Both fail soft to
+        # empty/None rather than raising, since most devices in the
+        # wild won't support scenes at all.
+        try:
+            configured_scenes = await device.get_configured_scenes(primitive=primitive)
+        except Exception:
+            configured_scenes = []
+        try:
+            current_scene = await device.get_current_scene()
+        except Exception:
+            current_scene = None
 
     if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
         info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
@@ -576,6 +592,13 @@ async def _fetch_all(
     # of what "support" ended up being above, and simply None for
     # whichever devices support none of the four underlying attributes.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
+
+    # Populated by whichever branch above actually ran -- get_full_poll_batch()
+    # itself in steady state (no further round-trip needed here at all), or
+    # the separate, fail-soft calls just above on this coordinator's own
+    # first poll only.
+    info["configured_scenes"] = configured_scenes
+    info["current_scene"] = current_scene
 
     return info, supported_attribute_ids, used_batch, primitive, model
 

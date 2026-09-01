@@ -344,6 +344,83 @@ async def test_pump_entry_setup_skips_flow_sensor_when_gph_unreliable(hass):
     assert hass.states.get("sensor.mp40qd_right_current_mode") is not None
 
 
+async def test_configured_scenes_sensor_created_when_supported(hass):
+    from mobius import Scene, SceneID
+
+    device = _fake_pump_device()
+    device.get_configured_scenes = AsyncMock(return_value=[
+        Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+              name="Feed", timeout=30, light=None, pump=None),
+        Scene(index=1, id=int(SceneID.EmptyScene), scene_type=SceneID.EmptyScene,
+              name="", timeout=0, light=None, pump=None),
+    ])
+    device.get_current_scene = AsyncMock(return_value=None)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.mp40qd_right_configured_scenes")
+    assert state is not None
+    # Two slots reported, but only one actually used -- the genuinely
+    # empty second slot is excluded from both the state and the list.
+    assert state.state == "1"
+    assert state.attributes["total_slots"] == 2
+    assert state.attributes["scenes"] == ["0: Feed (FeedMode)"]
+
+
+async def test_configured_scenes_sensor_not_created_when_unsupported(hass):
+    device = _fake_pump_device()
+    device.get_configured_scenes = AsyncMock(return_value=[])
+    device.get_current_scene = AsyncMock(return_value=None)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=device),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.mp40qd_right_configured_scenes") is None
+    # A device with no scenes still gets every other sensor normally.
+    assert hass.states.get("sensor.mp40qd_right_motor_speed") is not None
+
+
 async def test_flow_sensor_converts_min_max_to_the_effective_display_unit(hass):
     """The actual real-world bug this confirms is fixed: HA's own
     native_value -> state unit conversion does NOT extend to

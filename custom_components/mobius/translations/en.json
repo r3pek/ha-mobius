@@ -43,6 +43,9 @@
       "schedule_point_count": {
         "name": "Schedule points"
       },
+      "configured_scenes": {
+        "name": "Configured scenes"
+      },
       "current_pump_mode": {
         "name": "Current mode"
       },
@@ -112,6 +115,9 @@
           "80": "80%",
           "100": "100%"
         }
+      },
+      "scene_selection": {
+        "name": "Scene selection"
       }
     }
   }
