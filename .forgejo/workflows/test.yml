@@ -47,11 +47,31 @@ jobs:
 
       # manifest.json's own "requirements" are what Home Assistant
       # installs at runtime -- read from there rather than duplicated
-      # here, so they can't drift out of sync.
-      - name: Install integration runtime requirements (from manifest.json)
+      # here, so they can't drift out of sync. python-mobius itself is
+      # deliberately excluded from this file and installed separately,
+      # from its own git repo, in the next step below -- see that
+      # step's own comment for why.
+      - name: Install integration runtime requirements (from manifest.json, except python-mobius)
         run: |
-          python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
+          python3 -c "import json,sys; sys.stdout.write('\n'.join(r for r in json.load(open('custom_components/mobius/manifest.json'))['requirements'] if not r.startswith('python-mobius')))" > /tmp/manifest_requirements.txt
           pip install -r /tmp/manifest_requirements.txt
+
+      # manifest.json's own python-mobius requirement is a PyPI version
+      # pin (python-mobius~=X.Y.Z) -- necessary for real end-user Home
+      # Assistant installs, which can only pull from PyPI, but that
+      # means CI could only ever test against whatever's already been
+      # formally released there. This installs the latest commit on
+      # python-mobius's own default branch directly from its git repo
+      # instead, specifically so this integration's own tests can run
+      # against genuinely unreleased python-mobius changes -- exactly
+      # the situation whenever this project is waiting on a
+      # python-mobius release that hasn't happened yet. pip always
+      # resolves a VCS requirement like this fresh (not served from its
+      # own package-download cache the way a normal PyPI install would
+      # be), so this genuinely tracks that branch's current HEAD on
+      # every run, not a stale clone from an earlier one.
+      - name: Install python-mobius from its own git repo (not PyPI)
+        run: pip install "git+https://code.r3pek.org/r3pek/python-mobius.git"
 
       # `python -m pytest`, not bare `pytest` -- the former puts the
       # repo root on sys.path, which custom_components.mobius needs.
