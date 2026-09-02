@@ -653,9 +653,11 @@ class GatewayDeviceSensor(SensorEntity):
     device.
 
     Shows the gateway device's own configured NAME, not its serial --
-    that name is already fetched fresh on every single poll cycle (see
-    coordinator.py's own _fetch_all(), which always calls
-    get_device_info()), so a rename in the Mobius app itself shows up
+    that name is already fetched fresh on every single poll cycle (on
+    a coordinator's own first poll, via get_device_info() directly; on
+    every poll after that, via get_full_poll_batch()'s own device_info
+    field instead -- either way, coordinator.py's own _fetch_all()
+    never skips it), so a rename in the Mobius app itself shows up
     here within one normal poll interval, same as everywhere else in
     this integration -- no separate polling needed for this specifically.
     Falls back to "{model} ({serial})" if the device has no configured
