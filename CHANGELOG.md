@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - New scene selection combo box on each tank device -- activates a
   scene tank-wide in one write; "None" resumes the normal schedule.
