@@ -63,14 +63,14 @@ def _device_info(serial: str, data: dict, address: str | None = None,
     devices" grouping this whole feature was designed against. None
     for a single, ad-hoc device (no tank to group under). Deliberately
     a resolved ID, not the tank's own raw identifier tuple (the
-    now-deprecated via_device field took that instead) -- confirmed
-    via a real Home Assistant deprecation turning into a hard error.
+    now-deprecated via_device field took that instead) -- this
+    Home Assistant deprecation turns into a hard error.
     """
     custom_name = data.get("name")
     model = data.get("model")
 
-    # The device's own configured "name" attribute is often blank (confirmed
-    # on real hardware -- one of our test XR15 lights had an empty name).
+    # The device's own configured "name" attribute is often blank (one
+    # of our test XR15 lights had an empty name).
     # Falling back to just the model name alone isn't enough to disambiguate
     # multiple identical devices (e.g. two XR15 lights would both show the
     # exact same name) -- append the serial number for a unique, meaningful
@@ -185,8 +185,8 @@ class OperationStateSensor(MobiusEntity):
 
 
 class MotorSpeedSensor(MobiusEntity):
-    """Pump devices only. Confirmed (via the decompiled app's own display
-    code -- see python-mobius documentation/03) to be a percentage of max
+    """Pump devices only. Per the decompiled app's own display
+    code (see python-mobius documentation/03), a percentage of max
     pump power, not RPM. Uses speed_percent (always non-negative); the raw
     signed value (sign encodes reverse-rotation direction) is exposed as an
     attribute rather than the primary state."""
@@ -216,12 +216,12 @@ class MotorSpeedSensor(MobiusEntity):
 
 
 class FlowRateSensor(MobiusEntity):
-    """Pump devices only. Estimated flow (GPH), confirmed live-queried by the app.
+    """Pump devices only. Estimated flow (GPH), matching what the app itself displays.
 
     Only created when python-mobius's own get_pump_telemetry() reports
     gph_reliable=True for this device (see _build_type_specific_entities()'s
     own comment, and that method's docstring in python-mobius, for the
-    full confirmation) -- a device the app itself wouldn't trust a raw
+    full picture) -- a device the app itself wouldn't trust a raw
     gph reading for (no supported flow range) doesn't get this entity
     at all, rather than showing a number the app itself would never
     display.
@@ -239,7 +239,7 @@ class FlowRateSensor(MobiusEntity):
     uses internally) to whatever unit is CURRENTLY effectively displayed
     -- i.e. self.unit_of_measurement, which accounts for a per-entity
     override, not native_unit_of_measurement, which never changes.
-    Confirmed via a real, reported case: HA's own native_value -> state
+    This matters because HA's own native_value -> state
     conversion (see below) does NOT extend to extra_state_attributes at
     all -- these are plain values an integration returns directly, with
     no framework involvement -- so without this, overriding this
@@ -250,20 +250,20 @@ class FlowRateSensor(MobiusEntity):
     native_unit_of_measurement stays "gal/h" -- that's the actual native
     value the protocol reports, not a display preference.
 
-    CORRECTION (verified against real HA source, homeassistant/components/
+    Per HA's own source (homeassistant/components/
     sensor/__init__.py and homeassistant/util/unit_system.py): unlike
     temperature/length/pressure, `volume_flow_rate` is NOT one of the
     device classes tied to HA's system-wide Metric/US Customary toggle
     (Settings -> General -> Unit System) -- that toggle has no effect on
     this sensor at all. device_class=VOLUME_FLOW_RATE does register real
-    conversion machinery (VolumeFlowRateConverter, confirmed present), but
+    conversion machinery (VolumeFlowRateConverter), but
     it's only invoked via a PER-ENTITY manual override stored in the entity
     registry (Settings -> Devices & Services -> Entities -> this entity ->
     gear icon -> "Unit of measurement"), not automatically from any
     system-wide preference. If you want L/h (or any other unit) displayed,
     set it there -- there's no code-level "default" to change.
 
-    Confirmed 'gal/h' is a valid VOLUME_FLOW_RATE unit on HA 2026.06
+    'gal/h' is a valid VOLUME_FLOW_RATE unit on HA 2026.06
     (current docs list it); it was NOT valid on HA 2025.1.4 (the version
     pinned by this repo's test harness) -- exact cutoff version between
     those two isn't pinned down, so if you're running something older than
@@ -400,7 +400,7 @@ class LightChannelIntensitySensor(MobiusEntity):
     intensity in %.
 
     Whole numbers, not decimals -- the underlying raw value is itself
-    only ever a coarse permille figure (confirmed schedule/interpolation
+    only ever a coarse permille figure (matching the schedule/interpolation
     granularity), so a fractional percent doesn't represent any real
     additional precision; it's just noise. suggested_display_precision=0
     is a frontend display hint (a user could still override it per-entity
@@ -435,10 +435,10 @@ class LightChannelIntensitySensor(MobiusEntity):
 
 class CalibrationSensor(MobiusEntity):
     """
-    Light devices only -- confirmed via real device testing AND the app's
-    own UI gating (its own device category check) to be a light feature; pumps don't
-    expose this (get_calibration_info() returns None for them, confirmed
-    against real VorTech hardware). Only added to a config entry if
+    Light devices only -- per the app's
+    own UI gating (its own device category check), a light feature; pumps don't
+    expose this (get_calibration_info() returns None for them, per
+    VorTech hardware). Only added to a config entry if
     calibration data was actually present at setup -- see
     async_setup_entry() below.
 
@@ -488,7 +488,7 @@ class FirmwareVersionSensor(MobiusEntity):
     "Radio Firmware"/"Filesystem"/"Radio OS"/"Radio"/"WLAN"/"Product OS"/
     "Product Bootloader" for a light, not just the single "Firmware"
     value derive_sw_version() picks as most representative. See
-    coordinator.py's derive_sw_version() for the confirmed label priority.
+    coordinator.py's derive_sw_version() for the label priority.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -523,9 +523,9 @@ class HardwareRevisionSensor(MobiusEntity):
 
     Requires python-mobius>=0.3.0: as of that version,
     get_hardware_info() already decodes Color/ProductType/RadioType/
-    MotorType into their own confirmed display label strings (e.g.
+    MotorType into their own display label strings (e.g.
     "White"/"VorTech"/"QCA4020"/"VorTech MP40 G3" -- each is itself a
-    confirmed enum with confirmed labels, see that library's
+    known enum with display labels, see that library's
     mobius.constants), and Revision/Segments as plain integers -- used
     directly here, not re-decoded.
     """
@@ -597,8 +597,8 @@ class MeshAddressSensor(MobiusEntity):
         member = group.members.get(self.coordinator.serial)
         if member is None or member.mesh_address is None:
             return None
-        # A real Thread mesh-local IPv6 address (16 raw bytes, confirmed
-        # in python-mobius's own wire-format documentation) -- format it
+        # A Thread mesh-local IPv6 address (16 raw bytes, per
+        # python-mobius's own wire-format documentation) -- format it
         # as one (standard colon-separated, zero-compressed notation via
         # the stdlib ipaddress module), not raw hex.
         return str(ipaddress.IPv6Address(member.mesh_address))
@@ -749,7 +749,7 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
             MotorSpeedSensor(coordinator, serial, device_info),
             CurrentPumpModeSensor(coordinator, serial, device_info),
         ]
-        # Confirmed via the app's own support-check logic for its live
+        # Per the app's own support-check logic for its live
         # flow gauge (see get_pump_telemetry()'s own docstring in
         # python-mobius): the app itself doesn't trust or display a raw
         # gph reading without a supported flow range (with a narrow
@@ -768,9 +768,8 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
         for name in channel_names:
             entities.append(LightChannelIntensitySensor(coordinator, serial, device_info, name))
         # Only added if calibration data was actually present at setup --
-        # confirmed via real hardware that not all lights necessarily
-        # support this, and there's no point creating a permanently
-        # unavailable entity for one that doesn't.
+        # not all lights necessarily support this, and there's no point
+        # creating a permanently unavailable entity for one that doesn't.
         if data.get("calibration") is not None:
             entities.append(CalibrationSensor(coordinator, serial, device_info))
         return entities
@@ -796,7 +795,7 @@ async def async_setup_entry(
     # tank_device_identifier() always resolves to something. The
     # MeshPrefixSensor/GatewayDeviceSensor condition further below is
     # separate and unchanged -- those two genuinely still need a
-    # confirmed mesh prefix and multi-device gateway election
+    # known mesh prefix and multi-device gateway election
     # respectively, unlike via_device grouping itself.
     tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
     via_device_id = resolve_tank_device_id(hass, entry.entry_id, tank_identifier)
@@ -822,8 +821,8 @@ async def async_setup_entry(
         support = data.get("support", "")
 
         # See derive_sw_version()/_SW_VERSION_LABEL_PRIORITY in coordinator.py
-        # for the confirmed label priority (device-reported "Firmware" first,
-        # not "Product OS" -- confirmed by direct comparison against what the
+        # for the label priority (device-reported "Firmware" first,
+        # not "Product OS" -- matching what the
         # official app itself displays) and why it's a fallback list rather
         # than a single hardcoded lookup. Not all firmware/hardware
         # components as separate sensors -- that would be sensor sprawl for

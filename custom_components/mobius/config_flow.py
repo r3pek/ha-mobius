@@ -178,7 +178,7 @@ async def _merge_device_into_entry(
     # hass.create_task, not hass.async_create_task -- this runs from
     # more than one context (a fresh discovery-time config flow step,
     # always event-loop-safe, but also __init__.py's own periodic
-    # revalidation timer, which a real, confirmed warning showed isn't
+    # revalidation timer, which a Home Assistant warning showed isn't
     # always guaranteed to be), so the version safe from any thread is
     # the right one here regardless of which caller this is.
     hass.create_task(hass.config_entries.async_reload(entry.entry_id))
@@ -192,7 +192,7 @@ async def _remove_device_from_entry(hass: HomeAssistant, entry: ConfigEntry, ser
     used for discovery-time merging at all (that only ever adds) --
     exists purely so a device that's since moved to a different,
     already-tracked tank can be cleanly taken out of its old one as
-    part of that confirmed move, never on its own (see
+    part of that move, never on its own (see
     _async_revalidate_tank()'s own docstring for why a device simply
     going unreported is never, by itself, a reason to remove it)."""
     devices = [
@@ -236,7 +236,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # 12-device-identity-and-address-stability.md) -- serial is
             # required for reliable identity/reconnection, not optional.
             #
-            # Confirmed via a real capture that these devices split their
+            # These devices split their
             # info across multiple, rotating advertisement packets --
             # name plus a 128-bit service UUID alone already fills 29 of
             # the 31 bytes a legacy advertisement allows, leaving no room
@@ -250,7 +250,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # does NOT reliably re-trigger a fresh discovery step on its
             # own once this address has already matched via local_name
             # (see manifest.json's own "bluetooth" matchers -- local_name
-            # and each confirmed company ID's own manufacturer_id are
+            # and each known company ID's own manufacturer_id are
             # all registered there independently). Clearing this address's own match history
             # here, rather than just aborting and hoping, is what
             # actually lets the next advertisement -- even one that,
@@ -282,7 +282,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Deduplicates CONCURRENT discovery flows for the same
         # not-yet-tracked pan_id -- e.g. two devices from the same
         # brand-new tank both advertising and triggering this step
-        # around the same time, before either has been confirmed. This
+        # around the same time, before either has been resolved. This
         # is deliberately NOT the entry's eventual real unique_id (that's
         # set later, in _async_create_tank_entry()/_async_create_entry()
         # -- mlprefix hex for a tank, serial for ad-hoc); it exists only
@@ -336,7 +336,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # with this step's own form text (which deliberately doesn't
             # repeat it, to avoid the "Found N devices (Mobius Tank (N
             # devices))" redundancy this whole change was meant to fix) --
-            # confirmed via Home Assistant's own developer docs: the
+            # per Home Assistant's own developer docs: the
             # "Discovered" card shown in Settings > Devices & Services
             # BEFORE this form is even opened gets its own title from
             # title_placeholders["name"] (combined with a flow_title
@@ -373,7 +373,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Only overwrites self._discovery_info with the new snapshot when
         it's actually at least as good (comparing whether each snapshot's
         manufacturer data actually parses into a usable
-        MobiusAdvertisement, under any confirmed company ID -- not just
+        MobiusAdvertisement, under any known company ID -- not just
         whether SOME bytes happen to be present under one specific
         company ID, which could be a garbled/partial payload that
         wouldn't actually be usable) -- a perfectly good initial
@@ -444,7 +444,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         assert self._discovery_info is not None
         # Only refreshes for a nicer title (e.g. showing the real model
         # instead of a generic "Mobius device (address)") -- unique_id is
-        # set from the (already-confirmed-parseable) serial in
+        # set from the (already-parseable) serial in
         # _async_create_entry(), so there's nothing to re-check here.
         self._refresh_discovery_info()
         self.context["title_placeholders"] = {"name": _title_for(self._discovery_info)}
@@ -490,7 +490,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # already excludes devices whose OWN serial is configured, but
             # not ones whose pan_id matches an existing tank they're not
             # yet a member of (that tank might only have been discovered/
-            # confirmed via a DIFFERENT device's own automatic discovery
+            # set up via a DIFFERENT device's own automatic discovery
             # flow, with this one never having triggered async_step_
             # bluetooth() at all if it was already visible when that
             # happened).
@@ -548,7 +548,7 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _async_create_entry(self, discovery: BluetoothServiceInfoBleak) -> FlowResult:
         """Creates an ad-hoc, single-device entry -- same CONF_DEVICES
         shape a multi-device tank entry uses, just with one device in
-        it, and no CONF_MLPREFIX (there's no confirmed tank prefix to
+        it, and no CONF_MLPREFIX (there's no tank prefix to
         store -- see this module's own docstring for why a device not
         provisioned into a tank yet, or a lone device on its own Thread
         network, both end up here)."""
@@ -582,8 +582,8 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         coordinator layer resolves and reconnects by serial regardless).
 
         Does NOT store each peer's own "age" value (python-mobius's
-        MeshPeer.age) at all -- confirmed via reverse engineering the
-        app's own network-troubleshooting screen to be a live, constantly-
+        MeshPeer.age) at all -- matches the
+        app's own network-troubleshooting screen: a live, constantly-
         changing duration (time since that peer was last heard from on
         the mesh), not a fixed value there's any point capturing once at
         setup time and keeping around unrefreshed. See sensor.py's own

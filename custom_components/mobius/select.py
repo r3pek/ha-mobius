@@ -7,8 +7,8 @@ carries: the old sensor.* entities won't be re-created after this
 update, and existing automations/dashboards referencing them by
 entity_id need to be repointed at the new select.* ones.
 
-Restricted to the app's own exact preset choices for each -- confirmed
-directly from the app itself, not invented here -- rather than a
+Restricted to the app's own exact preset choices for each -- matching
+the app itself, not invented here -- rather than a
 free-form number input: python-mobius's own set_advanced_features()
 deliberately doesn't enforce this (it's a low-level library; see that
 method's own docstring), but this integration is a user-facing UI, and
@@ -46,7 +46,7 @@ from .sensor import _device_info
 
 _LOGGER = logging.getLogger(__name__)
 
-# Confirmed directly from the app itself -- both are fixed chooser
+# Matches the app itself -- both are fixed chooser
 # dialogs there, never a free-form numeric input. Kept as the exact
 # seconds/percent values (as strings, for SelectEntity's own option
 # list) rather than inventing separate machine-readable keys, since the
@@ -170,7 +170,7 @@ class SceneSelectionSelect(SelectEntity):
     """
     Activates a scene tank-wide from the tank's own synthetic device --
     one write, via start_scene()'s own broadcast=True default (see that
-    method's own docstring in python-mobius for the confirmed mesh-
+    method's own docstring in python-mobius for the mesh-
     isolation reasoning), sent to whichever ONE device actually has the
     selected scene configured.
 
@@ -250,8 +250,8 @@ class SceneSelectionSelect(SelectEntity):
         runtime: MobiusRuntimeData = self._entry.runtime_data
 
         if option == self.NONE_OPTION:
-            # OperationState (what resume_schedule() writes) hasn't been
-            # confirmed to propagate across the mesh from a single write
+            # OperationState (what resume_schedule() writes) isn't
+            # known to propagate across the mesh from a single write
             # the way CurrentScene/Epoch have -- write to every device
             # individually rather than assume it does.
             for coordinator in runtime.coordinators.values():

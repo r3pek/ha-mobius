@@ -40,8 +40,8 @@ POLL_INTERVAL = timedelta(seconds=30)
 # occupy a permit anymore, so it isn't visible to this limit at all. That
 # matters because some Bluetooth transports have their own hard ceiling
 # on truly simultaneous connections independent of this integration's own
-# throttling -- confirmed via real-world testing against an ESPHome
-# Bluetooth proxy (a 3-connection hardware limit) that gateway
+# throttling -- an ESPHome
+# Bluetooth proxy (a 3-connection hardware limit) had gateway
 # connections kept flapping because a value of 2 here meant an already-
 # open gateway connection (1, invisible to the semaphore) plus 2 more
 # concurrent discovery attempts (allowed by the semaphore) could reach
@@ -62,8 +62,8 @@ MAX_CONCURRENT_CONNECTIONS = 1
 
 CONNECT_TIMEOUT = 30.0
 
-# Multiple devices sharing the same pan_id (Thread mesh/"tank", confirmed
-# via reverse engineering the app's own tank-grouping model -- see
+# Multiple devices sharing the same pan_id (Thread mesh/"tank", matching
+# the app's own tank-grouping model -- see
 # python-mobius's documentation/09-thread-coap-relay.md) share ONE
 # physical BLE connection rather than each holding their own -- see
 # gateway_registry.py.
@@ -87,15 +87,15 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # Consecutive failed RELAYED reads to one specific target -- through an
 # otherwise-healthy gateway -- that trigger forcing a different gateway,
 # even though GATEWAY_FAILURE_THRESHOLD above hasn't been reached (the
-# gateway's own direct reads may be succeeding the whole time). A real,
-# confirmed production incident is what this addresses: a gateway can be
+# gateway's own direct reads may be succeeding the whole time). This
+# addresses a real production issue: a gateway can be
 # perfectly healthy for its own reads, and for relaying to SOME other
 # group members, while persistently failing to relay to one specific
 # target for 40+ minutes straight -- something wrong with the gateway's
 # own route to that one target specifically, at the Thread mesh level,
 # not the gateway's own health in the way this integration could
-# otherwise detect. Confirmed, not assumed: reverse-engineered the real
-# app's own decompiled source specifically looking for a mesh-rebuild or
+# otherwise detect. The decompiled
+# app's own source was checked specifically looking for a mesh-rebuild or
 # network-reset command it could fall back to for exactly this situation
 # -- there isn't one. The only Thread-network-creation code in the whole
 # app is a one-time, destructive initial-provisioning sequence (starting
@@ -148,8 +148,8 @@ MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 # Deliberately just 1 -- not unlimited, and specifically NOT enough to
 # reach RELAY_FAILURE_THRESHOLD (3) on its own: this setup-time retry
 # burst calls the same coordinator.async_refresh() a normal poll cycle
-# does, which counts toward that same threshold underneath. Confirmed
-# via a real test failure that 3 retries here (matching that threshold
+# does, which counts toward that same threshold underneath. A test
+# showed 3 retries here (matching that threshold
 # exactly) can trigger a gateway re-election during setup itself, from
 # nothing more than this retry burst -- a few failures within several
 # seconds of each other isn't the same kind of evidence as 3 genuinely
@@ -166,8 +166,8 @@ SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds between attempts
 # now (mesh address, mesh last-seen -- see __init__.py's own
 # _async_revalidate_tank()) -- reusing its existing gateway connection
 # rather than opening a new one where one's already open. Used to be
-# much less frequent and purely about migration detection -- confirmed
-# via a real production issue that a much shorter interval matters for a
+# much less frequent and purely about migration detection -- a
+# production issue showed a much shorter interval matters for a
 # second, at-least-as-important reason: a device whose own mesh address
 # was never successfully discovered (or a tank that's lost its gateway
 # entirely) has no way back in without this task actively retrying, and
@@ -186,8 +186,8 @@ SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds between attempts
 TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 
 # How often each tank's own clock gets nudged back to the current time --
-# see _async_sync_tank_time()'s own docstring for the full reasoning and
-# confirmation behind this feature. An hour is frequent enough that a
+# see _async_sync_tank_time()'s own docstring for the full reasoning
+# behind this feature. An hour is frequent enough that a
 # device's own drift never has room to become the kind of multi-minute
 # mismatch that visibly desyncs schedule behavior (lights turning on at
 # the wrong time relative to the rest of a tank), without writing to
@@ -211,18 +211,18 @@ TANK_TIME_SYNC_INTERVAL = timedelta(hours=1)
 # CONF_DEVICES is itself a dict with CONF_SERIAL/CONF_ADDRESS keys (reuses
 # the same two constants a single device's own data already used before
 # this integration moved to tank-level entries). Deliberately does NOT
-# carry python-mobius's own MeshPeer.age: real hardware testing (two
+# carry python-mobius's own MeshPeer.age: two
 # consecutive discover_tank() scans against the same gateway, nothing
-# else changing) showed values that both increased AND decreased between
+# else changing, showed values that both increased AND decreased between
 # runs for the same physical device, disproving any time-since-last-seen
 # interpretation. Combined with no actual evidence anywhere for what the
 # field really represents (the name itself is just a plausible
-# guess, never confirmed against real app/decompiled source), there's
+# guess, never matched against real app/decompiled source), there's
 # nothing honest left to display -- excluded entirely rather than shown unused.
 CONF_DEVICES = "devices"
 
-# Not a standard homeassistant.const constant -- the tank's own confirmed,
-# stable identity (see python-mobius's mobius.discovery.discover_tank()):
+# Not a standard homeassistant.const constant -- the tank's own stable
+# identity (see python-mobius's mobius.discovery.discover_tank()):
 # an 8-byte Thread mesh-local prefix, stored here as its hex string. Used
 # as the tank config entry's unique_id, and as the synthetic tank
 # device's own identifier (see __init__.py's tank_device_identifier())

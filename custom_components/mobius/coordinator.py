@@ -50,8 +50,8 @@ direct connection health drives promotion.
 
 Reconnection (the gateway's first connect, or after a detected drop)
 always resolves the device's CURRENT address by serial number -- BLE
-addresses are not guaranteed stable over time, confirmed via real
-hardware and via the official app's own Peripheral class (identity is
+addresses are not guaranteed stable over time, matching real
+hardware behavior and the official app's own Peripheral class (identity is
 serial-number-based, never address-based). See python-mobius's
 documentation/12-device-identity-and-address-stability.md.
 
@@ -95,15 +95,15 @@ _LOGGER = logging.getLogger(__name__)
 
 def parsed_advertisement(manufacturer_data: dict) -> Optional[MobiusAdvertisement]:
     """
-    Tries every confirmed Mobius company ID (python-mobius's own
+    Tries every known Mobius company ID (python-mobius's own
     MOBIUS_COMPANY_IDS -- currently EcoTech Marine and
     AquaIllumination) against a BluetoothServiceInfoBleak's own
-    manufacturer_data dict, returning the first one that parses. A real
+    manufacturer_data dict, returning the first one that parses. A
     device advertises under exactly one company ID, never more than
-    one at once. Shared here (not duplicated per call site) since
-    fixing a real, confirmed bug once in one place -- rather than
+    one at once. Shared here (not duplicated per call site) so
+    fixing a bug once in one place -- rather than
     catching every place that used to hardcode a single company ID --
-    is the whole point: a device advertising under any OTHER confirmed
+    covers every case: a device advertising under any OTHER known
     company ID used to come back unparsed everywhere in this
     integration, not just in one spot.
     """
@@ -135,17 +135,17 @@ async def _find_in_bluetooth_cache_with_active_scan_fallback(hass: HomeAssistant
     _resolve_current_ble_device() and discover_mesh_address() below,
     both of which need this exact same fallback sequence.
 
-    Confirmed via Home Assistant's own documentation (bluetooth.
+    Per Home Assistant's own documentation (bluetooth.
     async_request_active_scan) this is exactly the intended use case --
     "for config flow discovery and other one-shot probes" -- not
-    something reserved only for initial setup-time discovery. A real,
-    confirmed production incident is what this addresses: a device
+    something reserved only for initial setup-time discovery. This
+    addresses a real production issue: a device
     (in that case, the group's own gateway) can go missing from Home
     Assistant's own Bluetooth cache for hours at a stretch, well past
     whatever passive-scanning cadence would normally rediscover it.
 
     Concurrent callers across every coordinator needing to resolve the
-    SAME device around the same time -- confirmed: exactly what
+    SAME device around the same time -- exactly what
     happens when a shared gateway goes missing, since every relayed
     coordinator's own poll also needs to resolve it -- dedupe to a
     single, shared scan window on Home Assistant's own side (per that
@@ -309,8 +309,8 @@ class MobiusConnectionManager:
 # Priority order for picking a single "main" firmware version to display
 # as a device's sw_version.
 #
-# "Firmware" first, not "Product OS" -- confirmed by directly comparing
-# against what the official app itself displays for a real Radion light:
+# "Firmware" first, not "Product OS" -- matches
+# what the official app itself displays for a Radion light:
 # a "Firmware" label (FirmwareType.LEDClusterMicro/Esp32*Firmware --
 # the light's actual LED-driver microcontroller) -- not
 # "Product OS" (FirmwareType.MainMicroOS) -- is what the app treats as
@@ -361,9 +361,9 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
     which describe entirely different things.
 
     Requires python-mobius>=0.3.0: as of that version, "Revision" is
-    already a plain int (no confirmed enum meaning exists for it, unlike
+    already a plain int (no known enum meaning exists for it, unlike
     Color/ProductType/RadioType/MotorType, which that version decodes
-    into their own confirmed label strings) -- just stringified here, not
+    into their own display label strings) -- just stringified here, not
     decoded from raw bytes.
     """
     raw = hardware_info.get("Revision")
@@ -400,7 +400,7 @@ async def _fetch_all(
     session, so fetching it once and reusing it indefinitely avoids
     paying for a whole extra round-trip every single poll, forever.
 
-    batch_disabled -- pass True once the coordinator has confirmed (via
+    batch_disabled -- pass True once the coordinator has learned (via
     used_batch coming back False BATCH_FAILURE_THRESHOLD times running)
     that this specific device's batch mechanism doesn't work at all --
     passed straight through as force_individual_reads, skipping a
@@ -418,7 +418,7 @@ async def _fetch_all(
     doesn't change), so once known, this fetches EVERYTHING ELSE this
     poll needs (identity's own volatile fields, metadata, and
     light/pump-specific state) in ONE combined round-trip via
-    get_full_poll_batch() -- confirmed 2-2.6x faster on real hardware
+    get_full_poll_batch() -- 2-2.6x faster on real hardware
     than the equivalent separate calls. Only the very first poll (when
     both are still None) pays for get_device_info() directly, purely
     to learn them for every poll after.
@@ -441,7 +441,7 @@ async def _fetch_all(
         # STEADY STATE: identity is already known permanently -- ONE
         # combined round-trip for literally everything else this poll
         # needs. See get_full_poll_batch()'s own docstring in
-        # python-mobius for the full confirmed rationale.
+        # python-mobius for the full rationale.
         primitive = cached_primitive_type
         model = cached_model
         full_poll = await device.get_full_poll_batch(
@@ -547,7 +547,7 @@ async def _fetch_all(
         info["schedule_point_count"] = len(points)
         current = light_poll.intensities
         info["current_intensities"] = {ch.name: v for ch, v in current.items()}
-        # A real, confirmed need for this: the app applies a lunar-phase
+        # The app applies a lunar-phase
         # reduction (or not) on top of the raw schedule-interpolated
         # value depending on both the current time (is this the
         # dusk-to-night segment of the schedule) and a per-device toggle
@@ -560,7 +560,7 @@ async def _fetch_all(
         # call and is then gone, forcing a separate, manual diagnostic
         # script every time this needs debugging again.
         _LOGGER.debug("%s light intensity diagnostics: %s", device.serial, current.diagnostics)
-        # Confirmed light-only via real device testing AND the app's own
+        # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).
         info["calibration"] = metadata.calibration
@@ -659,12 +659,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _sync_device_registry_info(self, data: dict[str, Any]) -> None:
         """Keeps the device registry's sw_version/hw_version/name/model/
         manufacturer in sync with reality -- firmware changes are
-        infrequent but real (a real device got an OTA update
+        infrequent but real (a device got an OTA update
         mid-development of this integration), so this needs to actually
         propagate, not just be captured once at setup and left stale
         forever after.
 
-        name/model/manufacturer specifically: a real, confirmed gap the
+        name/model/manufacturer specifically: fills a gap the
         entity-healing fix (_async_ensure_sensors_exist(), in __init__.py)
         left behind. sensor.py's own _device_info() falls back to a
         generic "Mobius device (SERIAL)" name when a device's own first
@@ -676,13 +676,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         successful read, the same as sw_version/hw_version already were.
 
         Safe to update .name unconditionally whenever it differs --
-        confirmed directly against Home Assistant's own DeviceEntry:
+        matches Home Assistant's own DeviceEntry:
         name and name_by_user are separate fields, and a user's own
         rename (via Home Assistant's UI) always goes into the latter,
         which this never touches and which always takes display
         precedence regardless of what .name itself holds.
 
-        Looks the device up by SERIAL, not BLE address -- a real,
+        Looks the device up by SERIAL, not BLE address -- a
         necessary fix, not incidental to this integration's move to
         tank-aware, multi-device config entries: an entry's own data no
         longer has one single top-level address at all (multiple devices
@@ -775,11 +775,11 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Once self._batch_disabled is already True, this returns
         immediately without touching the counter or logging anything
-        further -- a real, confirmed bug this fixes: every poll from
+        further -- otherwise every poll from
         then on passes force_individual_reads=True, so used_batch comes
         back False EVERY TIME by deliberate design, not because of a
-        fresh failure. Without this guard, the counter grew completely
-        unbounded (a real device was observed at 420/2 consecutive) and
+        fresh failure. Without this guard, the counter would grow completely
+        unbounded (observed at 420/2 consecutive on one device) and
         the same misleading "X/2 consecutive" debug line kept firing on
         every single poll forever, long after the threshold had already
         been crossed and acted on.
@@ -814,7 +814,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def supported_attribute_names(self) -> Optional[list[str]]:
         """
-        This device's own confirmed supported-attribute set (see
+        This device's own known supported-attribute set (see
         self._supported_attribute_ids's own docstring above), as
         sorted, human-readable C2Attribute names rather than the raw
         numeric IDs -- deliberately a public property returning names,
@@ -829,7 +829,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Returns None until the first successful poll has populated the
         underlying cache -- callers should treat that the same as "not
-        yet known", not "confirmed to support nothing". An ID this
+        yet known", not "known to support nothing". An ID this
         library's own C2Attribute enum doesn't cover yet (newer
         firmware reporting something not yet catalogued) renders as
         "unknown(<id>)" rather than being silently dropped.
@@ -860,7 +860,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # keeps waiting for a response that will never come until its
         # own, separate timeout elapses). See PanGroup.generation's own
         # docstring in gateway_registry.py for the full reasoning and the
-        # real, confirmed production incident this fixes.
+        # production incident this fixes.
         expected_generation = group.generation
         _LOGGER.debug(
             "%s polling as %s", self.serial, "gateway" if is_gateway else "relayed",
@@ -926,7 +926,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # coordinator already detects and handles independently on
                 # its own cycle. It DOES still count toward a separate,
                 # per-target failure tally (record_relay_failure()) though --
-                # a real, confirmed production incident showed a gateway can
+                # a production incident showed a gateway can
                 # be perfectly healthy for its own reads, and for relaying to
                 # OTHER members, while persistently failing to relay to one
                 # specific target for 40+ minutes straight. See
@@ -1026,7 +1026,7 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
 
     `semaphore` MUST be the same shared connection semaphore
     MobiusConnectionManager uses (MAX_CONCURRENT_CONNECTIONS, const.py)
-    -- confirmed via real-world testing to be a real bug when this was
+    -- this was a real bug when it was
     missing: this connects independently of any gateway connection, and
     without sharing the same semaphore, a burst of on-demand discovery
     calls (e.g. several devices needing discovery around the same time,
@@ -1042,9 +1042,9 @@ async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asy
     if info is not None:
         ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
         if ble_device is None:
-            # Confirmed present in Home Assistant's OWN advertisement
+            # Present in Home Assistant's OWN advertisement
             # cache (matched by serial, above), but not connectable via
-            # async_ble_device_from_address() -- a real, meaningfully
+            # async_ble_device_from_address() -- a meaningfully
             # different situation from never having been seen at all
             # (the case below): the device is there, but nothing local
             # currently has a connectable path to it (e.g. its only
@@ -1080,7 +1080,7 @@ async def discover_tank_for_serial(
     who else is on it" before deciding whether to offer a one-tank or
     one-device confirm. Same resolution/connection pattern as
     discover_mesh_address() above (including sharing the same connection
-    semaphore, for the same real-world-confirmed reason that function's
+    semaphore, for the same reason that function's
     own docstring explains), just calling a different python-mobius
     function once connected.
 

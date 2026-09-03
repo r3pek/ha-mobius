@@ -5,7 +5,7 @@ three-dot menu > Download diagnostics) covering exactly the state
 that's mattered most for real debugging of this integration's own
 issues so far: which device currently holds the gateway connection,
 each member's own registry-tracked health (rssi, mesh address,
-consecutive gateway failures, generation -- a real, confirmed
+consecutive gateway failures, generation -- a real
 production incident involved gateway election oscillating
 indefinitely, and generation climbing unexpectedly fast is the direct,
 at-a-glance signal for that happening again), each device's own
@@ -39,7 +39,7 @@ from .gateway_registry import GatewayRegistry
 
 # BLE MAC addresses -- both the top-level CONF_ADDRESS an ad-hoc device's
 # own entry may store, and "mac_address" (a real key within the raw
-# get_device_info() payload itself, confirmed present even though this
+# get_device_info() payload itself, present even though this
 # integration's own code never reads it directly) -- device-identifying,
 # matching how Home Assistant's own Bluetooth-based integrations already
 # treat MAC addresses in their own diagnostics. Deliberately NOT
@@ -55,7 +55,7 @@ def _json_safe(value: Any) -> Any:
     """
     Recursively converts anything in coordinator.data that plain
     json.dumps() (what Home Assistant's own diagnostics download
-    actually uses) can't handle on its own -- confirmed via a real,
+    actually uses) can't handle on its own -- a
     similar issue other integrations have hit (core PR #141111,
     "asdict() should be called on dataclass instances" -- serialization
     isn't automatic or foolproof, it has to be handled deliberately).
@@ -105,8 +105,8 @@ def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> d
     address could itself be stale.
 
     Honest limitation, stated here rather than silently implied away:
-    a real device that splits its own info across multiple, rotating
-    advertisement packets (confirmed real -- see config_flow.py's own
+    a device that splits its own info across multiple, rotating
+    advertisement packets (see config_flow.py's own
     async_step_bluetooth()) could be genuinely visible to Home
     Assistant's Bluetooth stack RIGHT NOW, just under a packet that
     doesn't carry manufacturer data at this exact moment -- there's no

@@ -30,8 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 class RebootButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEntity):
     """
     Soft-reboots this specific device -- python-mobius's own reboot()
-    (Reset attribute, ResetType.Soft), confirmed against real hardware
-    directly connected; not yet confirmed via relay (see that
+    (Reset attribute, ResetType.Soft), verified working when
+    directly connected; not yet exercised via relay (see that
     library's own documentation/09-thread-coap-relay.md).
 
     Deliberately does NOT gate on coordinator.available/self.available

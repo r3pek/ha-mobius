@@ -2,7 +2,7 @@
 Shared per-pan_id gateway registry.
 
 Multiple physical devices sharing the same pan_id (Thread mesh/"tank",
-confirmed via reverse engineering the app's own tank-grouping model --
+matching the app's own tank-grouping model --
 see python-mobius's
 documentation/09-thread-coap-relay.md) share ONE physical BLE connection
 rather than each holding their own. One member of the group is the
@@ -48,8 +48,8 @@ A device's pan_id can change -- it can be physically moved to a
 different tank. This registry itself doesn't detect that on its own;
 __init__.py's own periodic tank revalidation does (comparing what a
 tank's gateway currently reports its mesh peers to be against what
-each entry's own CONF_DEVICES list says), and handles a confirmed move
-at the CONFIG ENTRY level -- removing the device from its old entry's
+each entry's own CONF_DEVICES list says), and handles that
+move at the CONFIG ENTRY level -- removing the device from its old entry's
 device list and merging it into the new one's, then reloading both.
 That reload is what actually moves the device between this registry's
 own groups (the old entry's own teardown calls leave(), the new
@@ -103,8 +103,8 @@ class MemberState:
     mesh_address: Optional[bytes] = None
     # Refreshed on every one of the gateway's own poll cycles (every
     # POLL_INTERVAL -- see coordinator.py's own _fetch()), not a one-time
-    # snapshot -- confirmed via reverse engineering the app's own
-    # network-troubleshooting screen that the underlying value this is
+    # snapshot -- matching the app's own
+    # network-troubleshooting screen: the underlying value this is
     # computed from (each peer's own "how long since last heard from on
     # the mesh" duration) is itself a live, continuously-changing value,
     # not something meaningful to capture once and treat as static. An
@@ -171,7 +171,7 @@ class PanGroup:
     # never come until its own, separate timeout elapses), and without
     # this, that late failure gets misattributed against whatever the
     # CURRENT gateway happens to be by the time it's finally recorded --
-    # a real, confirmed production incident where the resulting log
+    # a production incident where the resulting log
     # line read "gateway X failed to relay to X", and where each such
     # misattributed failure could itself trigger another promotion,
     # compounding into a loop that never settles.
@@ -248,8 +248,8 @@ class GatewayRegistry:
                 # including a normal Home Assistant restart (which
                 # re-joins every already-known device), forcing a
                 # redundant rediscovery connection for something that
-                # was almost certainly still accurate. Confirmed via a
-                # real test exposing this: the "skip rediscovery if
+                # was almost certainly still accurate. A test
+                # exposed this: the "skip rediscovery if
                 # already cached" optimization in __init__.py's own
                 # async_setup_entry() never actually took effect,
                 # because join() itself had already thrown the cached
@@ -437,7 +437,7 @@ class GatewayRegistry:
         _fetch()) -- required, not optional, since silently skipping
         this check is exactly the bug this parameter exists to prevent.
         If the group has already moved on to a newer generation by the
-        time this failure is finally being recorded (a real, confirmed
+        time this failure is finally being recorded (a real
         production case: a fetch that started before a promotion can
         still be sitting in its own timeout well after that promotion
         already happened, since a torn-down connection doesn't make an
@@ -468,7 +468,7 @@ class GatewayRegistry:
             group.consecutive_gateway_failures += 1
             if group.consecutive_gateway_failures < GATEWAY_FAILURE_THRESHOLD:
                 # Every individual failure logged, not just the one that
-                # eventually triggers promotion -- a real, confirmed gap
+                # eventually triggers promotion -- a real gap
                 # in earlier debugging this session: without this, only
                 # the FINAL failure in a run is ever visible, making it
                 # impossible to tell from the logs alone how long trouble
@@ -499,7 +499,7 @@ class GatewayRegistry:
         expected_generation -- see record_gateway_failure()'s own
         docstring above for the full reasoning; same staleness check,
         same reason it's required rather than optional. This is
-        specifically what prevents the confirmed production case where
+        specifically what prevents the production case where
         a relay attempt that started through the OLD gateway, before a
         promotion, finally times out and reports a failure -- which by
         then can read as the (already promoted) NEW gateway "failing to

@@ -38,7 +38,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.SWITCH, 
 # This integration is config-entry-only (config_flow: true in manifest.json,
 # devices discovered via Bluetooth or added manually through the UI) -- no
 # YAML configuration.yaml support at all. cv.config_entry_only_config_schema
-# is the confirmed-correct helper for exactly this case: it both satisfies
+# is the correct helper for exactly this case: it both satisfies
 # hassfest's requirement that any integration implementing async_setup
 # define one of CONFIG_SCHEMA/PLATFORM_SCHEMA/PLATFORM_SCHEMA_BASE (or one
 # of its helper equivalents), and gives a clear, real error if someone
@@ -59,12 +59,12 @@ def tank_device_identifier(mlprefix_hex: Optional[str], pan_id: int) -> tuple[st
     sites -- registration below, and via_device in button.py/sensor.py)
     so all sides can never drift apart on the exact identifier shape.
 
-    Confirmed via reverse engineering the app's own device-onboarding
+    Matches the app's own device-onboarding
     logic: every device always belongs to a
     real Tank object there, even a lone one -- if no existing tank
     matches, the app creates a brand-new one containing just that single
     device, rather than leaving it tankless. mlprefix_hex being None
-    doesn't mean "no tank" at the protocol level, only "no confirmed
+    doesn't mean "no tank" at the protocol level, only "no
     Thread mesh prefix yet" (an ad-hoc single device that's never formed
     a multi-device mesh permanently has none -- see config_flow.py's own
     _async_create_entry()) -- this integration should reflect the app's
@@ -87,8 +87,8 @@ def tank_device_identifier(mlprefix_hex: Optional[str], pan_id: int) -> tuple[st
 def resolve_tank_device_id(hass: HomeAssistant, entry_id: str, tank_identifier: tuple[str, str]) -> Optional[str]:
     """
     The synthetic tank device's own device_registry ID, for
-    DeviceInfo's own via_device_id field -- confirmed via a real Home
-    Assistant deprecation turning into a hard error: via_device
+    DeviceInfo's own via_device_id field -- this
+    Home Assistant deprecation turns into a hard error: via_device
     (taking a raw identifier tuple directly, the way this integration
     used to do it) is deprecated in favor of via_device_id (the
     device's own resolved registry ID), since identifiers are no
@@ -374,8 +374,8 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     # BEFORE this cycle's own attempt to actually use the connection
     # below, so a successful scan has a real chance to help THIS cycle
     # too, not just whichever coordinator happens to hit the same wall
-    # next. A real, confirmed production incident is what this
-    # addresses: a tank's own gateway going missing from that cache for
+    # next. This addresses a real production issue: a tank's own
+    # gateway going missing from that cache for
     # hours at a stretch, discovered only reactively, poll cycle after
     # poll cycle, once something actually needed to connect and failed.
     #
@@ -455,10 +455,10 @@ async def _async_sync_tank_time(hass: HomeAssistant, entry: ConfigEntry, now=Non
     Periodic per-entry write, run every TANK_TIME_SYNC_INTERVAL -- calls
     MobiusDevice.set_time_to_now() (Epoch, reserved-byte group=1) once
     against this tank's own current gateway. python-mobius's own
-    docstring for that method has the full confirmation, but in short:
+    docstring for that method has the full picture, but in short:
     a single write appears to genuinely propagate the new time to every
-    OTHER device on the same mesh, confirmed via real hardware testing
-    -- so this deliberately writes ONCE per tank, to whichever device
+    OTHER device on the same mesh -- so this deliberately writes ONCE per
+    tank, to whichever device
     is currently the gateway, matching the app's own approach, not
     every device individually.
 
@@ -758,8 +758,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # bookkeeping here -- Home Assistant calls the returned unsub
     # callback automatically.
     #
-    # hass.create_task, NOT hass.async_create_task -- confirmed via a
-    # real warning Home Assistant itself raises for this exact pattern,
+    # hass.create_task, NOT hass.async_create_task -- Home Assistant itself
+    # raises a warning for this exact pattern,
     # pointing at Home Assistant's own thread-safety documentation:
     # async_create_task is only safe to call from the event loop thread
     # itself; create_task is the version safe to call from any thread,
@@ -816,7 +816,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     e.g. after a merge/migration), so isn't the right place for anything
     that should only happen on an actual, deliberate removal.
 
-    Confirmed via Home Assistant's own documentation, matching this
+    Per Home Assistant's own documentation, matching this
     exact scenario precisely: "When a configuration entry or device is
     removed from Home Assistant, trigger rediscovery of its address to
     make sure they are available to be set up without restarting Home
