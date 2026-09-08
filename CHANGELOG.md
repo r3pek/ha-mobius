@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a device's batch-disabled state persisting across a gateway
+  change -- it now resets when a new gateway is elected, since a
+  batch failure through one gateway/relay path doesn't mean the same
+  device's batching would also fail through a different one.
+
 ## 0.7.0
 
 - New scene selection combo box on each tank device -- activates a

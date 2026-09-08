@@ -118,10 +118,16 @@ RELAY_FAILURE_THRESHOLD = 3
 # individual reads every poll from then on. Deliberately small and
 # deliberately gated on the FALLBACK succeeding each time -- a single
 # batch failure could be a one-off (a transient BLE hiccup unrelated to
-# batch support at all), but this specific device's batch mechanism is
-# genuinely unsupported (old firmware, or an untested device family)
+# batch support at all), but this specific device's batch mechanism
+# looks genuinely unsupported THROUGH THE CURRENT GATEWAY (old
+# firmware, an untested device family, or a relay-path-specific issue)
 # once it's failed this many times in a row while everything else
-# about the connection was clearly fine.
+# about the connection was clearly fine. That last qualifier matters:
+# see MobiusDeviceCoordinator._fetch()'s own generation-change check,
+# which resets this disablement whenever the group's gateway changes,
+# since a failure pattern tied to one gateway/relay path says nothing
+# about whether the same device's batching would also fail through a
+# different one.
 BATCH_FAILURE_THRESHOLD = 2
 
 # How long any single device (gateway or relayed) can go without a

@@ -627,9 +627,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # or config-entry reload -- MobiusDeviceCoordinator instances
         # are always freshly created (see async_setup_entry()'s own
         # for-loop), never reused across one, so there's no separate
-        # reset path needed for that.
+        # reset path needed for that. Also reset (see _fetch()'s own
+        # handling of PanGroup.generation below) whenever this group's
+        # gateway changes -- a device's batch mechanism failing through
+        # one gateway/relay path says nothing about whether it'll fail
+        # through a different one, so a new gateway deserves a fresh
+        # chance rather than inheriting a disablement earned under a
+        # since-replaced gateway.
         self._consecutive_batch_failures = 0
         self._batch_disabled = False
+        # None until this coordinator's first fetch -- see _fetch()'s
+        # own generation-change check just below for why that first
+        # fetch must NOT be treated as a change (the flags above are
+        # already fresh from this same __init__, nothing to reset).
+        self._last_seen_gateway_generation: Optional[int] = None
         # A device's own PrimitiveType AND Model are both permanent for
         # its whole lifetime (a light is a light forever, a pump is a
         # pump forever, and a physical unit's own model number doesn't
@@ -862,6 +873,18 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # docstring in gateway_registry.py for the full reasoning and the
         # production incident this fixes.
         expected_generation = group.generation
+        if self._last_seen_gateway_generation is not None and expected_generation != self._last_seen_gateway_generation:
+            if self._batch_disabled or self._consecutive_batch_failures > 0:
+                _LOGGER.debug(
+                    "%s: gateway generation changed (%d -> %d) -- resetting batch-disabled "
+                    "state (was disabled=%s, %d consecutive failure(s)) to give batching a "
+                    "fresh chance under the new gateway",
+                    self.serial, self._last_seen_gateway_generation, expected_generation,
+                    self._batch_disabled, self._consecutive_batch_failures,
+                )
+            self._batch_disabled = False
+            self._consecutive_batch_failures = 0
+        self._last_seen_gateway_generation = expected_generation
         _LOGGER.debug(
             "%s polling as %s", self.serial, "gateway" if is_gateway else "relayed",
         )

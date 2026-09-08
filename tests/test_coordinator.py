@@ -925,6 +925,101 @@ class TestBatchFailureThreshold:
         assert coordinator._batch_disabled is True
 
 
+class TestBatchDisabledResetsOnGatewayChange:
+    """
+    A device's own batch mechanism failing through one gateway/relay
+    path says nothing about whether it'll fail through a different
+    one -- see BATCH_FAILURE_THRESHOLD's own docstring in const.py.
+    _fetch() compares the group's own generation (bumped on every
+    _assign_gateway() call -- initial election, promotion, or leave()'s
+    own reassignment) against what this coordinator last saw, and
+    resets _batch_disabled/_consecutive_batch_failures on a change,
+    giving batching a fresh chance under the new gateway rather than
+    inheriting a disablement earned under a since-replaced one.
+    """
+
+    async def test_batch_disabled_resets_when_gateway_generation_changes(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._batch_disabled = True
+        coordinator._consecutive_batch_failures = BATCH_FAILURE_THRESHOLD
+
+        group = registry.group(PAN_ID)
+        # First fetch establishes a baseline -- _last_seen_gateway_generation
+        # starts None, so this fetch must NOT reset anything yet (nothing
+        # has "changed" relative to a baseline that doesn't exist yet).
+        fake_device = _make_fake_pump_device()
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+        assert coordinator._batch_disabled is True
+        assert coordinator._consecutive_batch_failures == BATCH_FAILURE_THRESHOLD
+
+        # Now simulate a new gateway being elected (whatever triggered
+        # it -- a promotion, a leave/rejoin -- always bumps generation).
+        group.generation += 1
+
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator._batch_disabled is False
+        assert coordinator._consecutive_batch_failures == 0
+
+    async def test_batch_disabled_survives_when_gateway_generation_is_unchanged(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator._batch_disabled = True
+        coordinator._consecutive_batch_failures = BATCH_FAILURE_THRESHOLD
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            for _ in range(3):
+                await coordinator.async_refresh()
+
+        # Same gateway generation the whole time -- must NOT reset.
+        assert coordinator._batch_disabled is True
+        assert coordinator._consecutive_batch_failures == BATCH_FAILURE_THRESHOLD
+
+    async def test_last_seen_gateway_generation_tracks_the_current_value(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        assert coordinator._last_seen_gateway_generation is None
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator._last_seen_gateway_generation == group.generation
+
+    async def test_not_yet_disabled_state_is_unaffected_by_a_generation_change(self, hass):
+        """A device that was never disabled in the first place (0
+        failures, batching working fine) must not have anything
+        spuriously reset or logged just because the gateway changed --
+        there's nothing to reset."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+            group.generation += 1
+            await coordinator.async_refresh()
+
+        assert coordinator._batch_disabled is False
+        assert coordinator._consecutive_batch_failures == 0
+
+
 async def test_gateway_read_success_resets_registry_failure_counter(hass):
     registry = _make_registry(hass)
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
