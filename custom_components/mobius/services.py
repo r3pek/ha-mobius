@@ -19,7 +19,7 @@ from mobius import (
 )
 
 from .coordinator import MobiusDeviceCoordinator
-from .websocket_api import _resolve_member, ScheduleGroupError
+from .websocket_api import _resolve_member, ScheduleGroupError, _master_hex_for_serial
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -136,6 +136,32 @@ async def _live_group_members(
     return support, members
 
 
+def _untranslate_parent_serial_to_master(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:
+    """
+    The reverse of websocket_api.py's own
+    _translate_master_to_parent_serial() -- mutates `points_dict` in
+    place, replacing "ParentSerial" (a serial number, as read back
+    from the card) with "Master" (the raw hex string
+    pump_schedule_from_dict() itself expects), for every Sync/
+    EcoSmartBack point. Raises HomeAssistantError if a given
+    ParentSerial can't currently be resolved to a known mesh address
+    -- writing a stale/wrong Master value would silently sync this
+    pump to the wrong device (or a since-removed one), a worse
+    outcome than refusing the write outright.
+    """
+    for point in points_dict:
+        params = point.get("params", {})
+        if "ParentSerial" in params:
+            parent_serial = params.pop("ParentSerial")
+            master_hex = _master_hex_for_serial(parent_serial, coordinator) if parent_serial else None
+            if master_hex is None:
+                raise HomeAssistantError(
+                    f"Can't resolve parent pump {parent_serial!r}'s own mesh address -- "
+                    f"it may not be part of this tank, or hasn't been reached yet."
+                )
+            params["Master"] = master_hex
+
+
 async def _min_group_capacity(members: list[tuple[str, MobiusDeviceCoordinator, object]], which: int) -> int | None:
     """
     Same philosophy as python-mobius's own CLI _min_group_capacity()
@@ -181,6 +207,7 @@ async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCa
     if support == "light":
         points = light_schedule_from_dict(points_dict)
     else:
+        _untranslate_parent_serial_to_master(points_dict, target_coordinator)
         points = pump_schedule_from_dict(points_dict)
 
     min_capacity = await _min_group_capacity(members, which=1)

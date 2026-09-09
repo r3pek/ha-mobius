@@ -105,16 +105,18 @@ def _member_device_id(hass: HomeAssistant, entry_id: str, serial: str) -> str | 
 
 
 def _member_name(serial: str, coordinator: MobiusDeviceCoordinator) -> str:
-    """Mirrors sensor.py's own _device_info() naming fallback chain
-    exactly -- a user's own custom name (data["name"]) first, then
-    "<model> (<serial>)" once a model is known, else the serial alone
-    (this coordinator's very first poll hasn't completed yet)."""
+    """The device's own name if it's been set (via the app), otherwise
+    the bare serial -- explicit product decision for the schedule
+    editor card specifically (unlike sensor.py's own _device_info(),
+    which falls back to "<model> (<serial>)" for its own, different
+    purpose: a Home Assistant device registry entry always needs SOME
+    display name, whereas here the serial alone reads cleanly as an
+    identifier on its own)."""
     data = coordinator.data or {}
     custom_name = data.get("name")
     if custom_name:
         return custom_name
-    model = data.get("model")
-    return f"{model} ({serial})" if model else serial
+    return serial
 
 
 def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[ScheduleGroup]:
@@ -247,6 +249,61 @@ async def handle_resolve_schedule_groups(
     connection.send_result(msg["id"], {"groups": [g.as_dict() for g in groups]})
 
 
+def _serial_for_master_hex(master_hex: str, coordinator: MobiusDeviceCoordinator) -> str | None:
+    """
+    Sync/EcoSmartBack's own "Master" param is the last 8 bytes of the
+    parent pump's own mesh address (see python-mobius's own
+    07-pump-schedule.md), hex-encoded by pump_schedule_to_dict() --
+    meaningless to a person editing a schedule. Translates it back to
+    whichever known device in this same tank it refers to, using
+    GatewayRegistry's own per-device mesh_address tracking (already
+    populated for every device that's been reached at least once --
+    see gateway_registry.py's own update_mesh_address()). None if no
+    currently-known device matches (the parent's own mesh address
+    isn't cached yet, or it's genuinely not part of this tank).
+    """
+    group = coordinator.registry.group(coordinator.pan_id)
+    if group is None:
+        return None
+    target = bytes.fromhex(master_hex)
+    for serial, member in group.members.items():
+        if member.mesh_address is not None and member.mesh_address[-8:] == target:
+            return serial
+    return None
+
+
+def _master_hex_for_serial(serial: str, coordinator: MobiusDeviceCoordinator) -> str | None:
+    """The reverse of _serial_for_master_hex() -- the hex string
+    write_schedule_group() should encode as "Master" for the pump
+    named by `serial`. None if that device's own mesh address isn't
+    known yet (it's never been reached, or reached only through a
+    relay path that hasn't resolved its own mesh address -- see
+    MemberState's own docstring in gateway_registry.py)."""
+    group = coordinator.registry.group(coordinator.pan_id)
+    if group is None:
+        return None
+    member = group.members.get(serial)
+    if member is None or member.mesh_address is None:
+        return None
+    return member.mesh_address[-8:].hex()
+
+
+def _translate_master_to_parent_serial(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:
+    """
+    Mutates `points_dict` in place: for every Sync/EcoSmartBack point,
+    replaces its own "Master" param (a raw hex string) with
+    "ParentSerial" (a serial number, or None if it can't currently be
+    resolved to a known device) -- the card should never need to know
+    about raw mesh addresses. The reverse (_untranslate_parent_serial_
+    to_master(), in services.py) undoes this before a write.
+    """
+    for point in points_dict:
+        params = point.get("params", {})
+        if "Master" in params:
+            master_hex = params.pop("Master")
+            params["ParentSerial"] = _serial_for_master_hex(master_hex, coordinator)
+
+
 def _resolve_member(hass: HomeAssistant, device_id: str) -> tuple[str, MobiusRuntimeData, MobiusDeviceCoordinator]:
     """
     Given a REAL device's own device_id (a light or pump -- never a
@@ -319,6 +376,7 @@ async def handle_read_schedule_group(
             points_dict = light_schedule_to_dict(await device.get_light_schedule(which=1))
         elif support == "pump":
             points_dict = pump_schedule_to_dict(await device.get_pump_schedule(which=1))
+            _translate_master_to_parent_serial(points_dict, coordinator)
         else:
             connection.send_error(
                 msg["id"], websocket_api.const.ERR_NOT_SUPPORTED,

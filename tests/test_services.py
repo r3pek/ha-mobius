@@ -26,7 +26,7 @@ from custom_components.mobius.coordinator import MobiusDeviceCoordinator
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from custom_components.mobius.services import (
     async_handle_write_schedule_group, _live_group_members, _min_group_capacity,
-    _support_from_primitive_type,
+    _support_from_primitive_type, _untranslate_parent_serial_to_master,
 )
 from custom_components.mobius.websocket_api import _member_device_id
 from mobius import SupportedAttribute, C2Attribute
@@ -335,3 +335,63 @@ async def test_write_partial_failure_raises_with_details_but_does_not_stop_other
         await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _light_points_dict()))
 
     c1._test_fake_device.set_light_schedule.assert_called_once()
+
+
+# --------------------------------------------------------------------------
+# ParentSerial -> Master reverse translation (Sync/EcoSmartBack)
+# --------------------------------------------------------------------------
+
+async def test_untranslate_parent_serial_to_master_converts_correctly(hass):
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_pump_cached("Pump A"), _pump_live()),
+        "SN2": (_pump_cached("Pump B"), _pump_live()),
+    })
+    coordinator = entry.runtime_data.coordinators["SN1"]
+    registry = coordinator.registry
+    await registry.join(PAN_ID, "SN1", rssi=-50)
+    await registry.join(PAN_ID, "SN2", rssi=-50)
+    registry.group(PAN_ID).members["SN2"].mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa0000000000000042")
+
+    points_dict = [{"time_minutes": 0, "flags": 1, "mode": "Sync",
+                    "params": {"MaxSpeed": 500, "PhaseShift": 90, "ParentSerial": "SN2"}}]
+    _untranslate_parent_serial_to_master(points_dict, coordinator)
+
+    assert points_dict[0]["params"]["Master"] == "0000000000000042"
+    assert "ParentSerial" not in points_dict[0]["params"]
+
+
+async def test_untranslate_raises_when_parent_serial_unresolvable(hass):
+    entry, device_ids = _setup_tank(hass, {"SN1": (_pump_cached("Pump A"), _pump_live())})
+    coordinator = entry.runtime_data.coordinators["SN1"]
+    registry = coordinator.registry
+    await registry.join(PAN_ID, "SN1", rssi=-50)
+
+    points_dict = [{"time_minutes": 0, "flags": 1, "mode": "Sync",
+                    "params": {"MaxSpeed": 500, "PhaseShift": 90, "ParentSerial": "UNKNOWN"}}]
+
+    with pytest.raises(HomeAssistantError, match="Can't resolve parent pump"):
+        _untranslate_parent_serial_to_master(points_dict, coordinator)
+
+
+async def test_write_sync_pump_schedule_end_to_end(hass):
+    """The full flow: a card sends ParentSerial (a serial number), and
+    the device actually receives a real Master mesh address byte
+    string, not the serial itself."""
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_pump_cached("Pump A"), _pump_live()),
+        "SN2": (_pump_cached("Pump B"), _pump_live()),
+    })
+    c1 = entry.runtime_data.coordinators["SN1"]
+    registry = c1.registry
+    await registry.join(PAN_ID, "SN1", rssi=-50)
+    await registry.join(PAN_ID, "SN2", rssi=-50)
+    registry.group(PAN_ID).members["SN2"].mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa0000000000000042")
+
+    points = [{"time_minutes": 0, "flags": 1, "mode": "Sync",
+               "params": {"MaxSpeed": 500, "PhaseShift": 90, "ParentSerial": "SN2"}}]
+    await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], points))
+
+    c1._test_fake_device.set_pump_schedule.assert_called_once()
+    written_points = c1._test_fake_device.set_pump_schedule.call_args[0][0]
+    from mobius import PumpParam
+    assert written_points[0].pump.params[PumpParam.Master] == bytes.fromhex("0000000000000042")
