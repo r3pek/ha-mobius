@@ -132,12 +132,28 @@ class MobiusRuntimeData:
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up integration-wide shared state (the connection semaphore
     and the gateway registry -- both genuinely global, shared across
-    every config entry, not per-entry)."""
+    every config entry, not per-entry), plus this integration's own
+    websocket commands (schedule editor card support -- see
+    websocket_api.py's own module docstring)."""
     hass.data.setdefault(DOMAIN, {})
     semaphore = hass.data[DOMAIN].setdefault(
         "connection_semaphore", asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
     )
     hass.data[DOMAIN].setdefault("gateway_registry", GatewayRegistry(hass, semaphore))
+
+    # Imported here, not at module level -- websocket_api.py's own
+    # "from . import MobiusRuntimeData" would otherwise be a circular
+    # import (this module wouldn't have finished defining
+    # MobiusRuntimeData yet at the point a top-level import here would
+    # run). Matches how sensor.py/etc. are themselves only ever
+    # imported lazily via async_forward_entry_setups(), never at this
+    # module's own top level, for the same underlying reason.
+    from .websocket_api import async_register_websocket_commands
+    async_register_websocket_commands(hass)
+
+    from .services import async_register_services
+    async_register_services(hass)
+
     return True
 
 

@@ -1,0 +1,26 @@
+write_schedule_group:
+  name: Write schedule group
+  description: >-
+    Writes Schedule1 to every device in the same schedule group as the
+    named device (every light sharing its exact group_mask, or just the
+    one device for a pump, which has no group concept). Group membership
+    is re-verified live immediately before writing, not read from cache.
+  fields:
+    device_id:
+      name: Device
+      description: >-
+        Any one member of the target schedule group -- a light or a pump,
+        never the Tank device itself.
+      required: true
+      selector:
+        device:
+          integration: mobius
+    points:
+      name: Points
+      description: >-
+        The schedule points to write, in the same channel-name (light) or
+        mode-parameter (pump) dictionary shape returned by
+        mobius/read_schedule_group.
+      required: true
+      selector:
+        object:

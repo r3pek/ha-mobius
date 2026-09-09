@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added backend support for a future schedule editor card: a
+  mobius/resolve_schedule_groups and mobius/read_schedule_group
+  websocket command, and a mobius.write_schedule_group service that
+  re-verifies group membership live immediately before writing.
 - Fixed a device's batch-disabled state persisting across a gateway
   change -- it now resets when a new gateway is elected, since a
   batch failure through one gateway/relay path doesn't mean the same
