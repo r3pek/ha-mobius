@@ -428,12 +428,36 @@ async def _fetch_all(
 
     if cached_supported_attribute_ids is not None:
         supported_attribute_ids = cached_supported_attribute_ids
+        supported_attribute_ids_to_cache = cached_supported_attribute_ids
     else:
         try:
             supported = await device.get_supported_attributes()
             supported_attribute_ids = {s.attr_id for s in supported}
-        except Exception:
+            supported_attribute_ids_to_cache = supported_attribute_ids
+        except Exception as e:
+            _LOGGER.warning(
+                "get_supported_attributes() failed this poll (%s) -- proceeding with an "
+                "empty set for this one poll only (most batched data will be missing this "
+                "time); will retry fetching it fresh on the next poll rather than caching "
+                "this failure permanently",
+                e,
+            )
+            # An empty set here is ONLY for this one poll's own request-
+            # building below (get_full_poll_batch()/get_metadata_batch()
+            # need SOME set to filter against right now) -- it must
+            # never be what gets cached and returned as
+            # supported_attribute_ids_to_cache. The caller
+            # (MobiusDeviceCoordinator._fetch()) stores whatever this
+            # returns directly into self._supported_attribute_ids, and
+            # checks `is not None` (not "is falsy") to decide whether to
+            # skip re-fetching on the NEXT poll -- caching a real empty
+            # set here would look identical to "genuinely fetched, this
+            # device supports nothing" forever after, permanently
+            # starving every subsequent poll of literally all batched
+            # data (a single transient failure this one time is not the
+            # same claim as "this device supports zero attributes").
             supported_attribute_ids = set()
+            supported_attribute_ids_to_cache = None
 
     pump_schedule_points = None  # populated by either path below, for pumps only
 
@@ -600,7 +624,7 @@ async def _fetch_all(
     info["configured_scenes"] = configured_scenes
     info["current_scene"] = current_scene
 
-    return info, supported_attribute_ids, used_batch, primitive, model
+    return info, supported_attribute_ids_to_cache, used_batch, primitive, model
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):

@@ -10,6 +10,11 @@
   change -- it now resets when a new gateway is elected, since a
   batch failure through one gateway/relay path doesn't mean the same
   device's batching would also fail through a different one.
+- Fixed a single transient get_supported_attributes() failure
+  permanently starving a device of almost all batched data on every
+  poll after that, silently, with no error ever raised again -- the
+  fetch now correctly retries on the next poll instead of caching
+  that one failure as if it meant "this device supports nothing."
 
 ## 0.7.0
 

@@ -544,6 +544,52 @@ class TestSupportedAttributeIdCaching:
         assert coordinator.last_update_success is False
         assert coordinator._supported_attribute_ids == {999}  # untouched
 
+    async def test_fetch_failure_does_not_permanently_cache_an_empty_set(self, hass):
+        """The actual bug: get_supported_attributes() failing on a
+        single poll (while the rest of that poll's own reads still
+        succeed -- a real, transient possibility, not a total
+        connection loss) must NOT get cached as `set()`, since `set()`
+        is not None and would be indistinguishable from "genuinely
+        fetched, this device supports nothing at all" on every
+        subsequent poll -- permanently starving the device of every
+        batched attribute forever, silently, with no error ever
+        raised again."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_supported_attributes = AsyncMock(side_effect=IOError("transient failure"))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        # The overall poll still succeeds (this one failure is caught
+        # and handled internally, not propagated) -- but the cache
+        # itself must stay None, not become a real (permanently
+        # sticky) empty set.
+        assert coordinator.last_update_success
+        assert coordinator._supported_attribute_ids is None
+
+    async def test_fetch_retries_after_a_prior_failure_once_it_succeeds(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_supported_attributes = AsyncMock(
+            side_effect=[IOError("transient failure"), [SupportedAttribute(attr_id=300, indexes=[0])]],
+        )
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll -- fails, cache stays None
+            await coordinator.async_refresh()  # second poll -- must retry, not skip
+
+        assert coordinator._supported_attribute_ids == {300}
+        assert fake_device.get_supported_attributes.await_count == 2
+
 
 class TestSupportedAttributeNames:
     """supported_attribute_names -- the human-readable counterpart to
