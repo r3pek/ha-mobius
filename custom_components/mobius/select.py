@@ -27,6 +27,7 @@ which applies identically here.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -245,6 +246,23 @@ class SceneSelectionSelect(SelectEntity):
             if active is not None and active.id in id_to_name:
                 return id_to_name[active.id]
         return self.NONE_OPTION
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """duration_remaining_seconds -- how long the currently active
+        scene has left (ActiveScene.duration_seconds), for anything
+        (a dedicated scene-selection card, an automation) that wants
+        to show it without re-deriving current_option's own scan over
+        every coordinator itself. None (the whole dict, not just the
+        one key) when no scene is currently active, matching
+        current_option's own NONE_OPTION case -- there is no
+        "remaining time" concept for the normal schedule."""
+        runtime: MobiusRuntimeData = self._entry.runtime_data
+        for coordinator in runtime.coordinators.values():
+            active = (coordinator.data or {}).get("current_scene")
+            if active is not None:
+                return {"duration_remaining_seconds": active.duration_seconds}
+        return None
 
     async def async_select_option(self, option: str) -> None:
         runtime: MobiusRuntimeData = self._entry.runtime_data

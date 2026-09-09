@@ -242,6 +242,27 @@ async def test_current_option_defaults_to_none_when_nothing_active():
 
 
 @pytest.mark.asyncio
+async def test_extra_state_attributes_exposes_duration_when_a_scene_is_active():
+    entry = _entry_with_coordinators(
+        _fake_coordinator(
+            "pump1",
+            current_scene=ActiveScene(id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=25),
+        ),
+    )
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.extra_state_attributes == {"duration_remaining_seconds": 25}
+
+
+@pytest.mark.asyncio
+async def test_extra_state_attributes_is_none_when_nothing_active():
+    entry = _entry_with_coordinators(_fake_coordinator("light1"))
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    assert select.extra_state_attributes is None
+
+
+@pytest.mark.asyncio
 async def test_selecting_a_scene_writes_only_to_the_device_that_has_it():
     """The actual point of start_scene()'s own broadcast=True: only ONE
     device needs to be written to at all."""

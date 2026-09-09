@@ -6,6 +6,8 @@
   mobius/resolve_schedule_groups and mobius/read_schedule_group
   websocket command, and a mobius.write_schedule_group service that
   re-verifies group membership live immediately before writing.
+- The scene selection combo box now exposes how long the active scene
+  has left as a duration_remaining_seconds attribute.
 - Fixed a device's batch-disabled state persisting across a gateway
   change -- it now resets when a new gateway is elected, since a
   batch failure through one gateway/relay path doesn't mean the same
