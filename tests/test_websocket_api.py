@@ -255,6 +255,22 @@ async def test_light_group_includes_channels(hass):
     assert "modes" not in groups[0].as_dict()
 
 
+async def test_light_group_includes_schedule_intensity_from_representative_member(hass):
+    data = _light_data("Left", None)
+    data["schedule_intensity"] = 0.588
+    entry, tank_device_id = _setup_tank(hass, {"SN1": data})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert groups[0].schedule_intensity == 0.588
+    assert groups[0].as_dict()["schedule_intensity"] == 0.588
+
+
+async def test_pump_group_dict_has_no_schedule_intensity_key(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert "schedule_intensity" not in groups[0].as_dict()
+
+
 async def test_pump_group_includes_modes(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
     groups = _resolve_tank_groups(hass, tank_device_id)

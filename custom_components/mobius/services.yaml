@@ -24,3 +24,30 @@ write_schedule_group:
       required: true
       selector:
         object:
+
+set_schedule_intensity:
+  name: Set schedule intensity
+  description: >-
+    Sets the schedule-level master intensity (a light-only concept,
+    separate from the schedule's own points) for every device in the
+    named light's own schedule group. Group membership is re-verified
+    live immediately before writing, not read from cache.
+  fields:
+    device_id:
+      name: Device
+      description: >-
+        Any one member of the target light's own schedule group -- never
+        a pump, and never the Tank device itself.
+      required: true
+      selector:
+        device:
+          integration: mobius
+    intensity:
+      name: Intensity
+      description: The schedule-level intensity to set, as a percentage.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"

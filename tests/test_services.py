@@ -27,6 +27,7 @@ from custom_components.mobius.gateway_registry import GatewayRegistry
 from custom_components.mobius.services import (
     async_handle_write_schedule_group, _live_group_members, _min_group_capacity,
     _support_from_primitive_type, _untranslate_parent_serial_to_master,
+    async_handle_set_schedule_intensity, SET_SCHEDULE_INTENSITY_SCHEMA,
 )
 from custom_components.mobius.websocket_api import _member_device_id
 from mobius import SupportedAttribute, C2Attribute
@@ -53,6 +54,7 @@ def _make_coordinator(hass, entry, registry, serial: str, data: dict, live_info:
     fake_device.get_supported_attributes = AsyncMock(return_value=[])
     fake_device.set_light_schedule = AsyncMock()
     fake_device.set_pump_schedule = AsyncMock()
+    fake_device.set_schedule_intensity = AsyncMock()
     coordinator.async_get_connected_device = AsyncMock(return_value=fake_device)
     coordinator._test_fake_device = fake_device  # for direct assertions
     return coordinator
@@ -395,3 +397,86 @@ async def test_write_sync_pump_schedule_end_to_end(hass):
     written_points = c1._test_fake_device.set_pump_schedule.call_args[0][0]
     from mobius import PumpParam
     assert written_points[0].pump.params[PumpParam.Master] == bytes.fromhex("0000000000000042")
+
+
+# --------------------------------------------------------------------------
+# async_handle_set_schedule_intensity()
+# --------------------------------------------------------------------------
+
+def _intensity_call(device_id: str, intensity: float) -> MagicMock:
+    call = MagicMock()
+    call.data = {"device_id": device_id, "intensity": intensity}
+    return call
+
+
+async def test_set_schedule_intensity_writes_to_every_group_member(hass):
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_light_cached("Left"), _light_live(1)),
+        "SN2": (_light_cached("Right"), _light_live(1)),
+    })
+    c1 = entry.runtime_data.coordinators["SN1"]
+    c2 = entry.runtime_data.coordinators["SN2"]
+
+    await async_handle_set_schedule_intensity(hass, _intensity_call(device_ids["SN1"], 58.8))
+
+    c1._test_fake_device.set_schedule_intensity.assert_called_once_with(pytest.approx(0.588), which=1)
+    c2._test_fake_device.set_schedule_intensity.assert_called_once_with(pytest.approx(0.588), which=1)
+
+
+async def test_set_schedule_intensity_converts_percent_to_fraction_correctly(hass):
+    entry, device_ids = _setup_tank(hass, {"SN1": (_light_cached("Left"), _light_live(None))})
+    c1 = entry.runtime_data.coordinators["SN1"]
+
+    await async_handle_set_schedule_intensity(hass, _intensity_call(device_ids["SN1"], 100))
+    c1._test_fake_device.set_schedule_intensity.assert_called_once_with(pytest.approx(1.0), which=1)
+
+
+async def test_set_schedule_intensity_rejects_pump_target(hass):
+    entry, device_ids = _setup_tank(hass, {"SN1": (_pump_cached("Pump"), _pump_live())})
+
+    with pytest.raises(HomeAssistantError, match="light-only"):
+        await async_handle_set_schedule_intensity(hass, _intensity_call(device_ids["SN1"], 50))
+
+
+async def test_set_schedule_intensity_only_reaches_live_verified_members(hass):
+    """Same rule #5 live re-verification write_schedule_group already
+    gets -- a light whose live group_mask no longer matches must be
+    excluded here too, not just for a schedule points write."""
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_light_cached("Left"), _light_live(1)),
+        "SN2": (_light_cached("Right"), _light_live(999)),  # different live group
+    })
+    c1 = entry.runtime_data.coordinators["SN1"]
+    c2 = entry.runtime_data.coordinators["SN2"]
+
+    await async_handle_set_schedule_intensity(hass, _intensity_call(device_ids["SN1"], 50))
+
+    c1._test_fake_device.set_schedule_intensity.assert_called_once()
+    c2._test_fake_device.set_schedule_intensity.assert_not_called()
+
+
+async def test_set_schedule_intensity_partial_failure_raises_with_details(hass):
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_light_cached("Left"), _light_live(1)),
+        "SN2": (_light_cached("Right"), _light_live(1)),
+    })
+    c1 = entry.runtime_data.coordinators["SN1"]
+    c2 = entry.runtime_data.coordinators["SN2"]
+    c2._test_fake_device.set_schedule_intensity = AsyncMock(side_effect=IOError("device rejected write"))
+
+    with pytest.raises(HomeAssistantError, match="1/2 device"):
+        await async_handle_set_schedule_intensity(hass, _intensity_call(device_ids["SN1"], 50))
+
+    c1._test_fake_device.set_schedule_intensity.assert_called_once()
+
+
+def test_set_schedule_intensity_schema_rejects_out_of_range():
+    with pytest.raises(Exception):
+        SET_SCHEDULE_INTENSITY_SCHEMA({"device_id": "abc", "intensity": 150})
+    with pytest.raises(Exception):
+        SET_SCHEDULE_INTENSITY_SCHEMA({"device_id": "abc", "intensity": -1})
+
+
+def test_set_schedule_intensity_schema_accepts_valid_range():
+    result = SET_SCHEDULE_INTENSITY_SCHEMA({"device_id": "abc", "intensity": 58.8})
+    assert result == {"device_id": "abc", "intensity": 58.8}

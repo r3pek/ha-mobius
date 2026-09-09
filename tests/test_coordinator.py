@@ -811,6 +811,30 @@ class TestLightPollBatchWiring:
         assert coordinator.data["schedule_point_count"] == 0
         assert coordinator.data["current_intensities"] == {}
 
+    async def test_schedule_intensity_scalar_is_stored_in_coordinator_data(self, hass):
+        """The same value the debug log line already surfaces for
+        troubleshooting -- also stored plainly as its own field, not
+        just logged and then lost, so a schedule editor card's own
+        global-intensity control has something real to read."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={
+                "insolation_active": False, "is_night_segment": False,
+                "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 0.588,
+            }),
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.data["schedule_intensity"] == 0.588
+
     async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
         """metadata batch succeeds, but the light-poll batch specifically
         fails -- confirms the OVERALL used_batch (and therefore the

@@ -74,6 +74,7 @@ class ScheduleGroup:
     channels: list[str] | None = None  # light only
     modes: list[str] | None = None  # pump only
     active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
+    schedule_intensity: float | None = None  # light only -- 0.0-1.0, see Schedule1Intensity
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -87,6 +88,7 @@ class ScheduleGroup:
         }
         if self.kind == "light":
             result["channels"] = self.channels
+            result["schedule_intensity"] = self.schedule_intensity
         else:
             result["modes"] = self.modes
         return result
@@ -255,8 +257,10 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         group_mask = key if isinstance(key, int) else None
         first_serial, first_coordinator = members[0]
         channels = (first_coordinator.data or {}).get("channels") or []
+        schedule_intensity = (first_coordinator.data or {}).get("schedule_intensity")
         groups.append(ScheduleGroup(
             kind="light", group_mask=group_mask, channels=channels, active_scene=active_scene,
+            schedule_intensity=schedule_intensity,
             members=[
                 ScheduleGroupMember(
                     device_id=_member_device_id(hass, entry_id, serial) or "",

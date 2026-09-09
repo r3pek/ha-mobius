@@ -237,9 +237,68 @@ async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCa
         )
 
 
+SERVICE_SET_SCHEDULE_INTENSITY = "set_schedule_intensity"
+
+SET_SCHEDULE_INTENSITY_SCHEMA = vol.Schema({
+    vol.Required("device_id"): cv.string,
+    vol.Required("intensity"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+})
+
+
+async def async_handle_set_schedule_intensity(hass: HomeAssistant, call: ServiceCall) -> None:
+    """
+    Writes Schedule1Intensity -- the schedule-level master dimmer
+    (see python-mobius's own 06-light-schedule.md), separate from the
+    schedule's own points entirely -- to every live-verified member of
+    the target light's own group (same rule #5 live re-verification
+    _live_group_members() already does for write_schedule_group; no
+    reason a stale/cached group_mask should be trusted any less here
+    than for an actual schedule write). Light-only: a pump has no such
+    concept at all, so a pump target_serial is rejected outright,
+    matching _live_group_members()'s own primitive-support check
+    rather than silently no-op'ing.
+
+    `intensity` is 0-100 (a percentage, matching what a person
+    actually turns on a slider), converted to the 0.0-1.0 fraction
+    set_schedule_intensity() itself expects.
+    """
+    device_id = call.data["device_id"]
+    intensity_percent = call.data["intensity"]
+
+    try:
+        target_serial, runtime, target_coordinator = _resolve_member(hass, device_id)
+    except ScheduleGroupError as e:
+        raise HomeAssistantError(e.message) from e
+
+    support, members = await _live_group_members(hass, target_serial, target_coordinator)
+    if support != "light":
+        raise HomeAssistantError(
+            f"{target_serial} (support={support!r}) has no schedule-level intensity control -- "
+            f"this is a light-only concept."
+        )
+
+    fraction = intensity_percent / 100.0
+    errors: list[str] = []
+    for serial, coordinator, device in members:
+        try:
+            await device.set_schedule_intensity(fraction, which=1)
+        except Exception as e:
+            errors.append(f"{serial}: {e}")
+
+    if errors:
+        raise HomeAssistantError(
+            f"Set intensity on {len(members) - len(errors)}/{len(members)} device(s) "
+            f"successfully; failed: {'; '.join(errors)}"
+        )
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Called once from async_setup() -- see __init__.py."""
     hass.services.async_register(
         "mobius", SERVICE_WRITE_SCHEDULE_GROUP, lambda call: async_handle_write_schedule_group(hass, call),
         schema=WRITE_SCHEDULE_GROUP_SCHEMA,
+    )
+    hass.services.async_register(
+        "mobius", SERVICE_SET_SCHEDULE_INTENSITY, lambda call: async_handle_set_schedule_intensity(hass, call),
+        schema=SET_SCHEDULE_INTENSITY_SCHEMA,
     )

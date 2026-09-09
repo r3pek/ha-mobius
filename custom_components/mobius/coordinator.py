@@ -584,6 +584,17 @@ async def _fetch_all(
         # call and is then gone, forcing a separate, manual diagnostic
         # script every time this needs debugging again.
         _LOGGER.debug("%s light intensity diagnostics: %s", device.serial, current.diagnostics)
+        # The same schedule-level master dimmer the debug log line
+        # above already surfaces for troubleshooting -- also stored
+        # here, plainly, as its own field: a 0.0-1.0 fraction (matching
+        # get_schedule_intensity()'s own return range) for anything
+        # that wants the raw scalar itself (e.g. a schedule editor
+        # card's own global-intensity control), not just this specific
+        # moment's fully-modified per-channel output. .get() rather
+        # than a direct index -- "scalar" is a diagnostics key
+        # python-mobius documents but doesn't contractually guarantee
+        # will always be present.
+        info["schedule_intensity"] = current.diagnostics.get("scalar")
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).
