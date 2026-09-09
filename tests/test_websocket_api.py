@@ -173,6 +173,22 @@ async def test_two_lights_matching_group_mask_collapse_into_one_group(hass):
     assert {m.serial for m in groups[0].members} == {"SN1", "SN2"}
 
 
+async def test_group_members_are_sorted_by_serial_regardless_of_insertion_order(hass):
+    """members[0] is what a card would treat as "the representative
+    device" for anything that needs one specific member rather than
+    the whole group (e.g. which device's own live sensors to chart) --
+    it must be a genuinely stable, deterministic pick, not whatever
+    order runtime.coordinators happened to be populated in."""
+    entry, tank_device_id = _setup_tank(hass, {
+        # Deliberately inserted in reverse-alphabetical order.
+        "SN3": _light_data("Third", 999),
+        "SN1": _light_data("First", 999),
+        "SN2": _light_data("Second", 999),
+    })
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert [m.serial for m in groups[0].members] == ["SN1", "SN2", "SN3"]
+
+
 async def test_two_lights_different_group_mask_stay_separate(hass):
     entry, tank_device_id = _setup_tank(hass, {
         "SN1": _light_data("Left", 111),

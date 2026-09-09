@@ -237,6 +237,21 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
     active_scene = _tank_active_scene(runtime)
 
     for key, members in light_groups.items():
+        # Sorted by serial -- members[0] (used both here for channels
+        # and by the card for "which device's own live sensors to
+        # chart") must be a genuinely stable, deterministic choice,
+        # not whatever order runtime.coordinators happened to be
+        # populated in (config-entry device-list order, not sorted or
+        # otherwise guaranteed). The schedule itself is identical
+        # across every member by construction (the same write goes to
+        # all of them), but each device's own LIVE reported state can
+        # legitimately diverge -- LED aging, a device that's fallen
+        # out of sync, a manual override on just one of them -- and a
+        # card charting "whichever one happened to be first" would
+        # silently flip which device it's showing across unrelated
+        # code changes or even just a HA restart, with no way for
+        # anyone to know that's what changed if the numbers moved.
+        members = sorted(members, key=lambda m: m[0])
         group_mask = key if isinstance(key, int) else None
         first_serial, first_coordinator = members[0]
         channels = (first_coordinator.data or {}).get("channels") or []
