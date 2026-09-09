@@ -22,7 +22,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 
-from mobius import PumpMode, light_schedule_to_dict, pump_schedule_to_dict
+from mobius import (
+    PumpMode, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
+    light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
+)
 
 from . import MobiusRuntimeData
 from .const import DOMAIN
@@ -70,11 +73,13 @@ class ScheduleGroup:
     members: list[ScheduleGroupMember] = field(default_factory=list)
     channels: list[str] | None = None  # light only
     modes: list[str] | None = None  # pump only
+    active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "kind": self.kind,
             "group_mask": self.group_mask,
+            "active_scene": self.active_scene,
             "members": [
                 {"device_id": m.device_id, "serial": m.serial, "name": m.name}
                 for m in self.members
@@ -117,6 +122,40 @@ def _member_name(serial: str, coordinator: MobiusDeviceCoordinator) -> str:
     if custom_name:
         return custom_name
     return serial
+
+
+def _tank_active_scene(runtime: MobiusRuntimeData) -> dict[str, Any] | None:
+    """
+    Same name-resolution logic as select.py's own scene-selection
+    entity (SceneSelect._scene_name_to_id()/current_option()) -- a
+    scene has no single canonical name of its own on the wire, only
+    an id, so the name has to come from whichever device's own
+    ConfiguredScenes slot happens to define that id. Checks every
+    coordinator's own current_scene (None if that device is running
+    its normal schedule, not a scene -- see get_current_scene()'s own
+    docstring in python-mobius) and returns the first active one
+    found, tank-wide, since a scene activation writes to every device
+    on the tank in one go (this integration's own SceneSelect entity
+    already assumes -- and this function inherits the same assumption
+    -- that they'd all agree; a device that's fallen out of sync would
+    only be caught by noticing its own state elsewhere, not here).
+    None if no device on this tank currently has a scene active.
+    """
+    id_to_name: dict[int, str] = {}
+    for coordinator in runtime.coordinators.values():
+        for scene in (coordinator.data or {}).get("configured_scenes") or []:
+            if scene.scene_type == SceneID.EmptyScene and not scene.name:
+                continue
+            id_to_name.setdefault(scene.id, scene.name)
+
+    for coordinator in runtime.coordinators.values():
+        active = (coordinator.data or {}).get("current_scene")
+        if active is not None:
+            return {
+                "name": id_to_name.get(active.id, f"Scene {active.id}"),
+                "duration_seconds": active.duration_seconds,
+            }
+    return None
 
 
 def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[ScheduleGroup]:
@@ -195,13 +234,14 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         # validation rule #3.
 
     groups: list[ScheduleGroup] = []
+    active_scene = _tank_active_scene(runtime)
 
     for key, members in light_groups.items():
         group_mask = key if isinstance(key, int) else None
         first_serial, first_coordinator = members[0]
         channels = (first_coordinator.data or {}).get("channels") or []
         groups.append(ScheduleGroup(
-            kind="light", group_mask=group_mask, channels=channels,
+            kind="light", group_mask=group_mask, channels=channels, active_scene=active_scene,
             members=[
                 ScheduleGroupMember(
                     device_id=_member_device_id(hass, entry_id, serial) or "",
@@ -213,7 +253,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
 
     for serial, coordinator in pump_singles:
         groups.append(ScheduleGroup(
-            kind="pump", group_mask=None, modes=PUMP_MODE_NAMES,
+            kind="pump", group_mask=None, modes=PUMP_MODE_NAMES, active_scene=active_scene,
             members=[ScheduleGroupMember(
                 device_id=_member_device_id(hass, entry_id, serial) or "",
                 serial=serial, name=_member_name(serial, coordinator),
@@ -395,7 +435,112 @@ async def handle_read_schedule_group(
     connection.send_result(msg["id"], {"points": points_dict})
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "mobius/export_schedule_group_mob",
+    vol.Required("device_id"): str,
+})
+@websocket_api.async_response
+async def handle_export_schedule_group_mob(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict,
+) -> None:
+    """
+    Builds the actual .mob (Template) file content server-side via
+    python-mobius's own light_schedule_to_mob()/pump_schedule_to_mob()
+    -- the card never touches primitiveData encoding itself, only the
+    finished JSON, matching how read_schedule_group/write_schedule_group
+    already keep every wire-format detail server-side. Always Schedule1,
+    same as read_schedule_group.
+    """
+    try:
+        serial, runtime, coordinator = _resolve_member(hass, msg["device_id"])
+    except ScheduleGroupError as e:
+        connection.send_error(msg["id"], e.code, e.message)
+        return
+
+    support = (coordinator.data or {}).get("support")
+    try:
+        device = await coordinator.async_get_connected_device()
+        if support == "light":
+            points = await device.get_light_schedule(which=1)
+            mob = light_schedule_to_mob(points, serial)
+        elif support == "pump":
+            info = await device.get_device_info()
+            primitive_type = PrimitiveType[info["primitive_type"]]
+            points = await device.get_pump_schedule(which=1)
+            mob = pump_schedule_to_mob(points, primitive_type, serial)
+        else:
+            connection.send_error(
+                msg["id"], websocket_api.const.ERR_NOT_SUPPORTED,
+                f"{serial} (support={support!r}) has no schedule support",
+            )
+            return
+    except HomeAssistantError as e:
+        connection.send_error(msg["id"], websocket_api.const.ERR_HOME_ASSISTANT_ERROR, str(e))
+        return
+    except Exception as e:
+        connection.send_error(
+            msg["id"], websocket_api.const.ERR_UNKNOWN_ERROR, f"Failed to export schedule from {serial}: {e}",
+        )
+        return
+
+    connection.send_result(msg["id"], {"mob": mob})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "mobius/parse_schedule_mob",
+    vol.Required("device_id"): str,
+    vol.Required("mob"): dict,
+})
+@websocket_api.async_response
+async def handle_parse_schedule_mob(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict,
+) -> None:
+    """
+    The read half of import: given a .mob file's own already-parsed
+    JSON (the card reads the local file itself, this never touches a
+    filesystem), decodes it server-side via python-mobius's own
+    mob_to_light_schedule()/mob_to_pump_schedule() and returns points
+    in the exact same dict shape read_schedule_group already uses --
+    the card treats a freshly-read schedule and a freshly-imported one
+    identically from here on, populating the same editor either way.
+    Doesn't write anything -- the card still calls write_schedule_group
+    itself once the person reviews and saves, same as any other edit.
+    `device_id` is only used to determine light vs pump (which
+    mob_to_*_schedule() function applies); a mismatched primitive type
+    in the file itself surfaces as a normal parse failure below.
+    """
+    try:
+        serial, runtime, coordinator = _resolve_member(hass, msg["device_id"])
+    except ScheduleGroupError as e:
+        connection.send_error(msg["id"], e.code, e.message)
+        return
+
+    support = (coordinator.data or {}).get("support")
+    try:
+        if support == "light":
+            points_dict = light_schedule_to_dict(mob_to_light_schedule(msg["mob"]))
+        elif support == "pump":
+            _, points = mob_to_pump_schedule(msg["mob"])
+            points_dict = pump_schedule_to_dict(points)
+            _translate_master_to_parent_serial(points_dict, coordinator)
+        else:
+            connection.send_error(
+                msg["id"], websocket_api.const.ERR_NOT_SUPPORTED,
+                f"{serial} (support={support!r}) has no schedule support",
+            )
+            return
+    except Exception as e:
+        connection.send_error(
+            msg["id"], websocket_api.const.ERR_INVALID_FORMAT, f"Couldn't parse this .mob file: {e}",
+        )
+        return
+
+    connection.send_result(msg["id"], {"points": points_dict})
+
+
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Called once from async_setup() -- see __init__.py."""
     websocket_api.async_register_command(hass, handle_resolve_schedule_groups)
     websocket_api.async_register_command(hass, handle_read_schedule_group)
+    websocket_api.async_register_command(hass, handle_export_schedule_group_mob)
+    websocket_api.async_register_command(hass, handle_parse_schedule_mob)

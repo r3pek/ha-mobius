@@ -27,9 +27,15 @@ from custom_components.mobius.gateway_registry import GatewayRegistry
 from custom_components.mobius.websocket_api import (
     _resolve_tank_groups, _member_device_id, _resolve_member, ScheduleGroupError, PUMP_MODE_NAMES,
     handle_resolve_schedule_groups, handle_read_schedule_group,
+    handle_export_schedule_group_mob, handle_parse_schedule_mob,
     _serial_for_master_hex, _master_hex_for_serial, _translate_master_to_parent_serial,
+    _tank_active_scene,
 )
-from mobius import SchedulePoint, LightPrimitive, VisualID, PumpSchedulePoint, PumpPrimitiveValue, PumpMode, PumpParam
+from mobius import (
+    SchedulePoint, LightPrimitive, VisualID, PumpSchedulePoint, PumpPrimitiveValue, PumpMode, PumpParam,
+    ActiveScene, Scene, SceneID, PrimitiveType,
+    light_schedule_to_mob, pump_schedule_to_mob,
+)
 
 PAN_ID = 0x3D0F
 
@@ -506,3 +512,199 @@ async def test_translate_master_to_parent_serial_none_when_unresolvable(hass):
     _translate_master_to_parent_serial(points_dict, coordinator)
 
     assert points_dict[0]["params"]["ParentSerial"] is None
+
+
+# --------------------------------------------------------------------------
+# _tank_active_scene() -- distinguishing "a scene is active" from "the
+# normal schedule is running"
+# --------------------------------------------------------------------------
+
+async def test_tank_active_scene_none_when_no_scene_active(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    assert _tank_active_scene(entry.runtime_data) is None
+
+
+async def test_tank_active_scene_returns_name_from_configured_scenes(hass):
+    data = _light_data("Left", None)
+    data["configured_scenes"] = [
+        Scene(index=0, id=5, scene_type=None, name="Feeding", timeout=0, light=None, pump=None),
+    ]
+    data["current_scene"] = ActiveScene(id=5, scene_type=None, duration_seconds=120)
+    entry, tank_device_id = _setup_tank(hass, {"SN1": data})
+
+    result = _tank_active_scene(entry.runtime_data)
+    assert result == {"name": "Feeding", "duration_seconds": 120}
+
+
+async def test_tank_active_scene_falls_back_to_generic_label_when_name_unknown(hass):
+    data = _light_data("Left", None)
+    data["configured_scenes"] = []  # this scene's own name isn't known to any device
+    data["current_scene"] = ActiveScene(id=7, scene_type=None, duration_seconds=30)
+    entry, tank_device_id = _setup_tank(hass, {"SN1": data})
+
+    result = _tank_active_scene(entry.runtime_data)
+    assert result == {"name": "Scene 7", "duration_seconds": 30}
+
+
+async def test_tank_active_scene_skips_empty_scene_slots(hass):
+    """An EmptyScene slot with no name must never surface as a real
+    scene name -- matches select.py's own SceneSelect filtering."""
+    data = _light_data("Left", None)
+    data["configured_scenes"] = [
+        Scene(index=0, id=0, scene_type=SceneID.EmptyScene, name="", timeout=0, light=None, pump=None),
+    ]
+    data["current_scene"] = None
+    entry, tank_device_id = _setup_tank(hass, {"SN1": data})
+
+    assert _tank_active_scene(entry.runtime_data) is None
+
+
+async def test_resolve_tank_groups_includes_active_scene_in_every_group(hass):
+    light_data = _light_data("Left", None)
+    light_data["configured_scenes"] = [
+        Scene(index=0, id=5, scene_type=None, name="Feeding", timeout=0, light=None, pump=None),
+    ]
+    light_data["current_scene"] = ActiveScene(id=5, scene_type=None, duration_seconds=120)
+    pump_data = _pump_data("Pump")
+    pump_data["configured_scenes"] = []
+    pump_data["current_scene"] = None
+
+    entry, tank_device_id = _setup_tank(hass, {"SN1": light_data, "SN2": pump_data})
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    for g in groups:
+        assert g.as_dict()["active_scene"] == {"name": "Feeding", "duration_seconds": 120}
+
+
+# --------------------------------------------------------------------------
+# handle_export_schedule_group_mob()
+# --------------------------------------------------------------------------
+
+async def test_export_schedule_group_mob_light(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+    coordinator = entry.runtime_data.coordinators["SN1"]
+
+    points = [SchedulePoint(480, SchedulePoint.FLAG_ACTIVE, LightPrimitive({VisualID.RoyalBlue: 500}))]
+    coordinator.async_get_connected_device = AsyncMock(return_value=_fake_light_device(points))
+
+    connection = MagicMock()
+    msg = {"id": 1, "type": "mobius/export_schedule_group_mob", "device_id": real_device_id}
+    await handle_export_schedule_group_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    mob = connection.send_result.call_args[0][1]["mob"]
+    assert mob["schedules"][0]["primitiveType"] == int(PrimitiveType.VisualV1)
+    connection.send_error.assert_not_called()
+
+
+async def test_export_schedule_group_mob_pump(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+    coordinator = entry.runtime_data.coordinators["SN1"]
+
+    points = [PumpSchedulePoint(0, SchedulePoint.FLAG_ACTIVE,
+                                 PumpPrimitiveValue(PumpMode.ConstantSpeed, {PumpParam.MaxSpeed: 750}))]
+    fake_device = _fake_pump_device(points)
+    fake_device.get_device_info = AsyncMock(return_value={"primitive_type": "VorTechV1"})
+    coordinator.async_get_connected_device = AsyncMock(return_value=fake_device)
+
+    connection = MagicMock()
+    msg = {"id": 2, "type": "mobius/export_schedule_group_mob", "device_id": real_device_id}
+    await handle_export_schedule_group_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    mob = connection.send_result.call_args[0][1]["mob"]
+    assert mob["schedules"][0]["primitiveType"] == int(PrimitiveType.VorTechV1)
+    connection.send_error.assert_not_called()
+
+
+async def test_export_schedule_group_mob_unsupported_device(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": {"support": "unsupported", "name": "Doser"}})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+    coordinator = entry.runtime_data.coordinators["SN1"]
+    coordinator.async_get_connected_device = AsyncMock(return_value=MagicMock())
+
+    connection = MagicMock()
+    msg = {"id": 3, "type": "mobius/export_schedule_group_mob", "device_id": real_device_id}
+    await handle_export_schedule_group_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "not_supported"
+    connection.send_result.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# handle_parse_schedule_mob()
+# --------------------------------------------------------------------------
+
+async def test_parse_schedule_mob_light_round_trips(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+
+    original = [SchedulePoint(480, SchedulePoint.FLAG_ACTIVE, LightPrimitive({VisualID.RoyalBlue: 500}))]
+    mob = light_schedule_to_mob(original, "Test")
+
+    connection = MagicMock()
+    msg = {"id": 4, "type": "mobius/parse_schedule_mob", "device_id": real_device_id, "mob": mob}
+    await handle_parse_schedule_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    points = connection.send_result.call_args[0][1]["points"]
+    assert points[0]["time_minutes"] == 480
+    assert points[0]["channels"]["RoyalBlue"] == 500
+    connection.send_error.assert_not_called()
+
+
+async def test_parse_schedule_mob_pump_translates_master_to_parent_serial(hass):
+    entry, tank_device_id = _setup_tank(hass, {
+        "SN1": _pump_data("Pump A"),
+        "SN2": _pump_data("Pump B"),
+    })
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+    coordinator = entry.runtime_data.coordinators["SN1"]
+    registry = coordinator.registry
+    await registry.join(PAN_ID, "SN1", rssi=-50)
+    await registry.join(PAN_ID, "SN2", rssi=-50)
+    registry.group(PAN_ID).members["SN2"].mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa0000000000000042")
+
+    original = [PumpSchedulePoint(0, SchedulePoint.FLAG_ACTIVE,
+                                   PumpPrimitiveValue(PumpMode.Sync, {
+                                       PumpParam.MaxSpeed: 500, PumpParam.PhaseShift: 90,
+                                       PumpParam.Master: bytes.fromhex("0000000000000042"),
+                                   }))]
+    mob = pump_schedule_to_mob(original, PrimitiveType.VorTechV1, "Test")
+
+    connection = MagicMock()
+    msg = {"id": 5, "type": "mobius/parse_schedule_mob", "device_id": real_device_id, "mob": mob}
+    await handle_parse_schedule_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    points = connection.send_result.call_args[0][1]["points"]
+    assert points[0]["params"]["ParentSerial"] == "SN2"
+    assert "Master" not in points[0]["params"]
+
+
+async def test_parse_schedule_mob_invalid_content_returns_invalid_format(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+
+    connection = MagicMock()
+    msg = {"id": 6, "type": "mobius/parse_schedule_mob", "device_id": real_device_id, "mob": {"not": "a real mob file"}}
+    await handle_parse_schedule_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_format"
+    connection.send_result.assert_not_called()
+
+
+async def test_parse_schedule_mob_unsupported_device(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": {"support": "unsupported", "name": "Doser"}})
+    real_device_id = _member_device_id(hass, entry.entry_id, "SN1")
+
+    connection = MagicMock()
+    msg = {"id": 7, "type": "mobius/parse_schedule_mob", "device_id": real_device_id, "mob": {}}
+    await handle_parse_schedule_mob.__wrapped__(hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "not_supported"
