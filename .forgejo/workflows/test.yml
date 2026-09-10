@@ -101,11 +101,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Builds fresh (dist/ is never committed -- see this directory's
-      # own README.md), then executes the actual built output in a
-      # real jsdom DOM environment -- not a mock of the card's own
-      # logic. `npm test` itself runs the build first (see
-      # package.json), so a genuine compile failure surfaces here too,
-      # not just a logic bug the tests themselves would catch.
+      # `npm test` runs the full pipeline (see package.json): type
+      # check, lint, format check, build (dist/ is never committed --
+      # see this directory's own README.md), then executes the actual
+      # built output in a real jsdom DOM environment -- not a mock of
+      # the card's own logic. A genuine type error, lint violation,
+      # formatting drift, or compile failure surfaces here just as
+      # much as a logic bug the tests themselves would catch.
       - name: Build and test
         run: npm test
