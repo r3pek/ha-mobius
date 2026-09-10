@@ -967,14 +967,26 @@ export class MobiusScheduleCard extends LitElement {
         </label>
       `;
     }
+    // Confirmed in the app's own PumpPrimitive.getReverse(): a
+    // negative MaxSpeed/MinSpeed reverses rotation direction, on
+    // pumps whose model actually supports it (sliderSettings'
+    // supportsReverse). Which models do isn't exposed by this
+    // integration's own backend, so the hint is deliberately phrased
+    // as "on supported pumps" rather than claiming this always does
+    // something -- the value itself already round-trips correctly
+    // either way (python-mobius passes it through as-is), this is
+    // purely about not leaving a negative-number field unexplained.
+    const isSpeedParam = name === "MaxSpeed" || name === "MinSpeed";
     return html`
       <label class="param-label">
         ${name}
         <input
           type="number"
           .value=${String(value ?? 0)}
+          title=${isSpeedParam ? localize("schedule_card.reverse_hint") : nothing}
           @change=${(e: Event) => this._updateWorkingPointParam(name, Number((e.target as HTMLInputElement).value))}
         />
+        ${isSpeedParam ? html`<span class="field-hint">${localize("schedule_card.reverse_hint")}</span>` : nothing}
       </label>
     `;
   }
@@ -1156,6 +1168,11 @@ export class MobiusScheduleCard extends LitElement {
       font-size: 0.8em;
       color: var(--secondary-text-color);
       flex: 1;
+    }
+    .field-hint {
+      font-size: 0.85em;
+      font-style: italic;
+      color: var(--secondary-text-color);
     }
     .no-other-pumps {
       font-size: 0.95em;

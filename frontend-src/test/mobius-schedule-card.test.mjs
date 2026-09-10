@@ -1331,3 +1331,121 @@ test("switching between Sync and Anti-Sync preserves MaxSpeed and the parent pum
   assert.equal(maxSpeedInput.value, "450");
   assert.equal(el._workingPoint.params.ParentSerial, "SN4");
 });
+
+// --------------------------------------------------------------------------
+// Every real mode -- a full sweep confirming each one renders correctly
+// --------------------------------------------------------------------------
+
+// Every real mode this pump might support, and what its own edit form
+// should show. Mirrors python-mobius's own PUMP_MODE_PARAMS exactly
+// (BatteryBackup omitted -- supported_pump_modes() never offers it for
+// any real pump, confirmed in python-mobius's own test suite, so the
+// card's own mode dropdown never needs to render it at all).
+const ALL_MODE_EXPECTATIONS = {
+  ConstantSpeed: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  Lagoon: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  ReefCrest: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  NutrientTransport: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  TidalSwell: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  Feed: { params: { MaxSpeed: 300 }, fieldCount: 1 },
+  ShortPulse: { params: { MaxSpeed: 300, Time: 30 }, fieldCount: 2 },
+  Gyre: { params: { MaxSpeed: 300, BigTime: 1000 }, fieldCount: 2 },
+  Transition: { params: { RampType: "Linear" }, fieldCount: 1, hasDropdown: true },
+  ExpandingPulse: { params: { MaxSpeed: 300, StartTime: 10, EndTime: 60 }, fieldCount: 3 },
+  Random: { params: { MinSpeed: 100, MaxSpeed: 300, Variance: 50 }, fieldCount: 3 },
+  Pulse: { params: { MaxSpeed: 300, OnTime: 5, OffTime: 10 }, fieldCount: 3 },
+};
+
+for (const [mode, expectation] of Object.entries(ALL_MODE_EXPECTATIONS)) {
+  test(`${mode} renders its own edit form correctly (${expectation.fieldCount} field(s))`, async () => {
+    const el = makeCard(PUMP_DEVICE_ID);
+    const modeParams = Object.fromEntries(
+      Object.keys(ALL_MODE_EXPECTATIONS).map((m) => [m, Object.keys(ALL_MODE_EXPECTATIONS[m].params)]),
+    );
+    el.hass = makePumpHass(
+      { "sensor.pump_flow": { state: "300", attributes: {} } },
+      {
+        scheduleResponse: { points: [{ time_minutes: 0, flags: 1, mode, params: expectation.params }] },
+        wsResponse: {
+          groups: [{ ...PUMP_GROUP, modes: Object.keys(ALL_MODE_EXPECTATIONS), mode_params: modeParams }],
+        },
+      },
+    );
+    await settled(el);
+    el.shadowRoot.querySelector(".edit-button").click();
+    await settled(el);
+    el.shadowRoot.querySelector(".point-row").click();
+    await el.updateComplete;
+
+    // Never crashes, never renders a raw PhaseShift field for anyone
+    // (only Sync/EcoSmartBack have that param at all, neither is in
+    // this per-mode sweep), and shows exactly the fields this mode's
+    // own params call for.
+    assert.equal(el.shadowRoot.querySelectorAll(".param-label").length, expectation.fieldCount);
+    assert.equal(el.shadowRoot.querySelector(".mode-label select").value, mode);
+
+    if (expectation.hasDropdown) {
+      assert.ok(el.shadowRoot.querySelector(".param-label select"));
+    } else {
+      assert.equal(el.shadowRoot.querySelectorAll(".param-label input").length, expectation.fieldCount);
+    }
+
+    // Editing and saving works for every mode, not just the ones
+    // already covered by earlier, more targeted tests.
+    const inputs = el.shadowRoot.querySelectorAll(".param-label input");
+    if (inputs.length > 0) {
+      inputs[0].value = "999";
+      inputs[0].dispatchEvent(new window.Event("change"));
+      await el.updateComplete;
+    }
+    el.shadowRoot.querySelector(".save-point-button").click();
+    await el.updateComplete;
+
+    assert.equal(el.shadowRoot.querySelector(".point-edit-form"), null);
+    assert.ok(el.shadowRoot.querySelector(".point-row").textContent.includes(mode));
+  });
+}
+
+test("MaxSpeed/MinSpeed fields show the reverse-rotation hint; other params don't", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      scheduleResponse: {
+        points: [{ time_minutes: 0, flags: 1, mode: "Random", params: { MinSpeed: 100, MaxSpeed: 300, Variance: 50 } }],
+      },
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, modes: ["Random"], mode_params: { Random: ["MinSpeed", "MaxSpeed", "Variance"] } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const labels = [...el.shadowRoot.querySelectorAll(".param-label")];
+  const maxSpeedLabel = labels.find((l) => l.textContent.includes("MaxSpeed"));
+  const varianceLabel = labels.find((l) => l.textContent.includes("Variance"));
+
+  assert.ok(maxSpeedLabel.querySelector(".field-hint"));
+  assert.equal(varianceLabel.querySelector(".field-hint"), null);
+});
+
+test("negative MaxSpeed round-trips correctly (encodes reverse rotation)", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const input = el.shadowRoot.querySelector(".param-label input");
+  input.value = "-300";
+  input.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].params.MaxSpeed, -300);
+});

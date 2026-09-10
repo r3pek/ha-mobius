@@ -45,6 +45,7 @@
     "parent_pump": "Parent pump",
     "no_other_pumps": "No other pumps found on this tank.",
     "anti_sync": "Anti-Sync",
-    "ecosmart_back": "EcoSmart Back"
+    "ecosmart_back": "EcoSmart Back",
+    "reverse_hint": "A negative value reverses rotation direction, on pumps that support it."
   }
 }
