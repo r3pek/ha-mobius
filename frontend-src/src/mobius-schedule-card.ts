@@ -145,6 +145,53 @@ interface HistoryPoint {
   v: number;
 }
 
+// Matches pump_schedule_to_dict()'s own output shape exactly (python-mobius).
+interface PumpScheduleEntry {
+  time_minutes: number;
+  flags: number;
+  mode: string;
+  params: Record<string, unknown>;
+}
+
+// Bit values confirmed against python-mobius's own documentation
+// (06-light-schedule.md's own flags table -- shared by light and pump
+// points, same wire framing for both). ACTIVE(1) is not a period on
+// its own; every real point has it set, so it's excluded here.
+// SUNRISE/SUNSET are combination flags that also include the NIGHT
+// bit, so they're checked first -- checking NIGHT alone first would
+// misclassify every sunrise/sunset point as plain Night.
+type Period = "day" | "night" | "sunrise" | "sunset";
+
+function periodForFlags(flags: number): Period {
+  if ((flags & 6) === 6) return "sunrise";
+  if ((flags & 10) === 10) return "sunset";
+  if (flags & 2) return "night";
+  return "day";
+}
+
+function periodLabel(period: Period): string {
+  switch (period) {
+    case "sunrise":
+      return localize("schedule_card.period_sunrise");
+    case "sunset":
+      return localize("schedule_card.period_sunset");
+    case "night":
+      return localize("schedule_card.period_night");
+    default:
+      return localize("schedule_card.period_day");
+  }
+}
+
+// h:mm, 24h wall-clock -- time_minutes is minutes since midnight
+// (0-1439), not a real Date, so this doesn't need locale-aware
+// formatTime() the way the chart's own hour labels do (there's no
+// timezone or date involved, just a wall-clock offset).
+function formatMinutes(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${h}:${String(m).padStart(2, "0")}`;
+}
+
 @customElement("mobius-schedule-card")
 export class MobiusScheduleCard extends LitElement {
   @property({ attribute: false }) public hass!: ExtendedHomeAssistant;
@@ -165,6 +212,11 @@ export class MobiusScheduleCard extends LitElement {
 
   @state() private _channelHistoryByEntity: Record<string, HistoryPoint[]> = {};
   @state() private _historyLoading = false;
+
+  @state() private _view: "glance" | "edit" = "glance";
+  @state() private _scheduleLoading = false;
+  @state() private _scheduleError?: string;
+  @state() private _schedulePoints: PumpScheduleEntry[] = [];
 
   // Not @state -- this is a plain timer handle, not something that
   // should itself trigger a re-render when it changes.
@@ -322,6 +374,28 @@ export class MobiusScheduleCard extends LitElement {
     }
   }
 
+  private _closeEdit(): void {
+    this._view = "glance";
+  }
+
+  private async _openEdit(): Promise<void> {
+    this._view = "edit";
+    this._scheduleLoading = true;
+    this._scheduleError = undefined;
+    try {
+      const response = await this.hass.callWS<{ points: PumpScheduleEntry[] }>({
+        type: "mobius/read_schedule_group",
+        device_id: this._config!.device_id,
+      });
+      this._schedulePoints = response.points;
+    } catch (err) {
+      this._scheduleError = err instanceof Error ? err.message : String(err);
+      this._schedulePoints = [];
+    } finally {
+      this._scheduleLoading = false;
+    }
+  }
+
   // Reads live, not the group's own active_scene snapshot (only
   // current as of whenever resolve_schedule_groups last ran) --
   // scene_entity_id is tank-wide structural metadata that rarely
@@ -399,7 +473,7 @@ export class MobiusScheduleCard extends LitElement {
               `
             : nothing
         }
-        <button class="edit-button">${localize("schedule_card.edit_schedule")}</button>
+        <button class="edit-button" @click=${() => this._openEdit()}>${localize("schedule_card.edit_schedule")}</button>
       </ha-card>
     `;
   }
@@ -599,7 +673,51 @@ export class MobiusScheduleCard extends LitElement {
               `
             : nothing
         }
-        <button class="edit-button">${localize("schedule_card.edit_schedule")}</button>
+        <button class="edit-button" @click=${() => this._openEdit()}>${localize("schedule_card.edit_schedule")}</button>
+      </ha-card>
+    `;
+  }
+
+  private _renderPumpEditView() {
+    if (this._scheduleError) {
+      return html`
+        <ha-card>
+          <div class="edit-header">
+            <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
+          </div>
+          <div class="warning">${this._scheduleError}</div>
+        </ha-card>
+      `;
+    }
+    if (this._scheduleLoading) {
+      return html`
+        <ha-card>
+          <div class="edit-header">
+            <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
+          </div>
+          <div class="loading">${localize("schedule_card.loading")}</div>
+        </ha-card>
+      `;
+    }
+
+    return html`
+      <ha-card>
+        <div class="edit-header">
+          <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
+          <div class="title">${localize("schedule_card.edit_schedule")}</div>
+        </div>
+        <div class="point-list">
+          ${this._schedulePoints.map((point) => {
+            const period = periodForFlags(point.flags);
+            return html`
+              <div class="point-row">
+                <span class="point-time">${formatMinutes(point.time_minutes)}</span>
+                <span class="point-period period-${period}">${periodLabel(period)}</span>
+                <span class="point-mode">${point.mode}</span>
+              </div>
+            `;
+          })}
+        </div>
       </ha-card>
     `;
   }
@@ -623,11 +741,19 @@ export class MobiusScheduleCard extends LitElement {
       `;
     }
 
+    if (this._view === "edit") {
+      // Light's own point editor lands in follow-up work -- for now,
+      // opening edit on a light group still shows the glance view
+      // rather than a half-built editor with no real controls in it.
+      if (this._group.kind === "pump") {
+        return this._renderPumpEditView();
+      }
+    }
+
     if (this._group.kind === "pump") {
       return this._renderPumpGlance();
     }
 
-    // The full point editor for both kinds lands in follow-up work.
     return this._renderLightGlance();
   }
 
@@ -711,6 +837,65 @@ export class MobiusScheduleCard extends LitElement {
     }
     .edit-button:hover {
       border-color: var(--primary-color);
+    }
+    .edit-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .back-button {
+      background: none;
+      border: none;
+      color: var(--primary-color);
+      font-family: inherit;
+      font-size: 0.9em;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 4px 0;
+    }
+    .point-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .point-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--secondary-background-color, rgba(0, 0, 0, 0.03));
+      font-size: 0.9em;
+    }
+    .point-time {
+      font-variant-numeric: tabular-nums;
+      color: var(--primary-text-color);
+      font-weight: 500;
+      min-width: 44px;
+    }
+    .point-period {
+      font-size: 0.8em;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--divider-color);
+      color: var(--secondary-text-color);
+    }
+    .point-period.period-night {
+      background: #37474f;
+      color: #e0e0e0;
+    }
+    .point-period.period-sunrise {
+      background: #ffcc80;
+      color: #5d4037;
+    }
+    .point-period.period-sunset {
+      background: #ff8a65;
+      color: #4e342e;
+    }
+    .point-mode {
+      color: var(--secondary-text-color);
+      margin-left: auto;
     }
     .unavailable-note {
       font-size: 0.8em;

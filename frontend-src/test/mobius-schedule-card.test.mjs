@@ -85,7 +85,7 @@ const PUMP_GROUP = {
   ],
 };
 
-function makeHass({ devices, wsResponse, wsError, historyResponse, states } = {}) {
+function makeHass({ devices, wsResponse, wsError, historyResponse, states, scheduleResponse, scheduleError } = {}) {
   return {
     devices: devices ?? { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states: states ?? {},
@@ -96,6 +96,10 @@ function makeHass({ devices, wsResponse, wsError, historyResponse, states } = {}
       }
       if (msg.type === "history/history_during_period") {
         return historyResponse ?? {};
+      }
+      if (msg.type === "mobius/read_schedule_group") {
+        if (scheduleError) throw scheduleError;
+        return scheduleResponse ?? { points: [] };
       }
       throw new Error(`unexpected callWS message type: ${msg.type}`);
     },
@@ -267,10 +271,12 @@ test("re-resolves when the configured device_id itself changes", async () => {
 // Pump glance view
 // --------------------------------------------------------------------------
 
-function makePumpHass(states) {
+function makePumpHass(states, { scheduleResponse, scheduleError } = {}) {
   return makeHass({
     devices: { [PUMP_DEVICE_ID]: { id: PUMP_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states,
+    scheduleResponse,
+    scheduleError,
   });
 }
 
@@ -838,4 +844,105 @@ test("a genuinely unrecognized channel name still falls through to the fallback 
   const polyline = el.shadowRoot.querySelector(".chart polyline");
   assert.ok(polyline);
   assert.ok(/^#[0-9a-f]{6}$/i.test(polyline.getAttribute("stroke")));
+});
+
+// --------------------------------------------------------------------------
+// Edit view -- pump point list (read-only first slice)
+// --------------------------------------------------------------------------
+
+const SAMPLE_PUMP_POINTS = [
+  { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { Speed: 300 } }, // Day
+  { time_minutes: 480, flags: 3, mode: "Feed", params: {} }, // Night (1|2)
+  { time_minutes: 360, flags: 7, mode: "TidalSwell", params: {} }, // Sunrise (1|6)
+  { time_minutes: 1200, flags: 11, mode: "ConstantSpeed", params: {} }, // Sunset (1|10)
+];
+
+test("clicking Edit schedule fetches the real schedule and switches to the edit view", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleResponse: { points: SAMPLE_PUMP_POINTS } },
+  );
+  await settled(el);
+
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelectorAll(".point-row").length, 4);
+  assert.ok(el.shadowRoot.querySelector(".back-button"));
+});
+
+test("edit view shows each point's own time, decoded period, and mode", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleResponse: { points: SAMPLE_PUMP_POINTS } },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  const rows = [...el.shadowRoot.querySelectorAll(".point-row")];
+  const text = rows.map((r) => r.textContent);
+
+  assert.ok(text[0].includes("0:00"));
+  assert.ok(text[0].includes("Day"));
+  assert.ok(text[0].includes("ConstantSpeed"));
+
+  assert.ok(text[1].includes("8:00"));
+  assert.ok(text[1].includes("Night"));
+
+  assert.ok(text[2].includes("6:00"));
+  assert.ok(text[2].includes("Sunrise"));
+
+  assert.ok(text[3].includes("20:00"));
+  assert.ok(text[3].includes("Sunset"));
+});
+
+test("the back button returns to the glance view without losing state", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleResponse: { points: SAMPLE_PUMP_POINTS } },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  assert.ok(el.shadowRoot.querySelector(".point-list"));
+
+  el.shadowRoot.querySelector(".back-button").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".point-list"), null);
+  assert.ok(el.shadowRoot.querySelector(".edit-button"));
+});
+
+test("edit view shows a clear error when the schedule fetch fails", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleError: new Error("relay connection lost") },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("relay connection lost"));
+  assert.ok(el.shadowRoot.querySelector(".back-button"));
+});
+
+test("edit view can still navigate back after a failed fetch", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleError: new Error("relay connection lost") },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  el.shadowRoot.querySelector(".back-button").click();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".edit-button"));
 });

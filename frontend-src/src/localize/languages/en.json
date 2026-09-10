@@ -31,6 +31,11 @@
     "no_channel_data": "No channel data available -- every light in this group is currently unavailable.",
     "overall_intensity": "Overall intensity",
     "loading_history": "Loading history…",
-    "no_history_yet": "No history recorded yet today."
+    "no_history_yet": "No history recorded yet today.",
+    "back": "Back",
+    "period_day": "Day",
+    "period_night": "Night",
+    "period_sunrise": "Sunrise",
+    "period_sunset": "Sunset"
   }
 }
