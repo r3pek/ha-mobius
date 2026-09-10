@@ -1,7 +1,9 @@
 {
   "editor": {
     "entity": "Scene selection entity",
-    "entity_helper": "The select.*_scene_selection entity for the tank this card should control."
+    "entity_helper": "The select.*_scene_selection entity for the tank this card should control.",
+    "device_id": "Light or pump device",
+    "device_id_helper": "Any one light or pump in the schedule group this card should show -- never the Tank device itself."
   },
   "scene_card": {
     "title": "Scene",
@@ -10,5 +12,11 @@
     "remaining_suffix": "remaining",
     "normal_schedule_tile": "Normal schedule",
     "entity_not_found": "Entity not found:"
+  },
+  "schedule_card": {
+    "loading": "Loading…",
+    "device_not_found": "This device could not be found.",
+    "no_tank_found": "This device isn't linked to a Mobius tank.",
+    "group_not_found": "Couldn't find this device's own schedule group."
   }
 }
