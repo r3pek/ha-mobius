@@ -47,6 +47,21 @@ jobs:
         if: github.event_name == 'push'
         run: python3 .forgejo/scripts/extract_changelog_section.py "${{ github.ref_name }}"
 
+      # A pre-release tag is anything with a "-" after the version core
+      # (e.g. v0.8.0-beta1, v0.8.0-rc.1) -- standard semver pre-release
+      # convention. Computed once, here, and reused by both the
+      # Forgejo and GitHub release steps below, rather than each
+      # re-deriving its own copy of the same check (which could drift
+      # out of sync with each other if only one were ever updated).
+      - name: Determine pre-release status
+        if: github.event_name == 'push'
+        id: prerelease
+        run: |
+          case "${{ github.ref_name }}" in
+            *-*) echo "is_prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "is_prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       # Builds the Lovelace card(s) from frontend-src/ into
       # custom_components/mobius/frontend/dist/ BEFORE the zip step
       # below -- that directory is deliberately never committed to
@@ -97,6 +112,7 @@ jobs:
           tag: ${{ github.ref_name }}
           release-dir: dist/release
           release-notes-file: release_notes.md
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
 
       # Mirrors the release to GitHub (github.com/r3pek/ha-mobius) --
       # HACS reads real GitHub releases from there.
@@ -124,7 +140,12 @@ jobs:
             $SUDO apt-get update -qq
             $SUDO apt-get install -y gh
           fi
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.prerelease.outputs.is_prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           gh release create "${{ github.ref_name }}" dist/release/mobius.zip \
             --repo r3pek/ha-mobius \
             --title "${{ github.ref_name }}" \
-            --notes-file release_notes.md
+            --notes-file release_notes.md \
+            $PRERELEASE_FLAG
