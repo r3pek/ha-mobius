@@ -4,7 +4,7 @@
  * real bundle a person's browser would load. Run with `npm test`.
  */
 
-import { test, before } from "node:test";
+import { test, before, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { dirname, join } from "node:path";
@@ -102,10 +102,25 @@ function makeHass({ devices, wsResponse, wsError, historyResponse, states } = {}
   };
 }
 
+// Every card this file creates gets removed after its own test --
+// this isn't just tidiness: mobius-schedule-card sets up a real
+// setInterval (for periodic history refresh) that only gets cleared
+// in disconnectedCallback. Leaving elements attached to document.body
+// for the whole file would leave every one of those intervals running
+// for its full 5-minute period, which (being real timers, not fake
+// ones, in every test that doesn't explicitly enable mock.timers)
+// keeps the Node process itself alive and hangs the entire test run.
+const _createdElements = [];
+afterEach(() => {
+  for (const el of _createdElements) el.remove();
+  _createdElements.length = 0;
+});
+
 function makeCard(deviceId) {
   const el = document.createElement("mobius-schedule-card");
   el.setConfig({ device_id: deviceId });
   document.body.appendChild(el);
+  _createdElements.push(el);
   return el;
 }
 
@@ -593,4 +608,123 @@ test("chart shows hour gridline labels", async () => {
   await settled(el);
 
   assert.equal(el.shadowRoot.querySelectorAll(".chart-label").length, 4);
+});
+
+// --------------------------------------------------------------------------
+// Chart memoization and periodic history refresh
+// --------------------------------------------------------------------------
+
+test("chart computation is memoized -- an unrelated hass update does not recompute it", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  el.hass = hass;
+  await settled(el);
+
+  let computeCount = 0;
+  const original = ctor.prototype._computeChannelChart;
+  ctor.prototype._computeChannelChart = function (...args) {
+    computeCount++;
+    return original.apply(this, args);
+  };
+  try {
+    // Simulates exactly what real dashboard traffic looks like: hass
+    // reassigned as a brand new object (as HA's own frontend does on
+    // every state change anywhere in the system), with the actual
+    // history data completely unchanged.
+    el.hass = { ...hass };
+    await el.updateComplete;
+    el.hass = { ...hass };
+    await el.updateComplete;
+    el.hass = { ...hass };
+    await el.updateComplete;
+
+    assert.equal(computeCount, 0, "unrelated hass reassignment must not recompute the chart");
+  } finally {
+    ctor.prototype._computeChannelChart = original;
+  }
+});
+
+test("chart recomputes once real history data actually changes", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  el.hass = hass;
+  await settled(el);
+
+  let computeCount = 0;
+  const original = ctor.prototype._computeChannelChart;
+  ctor.prototype._computeChannelChart = function (...args) {
+    computeCount++;
+    return original.apply(this, args);
+  };
+  try {
+    // A genuinely new history payload (as a periodic refresh would
+    // produce) is a different object reference, and must trigger a
+    // real recomputation.
+    el._channelHistoryByEntity = { "sensor.left_royalblue": [historyEntry(70, 0)] };
+    await el.updateComplete;
+
+    assert.equal(computeCount, 1);
+  } finally {
+    ctor.prototype._computeChannelChart = original;
+  }
+});
+
+test("history is refetched periodically, not just once at resolution", async (t) => {
+  // Enabled BEFORE hass is assigned -- the setInterval call itself
+  // happens synchronously inside group resolution, so enabling the
+  // mock any later would leave that real, un-mocked interval outside
+  // the mock's control entirely (tick() only affects intervals
+  // created after the mock itself is enabled). settled()'s own
+  // internal setTimeout(0) is unaffected, since only "setInterval" is
+  // in the mocked api list here.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+
+  const el = makeCard(LIGHT_DEVICE_ID);
+  let fetchCount = 0;
+  const hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, {});
+  const originalCallWS = hass.callWS;
+  hass.callWS = async (msg) => {
+    if (msg.type === "history/history_during_period") fetchCount++;
+    return originalCallWS(msg);
+  };
+  el.hass = hass;
+  await settled(el);
+  assert.equal(fetchCount, 1, "the initial resolution should fetch history exactly once");
+
+  t.mock.timers.tick(5 * 60 * 1000);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(fetchCount, 2, "a periodic refresh should have fetched history again");
+});
+
+test("the periodic refresh timer is cleared on disconnect -- no fetches after the card leaves the DOM", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+
+  const el = makeCard(LIGHT_DEVICE_ID);
+  let fetchCount = 0;
+  const hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, {});
+  const originalCallWS = hass.callWS;
+  hass.callWS = async (msg) => {
+    if (msg.type === "history/history_during_period") fetchCount++;
+    return originalCallWS(msg);
+  };
+  el.hass = hass;
+  await settled(el);
+  assert.equal(fetchCount, 1);
+
+  el.remove();
+  _createdElements.splice(_createdElements.indexOf(el), 1);
+
+  t.mock.timers.tick(30 * 60 * 1000); // well past several refresh cycles
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(fetchCount, 1, "no further fetches should occur once the card has disconnected");
 });

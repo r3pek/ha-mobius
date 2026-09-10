@@ -1,4 +1,4 @@
-import { LitElement, html, css, svg, nothing } from "lit";
+import { LitElement, html, css, svg, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
 import { formatTime } from "custom-card-helpers";
@@ -149,6 +149,21 @@ export class MobiusScheduleCard extends LitElement {
   // changes, or after a failed attempt where hass wasn't ready yet.
   private _resolvedFor?: string;
 
+  // Re-fetches channel history on a timer -- a single fetch at
+  // resolution time would otherwise leave the chart frozen at
+  // whatever moment the card first loaded: new data points never
+  // arrive on their own the way live entity state does, since history
+  // is a point-in-time query, not something hass itself pushes
+  // updates for. Cleared on disconnect so it doesn't keep firing (and
+  // holding a reference to this card) after the card leaves the DOM.
+  private _historyRefreshHandle?: ReturnType<typeof setInterval>;
+  private static readonly HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+  public disconnectedCallback(): void {
+    super.disconnectedCallback();
+    clearInterval(this._historyRefreshHandle);
+  }
+
   public setConfig(config: MobiusScheduleCardConfig): void {
     if (!config || !config.device_id) {
       throw new Error('mobius-schedule-card: "device_id" is required (a light or pump device, never the Tank itself)');
@@ -214,6 +229,7 @@ export class MobiusScheduleCard extends LitElement {
       }
       this._group = group;
 
+      clearInterval(this._historyRefreshHandle);
       if (group.kind === "light") {
         // Deliberately not awaited -- the glance view itself doesn't
         // depend on history to render (readings/slider/scene banner
@@ -221,6 +237,10 @@ export class MobiusScheduleCard extends LitElement {
         // shouldn't hold up everything else. The chart area just
         // shows its own loading state until this resolves.
         this._fetchChannelHistory(group);
+        this._historyRefreshHandle = setInterval(
+          () => this._fetchChannelHistory(group),
+          MobiusScheduleCard.HISTORY_REFRESH_INTERVAL_MS,
+        );
       }
     } catch (err) {
       this._error = err instanceof Error ? err.message : String(err);
@@ -399,11 +419,42 @@ export class MobiusScheduleCard extends LitElement {
     }, 1200);
   }
 
+  // Recomputing this is real work (every point in every channel's own
+  // history gets transformed to SVG coordinates and re-stringified) --
+  // and render() itself runs far more often than that data actually
+  // changes: hass is reassigned as a brand new object on every state
+  // change anywhere in the whole system (not just this card's own
+  // entities), and Lit's default change detection is reference-based,
+  // so this card re-renders on nearly every Home Assistant event.
+  // Skipping recomputation whenever the three things that actually
+  // affect the chart's own output (which member's data, the history
+  // itself, and the locale used for hour labels) haven't changed since
+  // the last render avoids doing that work dozens of times a minute
+  // for a result that would come out identical every time anyway.
+  private _lastChartKey?: string;
+  private _lastChartResult?: TemplateResult;
+
   private _renderChannelChart(sourceMember: ScheduleGroupMember) {
     if (this._historyLoading) {
       return html`<div class="chart-status">${localize("schedule_card.loading_history")}</div>`;
     }
 
+    const lang = this.hass?.locale?.language;
+    const key = `${sourceMember.device_id}|${lang}`;
+    if (key === this._lastChartKey && this._channelHistoryByEntity === this._lastChartHistoryRef) {
+      return this._lastChartResult;
+    }
+
+    const result = this._computeChannelChart(sourceMember);
+    this._lastChartKey = key;
+    this._lastChartHistoryRef = this._channelHistoryByEntity;
+    this._lastChartResult = result;
+    return result;
+  }
+
+  private _lastChartHistoryRef?: Record<string, HistoryPoint[]>;
+
+  private _computeChannelChart(sourceMember: ScheduleGroupMember) {
     const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
       (entry): entry is [string, string] => !!entry[1],
     );
