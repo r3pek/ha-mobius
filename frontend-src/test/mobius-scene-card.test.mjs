@@ -29,7 +29,11 @@ before(async () => {
   // the card itself.
   for (const key of Object.getOwnPropertyNames(dom.window)) {
     if (!(key in globalThis)) {
-      try { globalThis[key] = dom.window[key]; } catch { /* non-configurable global, skip */ }
+      try {
+        globalThis[key] = dom.window[key];
+      } catch {
+        /* non-configurable global, skip */
+      }
     }
   }
   globalThis.window = dom.window;
@@ -89,8 +93,7 @@ test("shows the normal-schedule message when no scene is active", async () => {
   const el = makeCard("select.reef_tank_scene_selection");
   el.hass = makeHass("None", ["None", "Feeding", "Storm Simulation"]);
   await el.updateComplete;
-  const html = el.shadowRoot.innerHTML;
-  assert.ok(html.includes("Running the normal schedule"));
+  assert.ok(el.shadowRoot.textContent.includes("Running the normal schedule"));
   assert.equal(el.shadowRoot.querySelectorAll(".tile").length, 3);
 });
 
@@ -107,25 +110,31 @@ test("shows the active scene and its remaining duration", async () => {
   const el = makeCard("select.reef_tank_scene_selection");
   el.hass = makeHass("Feeding", ["None", "Feeding"], 125);
   await el.updateComplete;
-  const html = el.shadowRoot.innerHTML;
-  assert.ok(html.includes("Feeding active"));
-  assert.ok(html.includes("2:05 remaining"));
+  // textContent, not raw innerHTML -- Lit inserts its own internal
+  // comment markers between adjacent dynamic expressions (here,
+  // ${activeSceneName} and ${localize(...)} sit next to each other in
+  // the template), which would otherwise split "Feeding active" apart
+  // in the raw HTML string even though the actually-rendered text a
+  // person sees is unaffected.
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Feeding active"));
+  assert.ok(text.includes("2:05 remaining"));
 });
 
 test("omits the duration line when the attribute is absent", async () => {
   const el = makeCard("select.reef_tank_scene_selection");
   el.hass = makeHass("Feeding", ["None", "Feeding"], undefined);
   await el.updateComplete;
-  assert.ok(!el.shadowRoot.innerHTML.includes("remaining"));
+  assert.ok(!el.shadowRoot.textContent.includes("remaining"));
 });
 
 test("shows a clear warning for a missing/renamed entity", async () => {
   const el = makeCard("select.does_not_exist");
   el.hass = makeHass("None", ["None"]);
   await el.updateComplete;
-  const html = el.shadowRoot.innerHTML;
-  assert.ok(html.includes("Entity not found"));
-  assert.ok(html.includes("select.does_not_exist"));
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Entity not found"));
+  assert.ok(text.includes("select.does_not_exist"));
 });
 
 test("clicking a tile calls select.select_option with the right option", async () => {
@@ -137,7 +146,8 @@ test("clicking a tile calls select.select_option with the right option", async (
   tiles[1].click(); // "Feeding"
   assert.equal(hass._calls.length, 1);
   assert.deepEqual(hass._calls[0], {
-    domain: "select", service: "select_option",
+    domain: "select",
+    service: "select_option",
     data: { entity_id: "select.reef_tank_scene_selection", option: "Feeding" },
   });
 });
@@ -150,4 +160,34 @@ test("clicking the active tile still re-issues the same option (idempotent, not 
   const activeTile = el.shadowRoot.querySelector(".tile.active");
   activeTile.click();
   assert.equal(hass._calls[0].data.option, "Feeding");
+});
+
+test("getConfigForm restricts the entity selector to the select domain", () => {
+  const form = ctor.getConfigForm();
+  const entityField = form.schema.find((f) => f.name === "entity");
+  assert.ok(entityField, "schema should have an entity field");
+  assert.equal(entityField.required, true);
+  assert.equal(entityField.selector.entity.domain, "select");
+});
+
+test("getConfigForm's computeLabel/computeHelper return real strings for the entity field", () => {
+  const form = ctor.getConfigForm();
+  assert.equal(typeof form.computeLabel({ name: "entity" }), "string");
+  assert.equal(typeof form.computeHelper({ name: "entity" }), "string");
+});
+
+test("getGridOptions returns sensible sections-view defaults", () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  const opts = el.getGridOptions();
+  assert.equal(typeof opts.rows, "number");
+  assert.equal(typeof opts.columns, "number");
+});
+
+test("localized strings respond to hass.locale.language (falls back to English for an unknown language)", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  const hass = makeHass("None", ["None"]);
+  hass.locale = { language: "xx" }; // deliberately unsupported
+  el.hass = hass;
+  await el.updateComplete;
+  assert.ok(el.shadowRoot.textContent.includes("Running the normal schedule"));
 });

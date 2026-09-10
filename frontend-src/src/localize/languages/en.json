@@ -1,0 +1,14 @@
+{
+  "editor": {
+    "entity": "Scene selection entity",
+    "entity_helper": "The select.*_scene_selection entity for the tank this card should control."
+  },
+  "scene_card": {
+    "title": "Scene",
+    "running_normal_schedule": "Running the normal schedule.",
+    "active_suffix": "active",
+    "remaining_suffix": "remaining",
+    "normal_schedule_tile": "Normal schedule",
+    "entity_not_found": "Entity not found:"
+  }
+}

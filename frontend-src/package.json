@@ -2,16 +2,30 @@
   "name": "mobius-frontend",
   "private": true,
   "version": "1.0.0",
+  "type": "module",
   "description": "Build tooling for the Mobius integration's own Lovelace cards. src/ is the only thing to edit by hand -- dist/ (under ../custom_components/mobius/frontend/) is a generated build artifact, produced by `npm run build`, and is never committed to git at all: it's built fresh at release time (see .forgejo/workflows/release.yml) and baked into the release zip HACS actually installs from.",
   "scripts": {
     "build": "node build.mjs",
-    "test": "npm run build && node --test"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "format": "prettier --write src/ test/ *.mjs *.js *.json",
+    "format:check": "prettier --check src/ test/ *.mjs *.js *.json",
+    "test": "npm run typecheck && npm run lint && npm run format:check && npm run build && node --test"
   },
   "dependencies": {
+    "custom-card-helpers": "^1.9.0",
     "lit": "^2.8.0"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
-    "jsdom": "^30.0.1"
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.2",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-lit": "^2.3.1",
+    "jsdom": "^30.0.1",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0"
   }
 }

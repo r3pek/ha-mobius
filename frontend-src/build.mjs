@@ -33,7 +33,7 @@ const SRC_DIR = join(HERE, "src");
 const DIST_DIR = join(HERE, "..", "custom_components", "mobius", "frontend", "dist");
 
 const entryPoints = readdirSync(SRC_DIR)
-  .filter((f) => f.endsWith(".js"))
+  .filter((f) => f.endsWith(".js") || f.endsWith(".ts"))
   .map((f) => join(SRC_DIR, f));
 
 if (entryPoints.length === 0) {
