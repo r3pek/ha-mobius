@@ -203,6 +203,37 @@ const RAMP_TYPES = ["Sinusoidal", "Logarithmic", "Linear"];
 // a person edits), combined with the bits for the chosen period.
 const PERIOD_FLAGS: Record<Period, number> = { day: 1, night: 3, sunrise: 7, sunset: 11 };
 
+// The app's own UI never shows a raw PhaseShift value or separate
+// "Sync"/"EcoSmartBack" entries to choose between -- confirmed from
+// the decompiled app's own PumpMode.text(): Sync's own display name
+// is picked from PhaseShift alone (180 -> "Anti-Sync", anything else
+// -> "Sync"), and EcoSmartBack is always just "EcoSmart Back" with no
+// phase-based split of its own at all. So exactly three choices ever
+// reach a person, never four and never a raw phase number:
+// Sync, Anti-Sync, EcoSmart Back. These helpers reproduce that
+// collapsing here, rather than exposing PhaseShift as a plain numeric
+// field the way every other param is shown.
+type DisplayMode = "Sync" | "AntiSync" | string; // string covers EcoSmartBack and every non-child mode as-is
+
+function displayModeFor(mode: string, phaseShift: unknown): DisplayMode {
+  if (mode !== "Sync") return mode;
+  return phaseShift === 180 ? "AntiSync" : "Sync";
+}
+
+function displayModeLabel(displayMode: DisplayMode): string {
+  if (displayMode === "AntiSync") return localize("schedule_card.anti_sync");
+  if (displayMode === "EcoSmartBack") return localize("schedule_card.ecosmart_back");
+  return displayMode;
+}
+
+// The dropdown's own option list -- Sync expands to two entries
+// (Sync/Anti-Sync), everything else (including EcoSmartBack) passes
+// through as a single entry, matching the real modes this pump
+// actually supports.
+function displayModeOptions(modes: string[]): DisplayMode[] {
+  return modes.flatMap((m) => (m === "Sync" ? (["Sync", "AntiSync"] as DisplayMode[]) : [m]));
+}
+
 @customElement("mobius-schedule-card")
 export class MobiusScheduleCard extends LitElement {
   @property({ attribute: false }) public hass!: ExtendedHomeAssistant;
@@ -447,9 +478,21 @@ export class MobiusScheduleCard extends LitElement {
     this._workingPoint = { ...this._workingPoint, flags: PERIOD_FLAGS[period] };
   }
 
-  private _updateWorkingPointMode(mode: string): void {
+  private _updateWorkingPointMode(displayMode: DisplayMode): void {
     if (!this._workingPoint || !this._group) return;
-    const paramNames = this._group.mode_params?.[mode] ?? [];
+
+    // Anti-Sync isn't a real mode at all -- it's Sync with
+    // PhaseShift=180 (see the DisplayMode helpers above for the full
+    // reasoning). EcoSmartBack's own PhaseShift is never shown to a
+    // person either, so it gets the same "not 180" default Sync
+    // itself uses absent a choice -- the app's own UI never exposes a
+    // way to set it any other way, so this is the only value there's
+    // ever a reason to send.
+    const realMode = displayMode === "AntiSync" ? "Sync" : displayMode;
+    const presetPhaseShift =
+      displayMode === "AntiSync" ? 180 : realMode === "Sync" || realMode === "EcoSmartBack" ? 0 : undefined;
+
+    const paramNames = this._group.mode_params?.[realMode] ?? [];
     // Values for params the new mode shares with the old one carry
     // over (e.g. switching Lagoon -> ReefCrest keeps MaxSpeed); a
     // param the new mode needs that the old one didn't have gets a
@@ -458,7 +501,9 @@ export class MobiusScheduleCard extends LitElement {
     // ever missing at save time.
     const params: Record<string, unknown> = {};
     for (const name of paramNames) {
-      if (name in this._workingPoint.params) {
+      if (name === "PhaseShift" && presetPhaseShift !== undefined) {
+        params[name] = presetPhaseShift;
+      } else if (name in this._workingPoint.params) {
         params[name] = this._workingPoint.params[name];
       } else if (name === "RampType") {
         params[name] = RAMP_TYPES[0];
@@ -468,7 +513,7 @@ export class MobiusScheduleCard extends LitElement {
         params[name] = 0;
       }
     }
-    this._workingPoint = { ...this._workingPoint, mode, params };
+    this._workingPoint = { ...this._workingPoint, mode: realMode, params };
   }
 
   private _updateWorkingPointParam(name: string, value: string | number): void {
@@ -828,7 +873,12 @@ export class MobiusScheduleCard extends LitElement {
     const point = this._workingPoint!;
     const period = periodForFlags(point.flags);
     const modes = this._group?.modes ?? [];
-    const paramNames = this._group?.mode_params?.[point.mode] ?? [];
+    const displayModes = displayModeOptions(modes);
+    const currentDisplayMode = displayModeFor(point.mode, point.params.PhaseShift);
+    // PhaseShift is never shown as its own field -- it's fully implied
+    // by which of Sync/Anti-Sync/EcoSmart Back was chosen above (see
+    // the DisplayMode helpers' own reasoning).
+    const paramNames = (this._group?.mode_params?.[point.mode] ?? []).filter((name) => name !== "PhaseShift");
     const [hours, minutes] = [Math.floor(point.time_minutes / 60), point.time_minutes % 60];
 
     return html`
@@ -860,10 +910,12 @@ export class MobiusScheduleCard extends LitElement {
         <label class="mode-label">
           ${localize("schedule_card.mode")}
           <select
-            .value=${point.mode}
+            .value=${currentDisplayMode}
             @change=${(e: Event) => this._updateWorkingPointMode((e.target as HTMLSelectElement).value)}
           >
-            ${modes.map((m) => html`<option value=${m} ?selected=${m === point.mode}>${m}</option>`)}
+            ${displayModes.map(
+              (dm) => html`<option value=${dm} ?selected=${dm === currentDisplayMode}>${displayModeLabel(dm)}</option>`,
+            )}
           </select>
         </label>
         ${paramNames.map((name) => this._renderParamInput(name, point.params[name]))}

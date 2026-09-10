@@ -43,6 +43,8 @@
     "cancel": "Cancel",
     "save": "Save",
     "parent_pump": "Parent pump",
-    "no_other_pumps": "No other pumps found on this tank."
+    "no_other_pumps": "No other pumps found on this tank.",
+    "anti_sync": "Anti-Sync",
+    "ecosmart_back": "EcoSmart Back"
   }
 }

@@ -982,7 +982,7 @@ test("clicking a point row opens an edit form pre-filled with its own values", a
   assert.equal(el.shadowRoot.querySelector(".param-label input").value, "300");
 });
 
-test("switching mode updates which param fields are shown", async () => {
+test("switching to Sync shows MaxSpeed and the parent-pump picker, but never a raw PhaseShift field", async () => {
   const el = await openEditWithPoints([
     { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
   ]);
@@ -995,11 +995,15 @@ test("switching mode updates which param fields are shown", async () => {
   modeSelect.dispatchEvent(new window.Event("change"));
   await el.updateComplete;
 
+  // PhaseShift is deliberately absent -- it's fully implied by which
+  // of Sync/Anti-Sync/EcoSmart Back the mode dropdown itself shows,
+  // matching the real app's own UI (which never exposes a raw phase
+  // value to a person at all).
   const paramLabels = [...el.shadowRoot.querySelectorAll(".param-label")].map((l) => l.textContent);
-  assert.equal(paramLabels.length, 3);
+  assert.equal(paramLabels.length, 2);
   assert.ok(paramLabels.some((t) => t.includes("MaxSpeed")));
-  assert.ok(paramLabels.some((t) => t.includes("PhaseShift")));
   assert.ok(paramLabels.some((t) => t.includes("Parent pump")));
+  assert.ok(!paramLabels.some((t) => t.includes("PhaseShift")));
 });
 
 test("switching mode carries over a shared param's own value", async () => {
@@ -1207,4 +1211,123 @@ test("parent-pump picker shows a clear message when no other pumps exist on the 
     ),
     undefined,
   );
+});
+
+// --------------------------------------------------------------------------
+// Sync / Anti-Sync / EcoSmart Back -- the app's own real three choices
+// --------------------------------------------------------------------------
+
+test("the mode dropdown shows exactly Sync, Anti-Sync, and EcoSmart Back -- never a raw phase value", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const options = [...el.shadowRoot.querySelector(".mode-label select").options].map((o) => o.textContent.trim());
+  assert.ok(options.includes("Sync"));
+  assert.ok(options.includes("Anti-Sync"));
+  assert.ok(options.includes("EcoSmart Back"));
+  // Exactly these three for the child-mode family -- not a fourth
+  // "EcoSmartBack anti-phase" option, matching the real app.
+  assert.equal(options.filter((o) => o.includes("Sync") || o.includes("EcoSmart")).length, 3);
+});
+
+test("a Sync point with PhaseShift 180 is correctly shown as Anti-Sync, not Sync", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 180, ParentSerial: "SN4" } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "AntiSync");
+});
+
+test("a Sync point with PhaseShift 0 is correctly shown as plain Sync", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 0, ParentSerial: "SN4" } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "Sync");
+});
+
+test("selecting Anti-Sync sets the real underlying mode to Sync with PhaseShift 180", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "AntiSync";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].mode, "Sync");
+  assert.equal(el._schedulePoints[0].params.PhaseShift, 180);
+});
+
+test("selecting plain Sync sets PhaseShift to 0", async () => {
+  const el = await openEditWithPoints([
+    {
+      time_minutes: 0,
+      flags: 1,
+      mode: "Sync",
+      params: { MaxSpeed: 300, PhaseShift: 180, ParentSerial: "SN4" },
+    },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "Sync";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].params.PhaseShift, 0);
+});
+
+test("selecting EcoSmart Back sets the real underlying mode to EcoSmartBack", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "EcoSmartBack";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].mode, "EcoSmartBack");
+});
+
+test("switching between Sync and Anti-Sync preserves MaxSpeed and the parent pump choice", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 450, PhaseShift: 0, ParentSerial: "SN4" } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "AntiSync";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  const maxSpeedInput = [...el.shadowRoot.querySelectorAll(".param-label input")].find(
+    (i) => i.previousSibling?.textContent?.includes("MaxSpeed") || i.parentElement.textContent.includes("MaxSpeed"),
+  );
+  assert.equal(maxSpeedInput.value, "450");
+  assert.equal(el._workingPoint.params.ParentSerial, "SN4");
 });
