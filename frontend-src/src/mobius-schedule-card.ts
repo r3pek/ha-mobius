@@ -27,6 +27,12 @@ interface MobiusScheduleCardConfig extends LovelaceCardConfig {
   device_id: string;
 }
 
+function joinNaturally(names: string[]): string {
+  if (names.length <= 1) return names[0] || "";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
 // custom-card-helpers' own HomeAssistant type is a deliberately
 // minimal subset (states/services/config/etc.) -- it does NOT include
 // the device/entity registries, even though the real hass object
@@ -71,6 +77,19 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _group?: ScheduleGroup;
   @state() private _error?: string;
   @state() private _loading = false;
+
+  // Shown instead of the live entity value while a person is actively
+  // dragging the intensity slider -- the debounced service call below
+  // hasn't necessarily landed yet, so reading the live entity value
+  // during that window would make the slider visibly snap back before
+  // jumping to the new value once the service call actually completes.
+  // Cleared once the debounced write itself resolves, so the display
+  // reverts to tracking the live entity normally again afterward.
+  @state() private _pendingIntensityPercent?: number;
+
+  // Not @state -- this is a plain timer handle, not something that
+  // should itself trigger a re-render when it changes.
+  private _intensityDebounceHandle?: ReturnType<typeof setTimeout>;
 
   // The device_id resolution was last run for -- avoids re-resolving
   // on every single hass update (which happens on every poll cycle
@@ -233,6 +252,110 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  // Try each member IN ORDER (already sorted, deterministic --
+  // resolve_schedule_groups sorts by serial) for one that's currently
+  // available, stopping once found. A single bounded pass through a
+  // fixed list, never retried or re-entered, so "every member
+  // unavailable at once" falls through to the null case below instead
+  // of looping. "Available" is judged from one representative channel
+  // sensor per member (the first channel in this group's own list) --
+  // every channel sensor on the same physical device transitions
+  // together (they're all polled from the same coordinator), so
+  // checking one is exactly as informative as checking all of them.
+  private _pickAvailableLightMember(): { member?: ScheduleGroupMember; unavailableNames: string[] } {
+    const group = this._group!;
+    const unavailableNames: string[] = [];
+    let picked: ScheduleGroupMember | undefined;
+
+    for (const member of group.members) {
+      const entityIds = member.channel_entity_ids ? Object.values(member.channel_entity_ids) : [];
+      const representativeId = entityIds.find((id) => id != null);
+      const stateObj = representativeId ? this.hass.states[representativeId] : undefined;
+      const available = !!stateObj && stateObj.state !== "unavailable" && stateObj.state !== "unknown";
+
+      if (available) {
+        if (!picked) picked = member;
+      } else {
+        unavailableNames.push(member.name);
+      }
+    }
+
+    return { member: picked, unavailableNames };
+  }
+
+  private _handleIntensityChange(percent: number, deviceId: string): void {
+    this._pendingIntensityPercent = percent;
+    clearTimeout(this._intensityDebounceHandle);
+    this._intensityDebounceHandle = setTimeout(() => {
+      this.hass
+        .callService("mobius", "set_schedule_intensity", { device_id: deviceId, intensity: percent })
+        .finally(() => {
+          this._pendingIntensityPercent = undefined;
+        });
+    }, 1200);
+  }
+
+  private _renderLightGlance() {
+    const group = this._group!;
+    const { member: sourceMember, unavailableNames } = this._pickAvailableLightMember();
+
+    const intensityEntityId = sourceMember?.schedule_intensity_entity_id;
+    const intensityState = intensityEntityId ? this.hass.states[intensityEntityId] : undefined;
+    const liveIntensityPercent = intensityState ? Math.round(Number(intensityState.state)) : undefined;
+    const displayedIntensityPercent = this._pendingIntensityPercent ?? liveIntensityPercent;
+
+    return html`
+      <ha-card>
+        <div class="header">
+          <div class="title">${localize("schedule_card.light_title")}</div>
+          <div class="subtitle">${group.members.map((m) => m.name).join(" + ")}</div>
+        </div>
+        ${this._renderSceneBanner()}
+        ${
+          unavailableNames.length > 0
+            ? html`
+                <div class="unavailable-note">
+                  ${joinNaturally(unavailableNames)}
+                  ${
+                    unavailableNames.length === 1
+                      ? localize("schedule_card.is_unavailable")
+                      : localize("schedule_card.are_unavailable")
+                  }
+                </div>
+              `
+            : nothing
+        }
+        ${
+          sourceMember ? nothing : html`<div class="reading-missing">${localize("schedule_card.no_channel_data")}</div>`
+        }
+        ${
+          displayedIntensityPercent != null
+            ? html`
+                <div class="intensity-row">
+                  <div class="intensity-label">
+                    <span>${localize("schedule_card.overall_intensity")}</span>
+                    <span>${displayedIntensityPercent}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    .value=${String(displayedIntensityPercent)}
+                    @input=${(e: Event) =>
+                      this._handleIntensityChange(
+                        Number((e.target as HTMLInputElement).value),
+                        this._config!.device_id,
+                      )}
+                  />
+                </div>
+              `
+            : nothing
+        }
+        <button class="edit-button">${localize("schedule_card.edit_schedule")}</button>
+      </ha-card>
+    `;
+  }
+
   protected render() {
     if (!this._config) return nothing;
 
@@ -256,16 +379,8 @@ export class MobiusScheduleCard extends LitElement {
       return this._renderPumpGlance();
     }
 
-    // Light glance/edit views, and the pump edit view, land in
-    // follow-up work.
-    return html`
-      <ha-card>
-        <div class="header">
-          <div class="title">${localize("schedule_card.light_title")}</div>
-          <div class="subtitle">${this._group.members.map((m) => m.name).join(" + ")}</div>
-        </div>
-      </ha-card>
-    `;
+    // The full point editor for both kinds lands in follow-up work.
+    return this._renderLightGlance();
   }
 
   static styles = css`
@@ -348,6 +463,25 @@ export class MobiusScheduleCard extends LitElement {
     }
     .edit-button:hover {
       border-color: var(--primary-color);
+    }
+    .unavailable-note {
+      font-size: 0.8em;
+      color: var(--secondary-text-color);
+      margin-bottom: 8px;
+    }
+    .intensity-row {
+      margin-bottom: 14px;
+    }
+    .intensity-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85em;
+      color: var(--secondary-text-color);
+      margin-bottom: 4px;
+    }
+    .intensity-row input[type="range"] {
+      width: 100%;
+      accent-color: var(--primary-color);
     }
   `;
 }

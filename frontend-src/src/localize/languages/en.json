@@ -25,6 +25,10 @@
     "speed_not_reliable": "speed (flow reading not reliable on this device)",
     "no_flow_data": "No flow or speed data available.",
     "currently_running": "Currently running",
-    "edit_schedule": "Edit schedule"
+    "edit_schedule": "Edit schedule",
+    "is_unavailable": "is unavailable.",
+    "are_unavailable": "are unavailable.",
+    "no_channel_data": "No channel data available -- every light in this group is currently unavailable.",
+    "overall_intensity": "Overall intensity"
   }
 }

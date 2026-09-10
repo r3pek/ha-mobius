@@ -50,8 +50,20 @@ const LIGHT_GROUP = {
   scene_entity_id: "select.reef_tank_scene_selection",
   schedule_intensity: 0.75,
   members: [
-    { device_id: LIGHT_DEVICE_ID, serial: "SN1", name: "Left Radion" },
-    { device_id: OTHER_LIGHT_DEVICE_ID, serial: "SN2", name: "Right Radion" },
+    {
+      device_id: LIGHT_DEVICE_ID,
+      serial: "SN1",
+      name: "Left Radion",
+      channel_entity_ids: { RoyalBlue: "sensor.left_royalblue", Violet: "sensor.left_violet" },
+      schedule_intensity_entity_id: "sensor.left_schedule_intensity",
+    },
+    {
+      device_id: OTHER_LIGHT_DEVICE_ID,
+      serial: "SN2",
+      name: "Right Radion",
+      channel_entity_ids: { RoyalBlue: "sensor.right_royalblue", Violet: "sensor.right_violet" },
+      schedule_intensity_entity_id: "sensor.right_schedule_intensity",
+    },
   ],
 };
 
@@ -244,6 +256,13 @@ function makePumpHass(states) {
   });
 }
 
+function makeLightHass(states) {
+  return makeHass({
+    devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    states,
+  });
+}
+
 async function settled(el) {
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 0));
@@ -357,4 +376,139 @@ test("scene banner is hidden when the scene entity itself is missing", async () 
   await settled(el);
 
   assert.equal(el.shadowRoot.querySelector(".scene-banner"), null);
+});
+
+// --------------------------------------------------------------------------
+// Light glance view -- sensor fallback and overall intensity slider
+// --------------------------------------------------------------------------
+
+test("light glance shows no unavailable-note when both members are online", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.right_royalblue": { state: "60", attributes: {} },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".unavailable-note"), null);
+});
+
+test("light glance names exactly one unavailable member (singular wording)", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "unavailable", attributes: {} },
+    "sensor.right_royalblue": { state: "60", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Left Radion"));
+  assert.ok(text.includes("is unavailable"));
+  assert.ok(!text.includes("Right Radion is unavailable"));
+});
+
+test("light glance names both unavailable members with 'and' (plural wording)", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "unavailable", attributes: {} },
+    "sensor.right_royalblue": { state: "unavailable", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Left Radion and Right Radion"));
+  assert.ok(text.includes("are unavailable"));
+});
+
+test("light glance shows a clear message when every member is unavailable", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "unavailable", attributes: {} },
+    "sensor.right_royalblue": { state: "unavailable", attributes: {} },
+  });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("No channel data available"));
+});
+
+test("light glance shows the live overall intensity percentage", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": { state: "59", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Overall intensity"));
+  assert.ok(text.includes("59%"));
+});
+
+test("light glance has an edit button", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector(".edit-button"));
+});
+
+test("dragging the intensity slider updates the displayed value immediately, before the debounced write", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": { state: "50", attributes: {} },
+  });
+  const calls = [];
+  hass.callService = async (domain, service, data) => {
+    calls.push({ domain, service, data });
+  };
+  el.hass = hass;
+  await settled(el);
+
+  const slider = el.shadowRoot.querySelector('input[type="range"]');
+  slider.value = "75";
+  slider.dispatchEvent(new window.Event("input"));
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.textContent.includes("75%"));
+  assert.equal(calls.length, 0, "service must not be called yet -- still within the debounce window");
+});
+
+test("the debounced write eventually calls mobius.set_schedule_intensity with the right device_id and value", async (t) => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": { state: "50", attributes: {} },
+  });
+  const calls = [];
+  hass.callService = async (domain, service, data) => {
+    calls.push({ domain, service, data });
+  };
+  el.hass = hass;
+  await settled(el);
+
+  // Only enabled AFTER the card's own initial resolution has already
+  // settled using real timers -- settled() itself relies on a real
+  // setTimeout(0) internally, which would otherwise also get mocked
+  // and never fire on its own.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const slider = el.shadowRoot.querySelector('input[type="range"]');
+  slider.value = "75";
+  slider.dispatchEvent(new window.Event("input"));
+
+  t.mock.timers.tick(1200);
+  // Microtask-based waiting here, not settled()'s own setTimeout(0) --
+  // that would itself be mocked at this point in the test, and never
+  // fire without yet another manual tick().
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    domain: "mobius",
+    service: "set_schedule_intensity",
+    data: { device_id: LIGHT_DEVICE_ID, intensity: 75 },
+  });
 });
