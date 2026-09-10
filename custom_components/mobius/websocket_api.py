@@ -25,6 +25,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from mobius import (
     PumpMode, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
     light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
+    supported_pump_modes,
 )
 
 from . import MobiusRuntimeData
@@ -33,10 +34,13 @@ from .coordinator import MobiusDeviceCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Every PumpMode this integration is prepared to expose as a schedule
-# editor option -- mirrors PUMP_MODE_PARAMS in python-mobius's own
-# constants.py (every mode with at least one param defined there,
-# i.e. every real mode other than the Undefined(0) placeholder).
+# Every real PumpMode -- mirrors PUMP_MODE_PARAMS in python-mobius's own
+# constants.py (every mode with at least one param defined there, i.e.
+# every real mode other than the Undefined(0) placeholder). Not used
+# directly for a group's own `modes` field any more -- see
+# supported_pump_modes() below, which filters this down per pump. Kept
+# as a reference constant (validated in test_websocket_api.py) that
+# the full set itself hasn't drifted from what PumpMode actually defines.
 PUMP_MODE_NAMES = [m.name for m in PumpMode if m != PumpMode.Undefined]
 
 
@@ -332,8 +336,13 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         ))
 
     for serial, coordinator in pump_singles:
+        primitive_name = (coordinator.data or {}).get("primitive_type")
+        primitive = PrimitiveType[primitive_name] if primitive_name else None
+        closed_loop = (coordinator.data or {}).get("closed_loop")
         groups.append(ScheduleGroup(
-            kind="pump", group_mask=None, modes=PUMP_MODE_NAMES, active_scene=active_scene,
+            kind="pump", group_mask=None,
+            modes=[m.name for m in supported_pump_modes(primitive, closed_loop)] if primitive else [],
+            active_scene=active_scene,
             scene_entity_id=scene_entity_id,
             members=[ScheduleGroupMember(
                 device_id=_member_device_id(hass, entry_id, serial) or "",

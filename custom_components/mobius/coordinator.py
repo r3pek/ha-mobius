@@ -684,6 +684,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # first successful poll, and never re-fetched after.
         self._primitive_type: Optional[PrimitiveType] = None
         self._model: Optional[Model] = None
+        # VectraV1-only, and only meaningful once primitive_type is
+        # actually known as VectraV1 -- see this coordinator's own
+        # _fetch() for where it's populated. A real settings-screen
+        # toggle (see VectraInfo's own docstring), not immutable
+        # hardware fact the way primitive_type/model are -- but still
+        # cached the same way, once, rather than re-fetched every poll:
+        # get_vectra_info() costs three separate protocol round-trips
+        # (PowerOnDelay/ClosedLoop/FeedModeReturnDelay aren't a single
+        # batched read), a real ongoing cost for a value that changes
+        # about as rarely as primitive_type/model do in practice. A
+        # genuine change on real hardware is picked up the same way a
+        # primitive_type/model change would be -- an integration
+        # reload, which re-runs this __init__.
+        self._closed_loop: Optional[bool] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -942,6 +956,16 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._record_batch_result(used_batch)
                 self.registry.record_relay_success(self.pan_id, self.serial)
+
+            if self._primitive_type == PrimitiveType.VectraV1 and self._closed_loop is None:
+                # get_vectra_info() already fails soft to None internally
+                # (unsupported attribute, connection hiccup, etc.) -- no
+                # extra try/except needed here beyond the one already
+                # wrapping this whole block.
+                vectra_info = await device.get_vectra_info()
+                if vectra_info is not None:
+                    self._closed_loop = vectra_info.closed_loop
+            data["closed_loop"] = self._closed_loop
         except Exception as err:
             _LOGGER.debug(
                 "%s poll (%s) failed: %s", self.serial,

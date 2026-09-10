@@ -26,12 +26,13 @@ from custom_components.mobius.coordinator import (
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID, VectraInfo
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
 PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
 LIGHT_SERIAL = "FAKESERIAL0001"
+VECTRA_SERIAL = "00000000000002"
 PAN_ID = 0x3D0F
 
 # Payload shaped after a real captured advertisement for this pump (see
@@ -100,6 +101,54 @@ def _make_fake_pump_device():
         light_poll=None,
         pump_telemetry={"speed": 447, "speed_percent": 44.7, "gph": 2272},
         pump_schedule_points=[fake_point] * 11,
+    ))
+    return device
+
+
+def _make_fake_vectra_device(closed_loop=True, vectra_info_available=True):
+    """Otherwise identical to _make_fake_pump_device() -- VectraV1
+    identity, plus a mockable get_vectra_info() (which the plain pump
+    fixture above deliberately leaves unmocked, since its own
+    VorTechV1 identity never triggers a call to it at all)."""
+    device = MagicMock()
+    device.get_device_info = AsyncMock(return_value={
+        "model_raw": 149, "model": "VectraL2", "manufacturer": "EcoTech Marine",
+        "name": "Vectra L2", "serial": VECTRA_SERIAL,
+        "primitive_type": "VectraV1", "error_state": "NoError", "mac_address": None,
+    })
+    device.get_pump_telemetry = AsyncMock(return_value={"speed": 300, "speed_percent": 30.0, "gph": None})
+    device.get_operation_state = AsyncMock()
+    device.get_operation_state.return_value.name = "Schedule"
+    device.identify_device_type = AsyncMock(return_value=PrimitiveType.VectraV1)
+    device.get_vectra_info = AsyncMock(
+        return_value=VectraInfo(power_on_delay=5, closed_loop=closed_loop, feed_mode_return_delay=10)
+        if vectra_info_available else None
+    )
+
+    fake_point = MagicMock()
+    fake_point.pump.mode.name = "ConstantSpeed"
+    fake_point.pump.params = {}
+    device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 5)
+    device.get_current_pump_block = AsyncMock(return_value=fake_point)
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None,
+        hardware_info={}, firmware_versions={},
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
+    device.get_full_poll_batch = AsyncMock(return_value=FullPollResult(
+        device_info={
+            "model_raw": 149, "model": "VectraL2", "manufacturer": "EcoTech Marine",
+            "name": "Vectra L2", "serial": VECTRA_SERIAL,
+            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+        },
+        metadata=MetadataSnapshot(
+            advanced_features=None, calibration=None,
+            hardware_info={}, firmware_versions={},
+            supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+        ),
+        light_poll=None,
+        pump_telemetry={"speed": 300, "speed_percent": 30.0, "gph": None},
+        pump_schedule_points=[fake_point] * 5,
     ))
     return device
 
@@ -784,6 +833,101 @@ class TestFullPollBatchWiring:
             which=1, minute_of_day=ANY, now=ANY,
             supported_attribute_ids=ANY, force_individual_reads=False,
         )
+
+
+
+class TestVectraClosedLoopCaching:
+    """closed_loop only matters for VectraV1 -- see coordinator.py's own
+    comment on self._closed_loop for why it's cached once (like
+    primitive_type/model) rather than re-fetched every poll."""
+
+    async def test_vectra_pump_gets_closed_loop_fetched_and_cached(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
+        assert coordinator._closed_loop is None
+
+        fake_device = _make_fake_vectra_device(closed_loop=True)
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        fake_device.get_vectra_info.assert_awaited_once()
+        assert coordinator._closed_loop is True
+        assert coordinator.data["closed_loop"] is True
+
+    async def test_closed_loop_false_is_cached_and_reported_correctly(self, hass):
+        # Specifically NOT the same as "unknown" -- a real, confirmed
+        # False must survive being stored and read back, not collapse
+        # to the same thing an unfetched/failed value would produce.
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_vectra_device(closed_loop=False)
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator._closed_loop is False
+        assert coordinator.data["closed_loop"] is False
+
+    async def test_second_poll_does_not_refetch_closed_loop(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_vectra_device(closed_loop=True)
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll -- fetches and caches
+            await coordinator.async_refresh()  # second poll -- must NOT re-fetch
+
+        # The actual point: only ONE get_vectra_info() call across BOTH
+        # polls -- three separate protocol round-trips each time this
+        # is called, a real ongoing cost this caching exists to avoid.
+        fake_device.get_vectra_info.assert_awaited_once()
+        assert coordinator.data["closed_loop"] is True
+
+    async def test_non_vectra_pump_never_calls_get_vectra_info(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()  # VorTechV1, not Vectra
+        fake_device.get_vectra_info = AsyncMock(
+            side_effect=AssertionError("get_vectra_info() should never be called for a non-Vectra pump")
+        )
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator.data["closed_loop"] is None
+
+    async def test_vectra_info_unavailable_fails_soft_to_none(self, hass):
+        # get_vectra_info() itself already returns None on failure
+        # (unsupported attribute, connection hiccup) -- this confirms
+        # the coordinator doesn't crash or wedge when that happens,
+        # and simply leaves closed_loop at its own default.
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_vectra_device(vectra_info_available=False)
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.last_update_success
+        assert coordinator._closed_loop is None
+        assert coordinator.data["closed_loop"] is None
 
 
 

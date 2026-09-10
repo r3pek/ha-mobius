@@ -13,6 +13,7 @@ device entry per serial, and MobiusDeviceCoordinator instances with
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,7 +34,7 @@ from custom_components.mobius.websocket_api import (
 )
 from mobius import (
     SchedulePoint, LightPrimitive, VisualID, PumpSchedulePoint, PumpPrimitiveValue, PumpMode, PumpParam,
-    ActiveScene, Scene, SceneID, PrimitiveType,
+    ActiveScene, Scene, SceneID, PrimitiveType, supported_pump_modes,
     light_schedule_to_mob, pump_schedule_to_mob,
 )
 
@@ -89,7 +90,10 @@ def _light_data(name: str, group_mask, channels=None) -> dict:
 
 
 def _pump_data(name: str) -> dict:
-    return {"support": "pump", "name": name, "model": "VorTechMP40wG3QD"}
+    return {
+        "support": "pump", "name": name, "model": "VorTechMP40wG3QD",
+        "primitive_type": "VorTechV1",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -272,11 +276,74 @@ async def test_pump_group_dict_has_no_schedule_intensity_key(hass):
 
 
 async def test_pump_group_includes_modes(hass):
+    """_pump_data()'s own fixture uses VorTechV1 -- modes must be
+    filtered to what THAT primitive type actually supports, not the
+    full PUMP_MODE_NAMES list (which nothing in production code uses
+    for a group's own `modes` field any more -- see
+    supported_pump_modes())."""
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
     groups = _resolve_tank_groups(hass, tank_device_id)
-    assert groups[0].modes == PUMP_MODE_NAMES
-    assert groups[0].as_dict()["modes"] == PUMP_MODE_NAMES
+    expected = [m.name for m in supported_pump_modes(PrimitiveType.VorTechV1)]
+    assert groups[0].modes == expected
+    assert groups[0].as_dict()["modes"] == expected
+    assert len(expected) < len(PUMP_MODE_NAMES), "sanity check: VorTechV1 must NOT support every real mode"
     assert "channels" not in groups[0].as_dict()
+
+
+async def test_vectra_pump_group_reflects_closed_loop_true(hass):
+    vectra_data = _pump_data("Vectra L2")
+    vectra_data["primitive_type"] = "VectraV1"
+    vectra_data["closed_loop"] = True
+    entry, tank_device_id = _setup_tank(hass, {"SN1": vectra_data})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    assert groups[0].modes == [m.name for m in supported_pump_modes(PrimitiveType.VectraV1, closed_loop=True)]
+    assert "Gyre" in groups[0].modes  # only offered in the closed-loop list
+
+
+async def test_vectra_pump_group_reflects_closed_loop_false(hass):
+    vectra_data = _pump_data("Vectra L2")
+    vectra_data["primitive_type"] = "VectraV1"
+    vectra_data["closed_loop"] = False
+    entry, tank_device_id = _setup_tank(hass, {"SN1": vectra_data})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    assert groups[0].modes == [m.name for m in supported_pump_modes(PrimitiveType.VectraV1, closed_loop=False)]
+    assert groups[0].modes == ["ConstantSpeed", "Feed"]
+
+
+async def test_vectra_pump_group_with_unknown_closed_loop_gets_the_smaller_list(hass):
+    """closed_loop absent entirely (get_vectra_info() itself failed,
+    or hasn't resolved yet) -- must behave the same as a confirmed
+    False, not as "unknown, so allow everything.\""""
+    vectra_data = _pump_data("Vectra L2")
+    vectra_data["primitive_type"] = "VectraV1"
+    entry, tank_device_id = _setup_tank(hass, {"SN1": vectra_data})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    assert groups[0].modes == ["ConstantSpeed", "Feed"]
+
+
+async def test_pump_group_modes_are_genuinely_json_serializable(hass):
+    """supported_pump_modes() itself returns PumpMode enum members, not
+    strings -- as_dict()'s own modes field must convert these, since
+    an enum member isn't JSON-serializable at all and this crosses a
+    real websocket boundary. Checks actual json.dumps() output, not
+    just that the values happen to look like strings."""
+    vectra_data = _pump_data("Vectra L2")
+    vectra_data["primitive_type"] = "VectraV1"
+    vectra_data["closed_loop"] = True
+    entry, tank_device_id = _setup_tank(hass, {"SN1": vectra_data})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    serialized = json.dumps(groups[0].as_dict())
+    modes = json.loads(serialized)["modes"]
+    assert modes == ["ConstantSpeed", "ReefCrest", "Lagoon", "Gyre", "Feed"]
+    assert all(isinstance(m, str) for m in modes)
 
 
 def test_pump_mode_names_matches_every_real_mode_python_mobius_defines():

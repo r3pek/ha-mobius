@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A pump's own schedule group now reports only the modes that pump
+  actually supports, instead of every possible mode.
+
 - Added backend support for a future schedule editor card: a
   mobius/resolve_schedule_groups and mobius/read_schedule_group
   websocket command, and a mobius.write_schedule_group service that
