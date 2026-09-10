@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
 import { localize } from "./localize/localize";
+import { formatDuration } from "./format";
 
 /**
  * mobius-schedule-card
@@ -48,6 +49,7 @@ interface ScheduleGroupMember {
   schedule_intensity_entity_id?: string | null;
   speed_entity_id?: string | null;
   flow_entity_id?: string | null;
+  mode_entity_id?: string | null;
 }
 
 interface ScheduleGroup {
@@ -149,6 +151,78 @@ export class MobiusScheduleCard extends LitElement {
     }
   }
 
+  // Reads live, not the group's own active_scene snapshot (only
+  // current as of whenever resolve_schedule_groups last ran) --
+  // scene_entity_id is tank-wide structural metadata that rarely
+  // changes, but which scene is active and how long it has left
+  // change constantly, and hass updates reactively on every real
+  // entity state change, unlike a resolve_schedule_groups snapshot.
+  private _renderSceneBanner() {
+    const entityId = this._group?.scene_entity_id;
+    if (!entityId) return nothing;
+    const stateObj = this.hass.states[entityId];
+    if (!stateObj || stateObj.state === "None" || stateObj.state === "unavailable") return nothing;
+
+    const duration = stateObj.attributes.duration_remaining_seconds as number | undefined;
+    return html`
+      <div class="scene-banner">
+        <ha-icon icon="mdi:auto-mode"></ha-icon>
+        <span>
+          <strong>${stateObj.state}</strong> ${localize("schedule_card.scene_running_instead")}
+          ${duration != null ? html`(${formatDuration(duration)} ${localize("schedule_card.remaining_suffix")})` : nothing}
+        </span>
+      </div>
+    `;
+  }
+
+  private _renderPumpGlance() {
+    const group = this._group!;
+    const member = group.members[0];
+    const flowState = member.flow_entity_id ? this.hass.states[member.flow_entity_id] : undefined;
+    const speedState = member.speed_entity_id ? this.hass.states[member.speed_entity_id] : undefined;
+    const modeState = member.mode_entity_id ? this.hass.states[member.mode_entity_id] : undefined;
+
+    const flowAvailable = flowState && flowState.state !== "unavailable" && flowState.state !== "unknown";
+    const speedAvailable = speedState && speedState.state !== "unavailable" && speedState.state !== "unknown";
+
+    return html`
+      <ha-card>
+        <div class="header">
+          <div class="title">${localize("schedule_card.pump_title")}</div>
+          <div class="subtitle">${member.name}</div>
+        </div>
+        ${this._renderSceneBanner()}
+        ${
+          flowAvailable
+            ? html`
+                <div class="reading">
+                  <span class="reading-value">${flowState!.state}</span>
+                  <span class="reading-unit">${flowState!.attributes.unit_of_measurement || "L/h"}</span>
+                </div>
+              `
+            : speedAvailable
+              ? html`
+                  <div class="reading">
+                    <span class="reading-value">${speedState!.state}%</span>
+                    <span class="reading-unit">${localize("schedule_card.speed_not_reliable")}</span>
+                  </div>
+                `
+              : html`<div class="reading-missing">${localize("schedule_card.no_flow_data")}</div>`
+        }
+        ${
+          modeState
+            ? html`
+                <div class="current-mode">
+                  ${localize("schedule_card.currently_running")} <strong>${modeState.state}</strong>
+                </div>
+              `
+            : nothing
+        }
+        <button class="edit-button">${localize("schedule_card.edit_schedule")}</button>
+      </ha-card>
+    `;
+  }
+
   protected render() {
     if (!this._config) return nothing;
 
@@ -168,14 +242,16 @@ export class MobiusScheduleCard extends LitElement {
       `;
     }
 
-    // Real glance/edit rendering for both kinds lands in follow-up
-    // work -- this confirms the resolution pipeline itself end to
-    // end: device_id -> Tank -> resolve_schedule_groups -> the one
-    // matching group, with its real member/channel/mode data.
+    if (this._group.kind === "pump") {
+      return this._renderPumpGlance();
+    }
+
+    // Light glance/edit views, and the pump edit view, land in
+    // follow-up work.
     return html`
       <ha-card>
         <div class="header">
-          <div class="title">${this._group.kind === "light" ? "Light Schedule" : "Pump Schedule"}</div>
+          <div class="title">${localize("schedule_card.light_title")}</div>
           <div class="subtitle">${this._group.members.map((m) => m.name).join(" + ")}</div>
         </div>
       </ha-card>
@@ -197,6 +273,7 @@ export class MobiusScheduleCard extends LitElement {
     .subtitle {
       font-size: 0.9em;
       color: var(--secondary-text-color);
+      margin-bottom: 8px;
     }
     .warning {
       padding: 12px 0;
@@ -205,6 +282,62 @@ export class MobiusScheduleCard extends LitElement {
     .loading {
       padding: 12px 0;
       color: var(--secondary-text-color);
+    }
+    .scene-banner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.08);
+      font-size: 0.85em;
+      color: var(--primary-text-color);
+      margin-bottom: 12px;
+    }
+    .scene-banner ha-icon {
+      color: var(--primary-color);
+      --mdc-icon-size: 18px;
+      flex-shrink: 0;
+    }
+    .reading {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 4px 0 6px 0;
+    }
+    .reading-value {
+      font-size: 2.2em;
+      font-weight: 300;
+      color: var(--primary-text-color);
+    }
+    .reading-unit {
+      font-size: 0.85em;
+      color: var(--secondary-text-color);
+    }
+    .reading-missing {
+      padding: 12px 0;
+      color: var(--secondary-text-color);
+      font-size: 0.9em;
+    }
+    .current-mode {
+      font-size: 0.85em;
+      color: var(--secondary-text-color);
+      margin-bottom: 14px;
+    }
+    .edit-button {
+      width: 100%;
+      background: var(--secondary-background-color, rgba(0, 0, 0, 0.05));
+      border: 1px solid var(--divider-color);
+      border-radius: 10px;
+      padding: 10px 0;
+      color: var(--primary-text-color);
+      font-family: inherit;
+      font-size: 0.9em;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .edit-button:hover {
+      border-color: var(--primary-color);
     }
   `;
 }

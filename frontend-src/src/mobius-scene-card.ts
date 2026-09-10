@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
 import { localize } from "./localize/localize";
+import { formatDuration } from "./format";
 
 /**
  * mobius-scene-card
@@ -55,12 +56,6 @@ function iconFor(name: string): string {
     if (lower.includes(needle)) return icon;
   }
   return PLACEHOLDER_ICON;
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 @customElement("mobius-scene-card")

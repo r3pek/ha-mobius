@@ -32,8 +32,14 @@ const SRC_DIR = join(HERE, "src");
 // developer-facing concern that never ships anywhere.
 const DIST_DIR = join(HERE, "..", "custom_components", "mobius", "frontend", "dist");
 
+// Only files matching this naming convention are real, standalone
+// cards (each defines and registers its own custom element) --
+// anything else directly in src/ (format.ts, localize/) is a shared
+// module, already bundled directly into whichever card(s) import it.
+// Building it again as its own separate, unregistered output file
+// would just be dead weight in dist/ that serves no purpose.
 const entryPoints = readdirSync(SRC_DIR)
-  .filter((f) => f.endsWith(".js") || f.endsWith(".ts"))
+  .filter((f) => /^mobius-.*-card\.(js|ts)$/.test(f))
   .map((f) => join(SRC_DIR, f));
 
 if (entryPoints.length === 0) {

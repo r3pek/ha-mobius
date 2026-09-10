@@ -61,13 +61,22 @@ const PUMP_GROUP = {
   modes: ["ConstantSpeed", "Lagoon"],
   active_scene: null,
   scene_entity_id: "select.reef_tank_scene_selection",
-  members: [{ device_id: PUMP_DEVICE_ID, serial: "SN3", name: "Return Pump" }],
+  members: [
+    {
+      device_id: PUMP_DEVICE_ID,
+      serial: "SN3",
+      name: "Return Pump",
+      flow_entity_id: "sensor.pump_flow",
+      speed_entity_id: "sensor.pump_speed",
+      mode_entity_id: "sensor.pump_mode",
+    },
+  ],
 };
 
-function makeHass({ devices, wsResponse, wsError } = {}) {
+function makeHass({ devices, wsResponse, wsError, states } = {}) {
   return {
     devices: devices ?? { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
-    states: {},
+    states: states ?? {},
     callWS: async (msg) => {
       if (wsError) throw wsError;
       if (msg.type === "mobius/resolve_schedule_groups") {
@@ -222,4 +231,111 @@ test("re-resolves when the configured device_id itself changes", async () => {
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
   assert.ok(el.shadowRoot.textContent.includes("Pump Schedule"));
+});
+
+// --------------------------------------------------------------------------
+// Pump glance view
+// --------------------------------------------------------------------------
+
+function makePumpHass(states) {
+  return makeHass({
+    devices: { [PUMP_DEVICE_ID]: { id: PUMP_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    states,
+  });
+}
+
+async function settled(el) {
+  await el.updateComplete;
+  await new Promise((r) => setTimeout(r, 0));
+  await el.updateComplete;
+}
+
+test("pump glance shows flow in L/h when the flow sensor is reliable", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "412", attributes: { unit_of_measurement: "L/h" } },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("412"));
+  assert.ok(text.includes("L/h"));
+});
+
+test("pump glance falls back to speed % when the flow sensor is unavailable", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "unavailable", attributes: {} },
+    "sensor.pump_speed": { state: "58", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("58%"));
+  assert.ok(text.includes("not reliable"));
+});
+
+test("pump glance shows a clear message when neither flow nor speed is available", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({});
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("No flow or speed data"));
+});
+
+test("pump glance shows the current mode when available", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: {} },
+    "sensor.pump_mode": { state: "TidalSwell", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Currently running"));
+  assert.ok(text.includes("TidalSwell"));
+});
+
+test("pump glance has an edit button", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector(".edit-button"));
+});
+
+test("scene banner shows the active scene and its remaining time", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: {} },
+    "select.reef_tank_scene_selection": {
+      state: "Feeding",
+      attributes: { duration_remaining_seconds: 125 },
+    },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("Feeding"));
+  assert.ok(text.includes("2:05"));
+  assert.ok(text.includes("remaining"));
+});
+
+test("scene banner is hidden when no scene is active (state is None)", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: {} },
+    "select.reef_tank_scene_selection": { state: "None", attributes: {} },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".scene-banner"), null);
+});
+
+test("scene banner is hidden when the scene entity itself is missing", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".scene-banner"), null);
 });

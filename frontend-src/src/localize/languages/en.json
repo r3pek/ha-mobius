@@ -17,6 +17,14 @@
     "loading": "Loading…",
     "device_not_found": "This device could not be found.",
     "no_tank_found": "This device isn't linked to a Mobius tank.",
-    "group_not_found": "Couldn't find this device's own schedule group."
+    "group_not_found": "Couldn't find this device's own schedule group.",
+    "light_title": "Light Schedule",
+    "pump_title": "Pump Schedule",
+    "scene_running_instead": "is running instead of the schedule",
+    "remaining_suffix": "remaining",
+    "speed_not_reliable": "speed (flow reading not reliable on this device)",
+    "no_flow_data": "No flow or speed data available.",
+    "currently_running": "Currently running",
+    "edit_schedule": "Edit schedule"
   }
 }
