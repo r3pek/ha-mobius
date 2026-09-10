@@ -83,9 +83,9 @@ class JSModuleRegistration:
             raise RuntimeError("http component could not be set up")
         try:
             await self.hass.http.async_register_static_paths(
-                [StaticPathConfig(URL_BASE, str(Path(__file__).parent), False)]
+                [StaticPathConfig(URL_BASE, str(Path(__file__).parent / "dist"), False)]
             )
-            _LOGGER.debug("Path registered: %s -> %s", URL_BASE, Path(__file__).parent)
+            _LOGGER.debug("Path registered: %s -> %s", URL_BASE, Path(__file__).parent / "dist")
         except RuntimeError:
             # Already registered -- happens on integration reload
             # within the same running HA instance, not an error.

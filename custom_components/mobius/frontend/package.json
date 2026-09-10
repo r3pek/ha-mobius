@@ -1,0 +1,18 @@
+{
+  "name": "mobius-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build tooling for the Mobius integration's own Lovelace cards. src/ is the only thing to edit by hand -- dist/ is a generated build artifact, produced by `npm run build`, and both must be committed together (dist/ is what frontend/__init__.py actually serves; src/ is never served directly).",
+  "scripts": {
+    "build": "node build.mjs",
+    "verify": "node build.mjs --verify",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lit": "^2.8.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "jsdom": "^30.0.1"
+  }
+}
