@@ -47,9 +47,37 @@ jobs:
         if: github.event_name == 'push'
         run: python3 .forgejo/scripts/extract_changelog_section.py "${{ github.ref_name }}"
 
+      # Builds the Lovelace card(s) from frontend-src/ into
+      # custom_components/mobius/frontend/dist/ BEFORE the zip step
+      # below -- that directory is deliberately never committed to
+      # git (see frontend-src/README.md for the full reasoning); this
+      # is the one and only place it's ever produced, fresh, from
+      # whatever frontend-src/src/ is at this exact tag. Since
+      # zip_release:true means HACS installs from this zip asset, not
+      # the raw git tree, this step existing at all is what makes the
+      # card actually reach a real install -- skipping it would ship
+      # a build with no frontend/dist/ directory whatsoever.
+      - name: Set up Node.js
+        if: github.event_name == 'push'
+        uses: https://code.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend-src/package-lock.json
+
+      - name: Build Lovelace card(s)
+        if: github.event_name == 'push'
+        working-directory: frontend-src
+        run: |
+          npm ci
+          npm run build
+
       # Zips the CONTENTS of custom_components/mobius (not the folder
-      # itself) for anyone installing manually instead of via HACS,
-      # which installs from the tagged source directly either way.
+      # itself) -- with zip_release:true (see this repo's own
+      # hacs.json), this IS what HACS itself actually installs, not
+      # just a fallback for manual installs. frontend-src/ is never
+      # included here (nor tracked in custom_components/mobius/ at
+      # all) -- only the dist/ output the step above just built.
       - name: Build release zip
         if: github.event_name == 'push'
         run: |

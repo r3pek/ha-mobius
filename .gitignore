@@ -2,3 +2,10 @@ __pycache__/
 *.py[cod]
 .DS_Store
 *.egg-info/
+
+# Built by frontend-src/'s own `npm run build`, from frontend-src/src/ --
+# never committed. Produced fresh at release time (see
+# .forgejo/workflows/release.yml) and baked into the release zip HACS
+# actually installs from (zip_release:true, see hacs.json) -- see
+# frontend-src/README.md for the full reasoning.
+custom_components/mobius/frontend/dist/

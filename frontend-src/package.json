@@ -2,11 +2,10 @@
   "name": "mobius-frontend",
   "private": true,
   "version": "1.0.0",
-  "description": "Build tooling for the Mobius integration's own Lovelace cards. src/ is the only thing to edit by hand -- dist/ is a generated build artifact, produced by `npm run build`, and both must be committed together (dist/ is what frontend/__init__.py actually serves; src/ is never served directly).",
+  "description": "Build tooling for the Mobius integration's own Lovelace cards. src/ is the only thing to edit by hand -- dist/ (under ../custom_components/mobius/frontend/) is a generated build artifact, produced by `npm run build`, and is never committed to git at all: it's built fresh at release time (see .forgejo/workflows/release.yml) and baked into the release zip HACS actually installs from.",
   "scripts": {
     "build": "node build.mjs",
-    "verify": "node build.mjs --verify",
-    "test": "node --test"
+    "test": "npm run build && node --test"
   },
   "dependencies": {
     "lit": "^2.8.0"
