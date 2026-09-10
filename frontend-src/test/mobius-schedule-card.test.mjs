@@ -70,7 +70,13 @@ const LIGHT_GROUP = {
 const PUMP_GROUP = {
   kind: "pump",
   group_mask: null,
-  modes: ["ConstantSpeed", "Lagoon"],
+  modes: ["ConstantSpeed", "Lagoon", "Sync", "EcoSmartBack"],
+  mode_params: {
+    ConstantSpeed: ["MaxSpeed"],
+    Lagoon: ["MaxSpeed"],
+    Sync: ["MaxSpeed", "PhaseShift", "Master"],
+    EcoSmartBack: ["MaxSpeed", "PhaseShift", "Master"],
+  },
   active_scene: null,
   scene_entity_id: "select.reef_tank_scene_selection",
   members: [
@@ -945,4 +951,165 @@ test("edit view can still navigate back after a failed fetch", async () => {
   await el.updateComplete;
 
   assert.ok(el.shadowRoot.querySelector(".edit-button"));
+});
+
+// --------------------------------------------------------------------------
+// Point editing
+// --------------------------------------------------------------------------
+
+async function openEditWithPoints(points) {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } }, { scheduleResponse: { points } });
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  return el;
+}
+
+test("clicking a point row opens an edit form pre-filled with its own values", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 90, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const form = el.shadowRoot.querySelector(".point-edit-form");
+  assert.ok(form);
+  assert.equal(el.shadowRoot.querySelector('input[type="time"]').value, "01:30");
+  assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "ConstantSpeed");
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "300");
+});
+
+test("switching mode updates which param fields are shown", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  assert.equal(el.shadowRoot.querySelectorAll(".param-label").length, 1);
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "Sync";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  const paramLabels = [...el.shadowRoot.querySelectorAll(".param-label")].map((l) => l.textContent);
+  assert.equal(paramLabels.length, 3);
+  assert.ok(paramLabels.some((t) => t.includes("MaxSpeed")));
+  assert.ok(paramLabels.some((t) => t.includes("PhaseShift")));
+  assert.ok(paramLabels.some((t) => t.includes("Parent pump serial")));
+});
+
+test("switching mode carries over a shared param's own value", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 450 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "Lagoon"; // also just [MaxSpeed]
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "450");
+});
+
+test("Sync and EcoSmartBack show the identical set of param fields", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 180, Master: "aabbccdd" } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  const syncLabels = [...el.shadowRoot.querySelectorAll(".param-label")].map((l) => l.textContent.trim());
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "EcoSmartBack";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  const ecoLabels = [...el.shadowRoot.querySelectorAll(".param-label")].map((l) => l.textContent.trim());
+
+  assert.deepEqual(syncLabels, ecoLabels);
+});
+
+test("RampType renders as a dropdown with the three real values", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+
+  // Transition isn't in this group's own modes list in this test, so
+  // exercise the RampType rendering path directly via the working
+  // point instead of relying on a mode switch that may not be offered.
+  el._workingPoint = { ...el._workingPoint, mode: "Transition", params: { RampType: "Linear" } };
+  el._group = { ...el._group, mode_params: { ...el._group.mode_params, Transition: ["RampType"] } };
+  await el.updateComplete;
+
+  const select = el.shadowRoot.querySelector(".param-label select");
+  assert.ok(select);
+  const options = [...select.querySelectorAll("option")].map((o) => o.value);
+  assert.deepEqual(options, ["Sinusoidal", "Logarithmic", "Linear"]);
+  assert.equal(select.value, "Linear");
+  void modeSelect;
+});
+
+test("editing a param and saving updates the point list", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const input = el.shadowRoot.querySelector(".param-label input");
+  input.value = "500";
+  input.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".point-edit-form"), null);
+  assert.ok(el.shadowRoot.querySelector(".point-row").textContent.includes("ConstantSpeed"));
+});
+
+test("cancel discards changes and leaves the original point untouched", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = "Lagoon";
+  modeSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".point-edit-form"), null);
+  assert.ok(el.shadowRoot.querySelector(".point-row").textContent.includes("ConstantSpeed"));
+  assert.ok(!el.shadowRoot.querySelector(".point-row").textContent.includes("Lagoon"));
+});
+
+test("period dropdown edits the point's own flags correctly", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const periodSelect = el.shadowRoot.querySelectorAll(".edit-row select")[0];
+  periodSelect.value = "sunset";
+  periodSelect.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].flags, 11);
+  assert.ok(el.shadowRoot.querySelector(".point-row").textContent.includes("Sunset"));
 });

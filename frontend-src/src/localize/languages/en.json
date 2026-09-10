@@ -36,6 +36,12 @@
     "period_day": "Day",
     "period_night": "Night",
     "period_sunrise": "Sunrise",
-    "period_sunset": "Sunset"
+    "period_sunset": "Sunset",
+    "time": "Time",
+    "period": "Period",
+    "mode": "Mode",
+    "cancel": "Cancel",
+    "save": "Save",
+    "parent_pump_serial": "Parent pump serial"
   }
 }

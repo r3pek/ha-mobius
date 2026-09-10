@@ -124,6 +124,7 @@ interface ScheduleGroup {
   members: ScheduleGroupMember[];
   channels?: string[];
   modes?: string[];
+  mode_params?: Record<string, string[]>;
   active_scene: { name: string; duration_seconds: number } | null;
   scene_entity_id: string | null;
   schedule_intensity?: number | null;
@@ -192,6 +193,16 @@ function formatMinutes(minutes: number): string {
   return `${h}:${String(m).padStart(2, "0")}`;
 }
 
+// A fixed, universal enum (python-mobius's own RampType) -- unlike
+// PumpMode/channels, its own valid values don't vary by pump model,
+// so unlike those this doesn't need to come from the backend at all.
+const RAMP_TYPES = ["Sinusoidal", "Logarithmic", "Linear"];
+
+// The reverse of periodForFlags() -- ACTIVE(1) is always set on a
+// real point (a point without it is a padding entry, never something
+// a person edits), combined with the bits for the chosen period.
+const PERIOD_FLAGS: Record<Period, number> = { day: 1, night: 3, sunrise: 7, sunset: 11 };
+
 @customElement("mobius-schedule-card")
 export class MobiusScheduleCard extends LitElement {
   @property({ attribute: false }) public hass!: ExtendedHomeAssistant;
@@ -217,6 +228,14 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _scheduleLoading = false;
   @state() private _scheduleError?: string;
   @state() private _schedulePoints: PumpScheduleEntry[] = [];
+
+  // Which point (by index into _schedulePoints) is currently expanded
+  // for editing -- null when none is. _workingPoint is a separate,
+  // mutable copy of that point's own data, so edits in progress don't
+  // touch _schedulePoints (and thus don't affect the read-only list's
+  // own rendering) until Save is actually pressed.
+  @state() private _editingIndex: number | null = null;
+  @state() private _workingPoint?: PumpScheduleEntry;
 
   // Not @state -- this is a plain timer handle, not something that
   // should itself trigger a re-render when it changes.
@@ -376,6 +395,70 @@ export class MobiusScheduleCard extends LitElement {
 
   private _closeEdit(): void {
     this._view = "glance";
+    this._editingIndex = null;
+    this._workingPoint = undefined;
+  }
+
+  private _startEditingPoint(index: number): void {
+    this._editingIndex = index;
+    // A real clone, not a reference -- params is itself an object, and
+    // mutating it in place would leak edits-in-progress into
+    // _schedulePoints (and thus the read-only list) before Save.
+    const point = this._schedulePoints[index];
+    this._workingPoint = { ...point, params: { ...point.params } };
+  }
+
+  private _cancelEditingPoint(): void {
+    this._editingIndex = null;
+    this._workingPoint = undefined;
+  }
+
+  private _saveEditingPoint(): void {
+    if (this._editingIndex == null || !this._workingPoint) return;
+    const points = [...this._schedulePoints];
+    points[this._editingIndex] = this._workingPoint;
+    this._schedulePoints = points;
+    this._editingIndex = null;
+    this._workingPoint = undefined;
+  }
+
+  private _updateWorkingPointTime(minutes: number): void {
+    if (!this._workingPoint) return;
+    this._workingPoint = { ...this._workingPoint, time_minutes: minutes };
+  }
+
+  private _updateWorkingPointPeriod(period: Period): void {
+    if (!this._workingPoint) return;
+    this._workingPoint = { ...this._workingPoint, flags: PERIOD_FLAGS[period] };
+  }
+
+  private _updateWorkingPointMode(mode: string): void {
+    if (!this._workingPoint || !this._group) return;
+    const paramNames = this._group.mode_params?.[mode] ?? [];
+    // Values for params the new mode shares with the old one carry
+    // over (e.g. switching Lagoon -> ReefCrest keeps MaxSpeed); a
+    // param the new mode needs that the old one didn't have gets a
+    // sensible zero-ish default rather than being left undefined,
+    // since encode() (python-mobius) raises if a required param is
+    // ever missing at save time.
+    const params: Record<string, unknown> = {};
+    for (const name of paramNames) {
+      if (name in this._workingPoint.params) {
+        params[name] = this._workingPoint.params[name];
+      } else if (name === "RampType") {
+        params[name] = RAMP_TYPES[0];
+      } else if (name === "Master") {
+        params[name] = "";
+      } else {
+        params[name] = 0;
+      }
+    }
+    this._workingPoint = { ...this._workingPoint, mode, params };
+  }
+
+  private _updateWorkingPointParam(name: string, value: string | number): void {
+    if (!this._workingPoint) return;
+    this._workingPoint = { ...this._workingPoint, params: { ...this._workingPoint.params, [name]: value } };
   }
 
   private async _openEdit(): Promise<void> {
@@ -707,18 +790,115 @@ export class MobiusScheduleCard extends LitElement {
           <div class="title">${localize("schedule_card.edit_schedule")}</div>
         </div>
         <div class="point-list">
-          ${this._schedulePoints.map((point) => {
-            const period = periodForFlags(point.flags);
-            return html`
-              <div class="point-row">
-                <span class="point-time">${formatMinutes(point.time_minutes)}</span>
-                <span class="point-period period-${period}">${periodLabel(period)}</span>
-                <span class="point-mode">${point.mode}</span>
-              </div>
-            `;
-          })}
+          ${this._schedulePoints.map((point, index) =>
+            this._editingIndex === index ? this._renderPointEditForm() : this._renderPointRow(point, index),
+          )}
         </div>
       </ha-card>
+    `;
+  }
+
+  private _renderPointRow(point: PumpScheduleEntry, index: number) {
+    const period = periodForFlags(point.flags);
+    return html`
+      <button class="point-row" @click=${() => this._startEditingPoint(index)}>
+        <span class="point-time">${formatMinutes(point.time_minutes)}</span>
+        <span class="point-period period-${period}">${periodLabel(period)}</span>
+        <span class="point-mode">${point.mode}</span>
+      </button>
+    `;
+  }
+
+  private _renderPointEditForm() {
+    const point = this._workingPoint!;
+    const period = periodForFlags(point.flags);
+    const modes = this._group?.modes ?? [];
+    const paramNames = this._group?.mode_params?.[point.mode] ?? [];
+    const [hours, minutes] = [Math.floor(point.time_minutes / 60), point.time_minutes % 60];
+
+    return html`
+      <div class="point-edit-form">
+        <div class="edit-row">
+          <label>
+            ${localize("schedule_card.time")}
+            <input
+              type="time"
+              .value=${`${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`}
+              @change=${(e: Event) => {
+                const [h, m] = (e.target as HTMLInputElement).value.split(":").map(Number);
+                this._updateWorkingPointTime(h * 60 + m);
+              }}
+            />
+          </label>
+          <label>
+            ${localize("schedule_card.period")}
+            <select
+              .value=${period}
+              @change=${(e: Event) => this._updateWorkingPointPeriod((e.target as HTMLSelectElement).value as Period)}
+            >
+              ${(["day", "night", "sunrise", "sunset"] as Period[]).map(
+                (p) => html`<option value=${p} ?selected=${p === period}>${periodLabel(p)}</option>`,
+              )}
+            </select>
+          </label>
+        </div>
+        <label class="mode-label">
+          ${localize("schedule_card.mode")}
+          <select
+            .value=${point.mode}
+            @change=${(e: Event) => this._updateWorkingPointMode((e.target as HTMLSelectElement).value)}
+          >
+            ${modes.map((m) => html`<option value=${m} ?selected=${m === point.mode}>${m}</option>`)}
+          </select>
+        </label>
+        ${paramNames.map((name) => this._renderParamInput(name, point.params[name]))}
+        <div class="edit-actions">
+          <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
+            ${localize("schedule_card.cancel")}
+          </button>
+          <button class="save-point-button" @click=${() => this._saveEditingPoint()}>
+            ${localize("schedule_card.save")}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderParamInput(name: string, value: unknown) {
+    if (name === "RampType") {
+      return html`
+        <label class="param-label">
+          ${name}
+          <select
+            .value=${String(value)}
+            @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLSelectElement).value)}
+          >
+            ${RAMP_TYPES.map((rt) => html`<option value=${rt} ?selected=${rt === value}>${rt}</option>`)}
+          </select>
+        </label>
+      `;
+    }
+    if (name === "Master") {
+      return html`
+        <label class="param-label">
+          ${localize("schedule_card.parent_pump_serial")}
+          <input
+            type="text"
+            .value=${String(value ?? "")}
+            @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLInputElement).value)}
+          />
+        </label>
+      `;
+    }
+    return html`
+      <label class="param-label">
+        ${name}
+        <input
+          type="number"
+          .value=${String(value ?? 0)}
+          @change=${(e: Event) => this._updateWorkingPointParam(name, Number((e.target as HTMLInputElement).value))}
+        />
+      </label>
     `;
   }
 
@@ -867,6 +1047,76 @@ export class MobiusScheduleCard extends LitElement {
       border-radius: 8px;
       background: var(--secondary-background-color, rgba(0, 0, 0, 0.03));
       font-size: 0.9em;
+      width: 100%;
+      border: none;
+      color: inherit;
+      font-family: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+    .point-row:hover {
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.08);
+    }
+    .point-edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid var(--primary-color);
+      background: var(--card-background-color);
+    }
+    .edit-row {
+      display: flex;
+      gap: 10px;
+    }
+    .edit-row label,
+    .mode-label,
+    .param-label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.8em;
+      color: var(--secondary-text-color);
+      flex: 1;
+    }
+    .edit-row input,
+    .edit-row select,
+    .mode-label select,
+    .param-label input,
+    .param-label select {
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--divider-color);
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      font-family: inherit;
+      font-size: 1em;
+    }
+    .edit-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .cancel-button,
+    .save-point-button {
+      flex: 1;
+      padding: 8px 0;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.9em;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .cancel-button {
+      background: none;
+      border: 1px solid var(--divider-color);
+      color: var(--primary-text-color);
+    }
+    .save-point-button {
+      background: var(--primary-color);
+      border: none;
+      color: var(--text-primary-color, #fff);
     }
     .point-time {
       font-variant-numeric: tabular-nums;
