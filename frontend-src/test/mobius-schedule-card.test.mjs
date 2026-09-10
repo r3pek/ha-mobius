@@ -752,3 +752,90 @@ test("the periodic refresh timer is cleared on disconnect -- no fetches after th
 
   assert.equal(fetchCount, 1, "no further fetches should occur once the card has disconnected");
 });
+
+// --------------------------------------------------------------------------
+// Channel colors -- moonlight channels and the DeepRed-style naming fix
+// --------------------------------------------------------------------------
+
+const MOONLIGHT_GROUP = {
+  kind: "light",
+  group_mask: 1,
+  channels: ["MoonlightBlue", "DeepRed"],
+  active_scene: null,
+  scene_entity_id: "select.reef_tank_scene_selection",
+  schedule_intensity: 0.5,
+  members: [
+    {
+      device_id: LIGHT_DEVICE_ID,
+      serial: "SN1",
+      name: "Left Radion",
+      channel_entity_ids: { MoonlightBlue: "sensor.left_moonlightblue", DeepRed: "sensor.left_deepred" },
+      schedule_intensity_entity_id: "sensor.left_schedule_intensity",
+    },
+  ],
+};
+
+function makeMoonlightHass(states, historyResponse) {
+  return makeHass({
+    devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    wsResponse: { groups: [MOONLIGHT_GROUP] },
+    states,
+    historyResponse,
+  });
+}
+
+test("a Moonlight-family channel (real PascalCase name, e.g. MoonlightBlue) gets its own dedicated color, not the generic fallback palette", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeMoonlightHass(
+    { "sensor.left_moonlightblue": { state: "10", attributes: {} } },
+    { "sensor.left_moonlightblue": [historyEntry(10, 0)], "sensor.left_deepred": [historyEntry(5, 0)] },
+  );
+  await settled(el);
+
+  const polylines = [...el.shadowRoot.querySelectorAll(".chart polyline")];
+  const moonlightLine = polylines.find((p) => p.getAttribute("stroke") === "#5c6bc0");
+  assert.ok(moonlightLine, "MoonlightBlue should render with its own dedicated color (#5c6bc0)");
+});
+
+test("DeepRed (the real, space-free channel name python-mobius actually reports) gets its own dedicated color", async () => {
+  // Regression test for a real bug: the color map's own key used to be
+  // "deep red" (with a space), but VisualID.DeepRed.name is "DeepRed"
+  // (PascalCase, no space) -- meaning the old entry could never have
+  // matched a single real channel, ever, and every DeepRed channel
+  // silently fell through to the generic hash-based fallback instead.
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeMoonlightHass(
+    { "sensor.left_moonlightblue": { state: "10", attributes: {} } },
+    { "sensor.left_moonlightblue": [historyEntry(10, 0)], "sensor.left_deepred": [historyEntry(5, 0)] },
+  );
+  await settled(el);
+
+  const polylines = [...el.shadowRoot.querySelectorAll(".chart polyline")];
+  const deepRedLine = polylines.find((p) => p.getAttribute("stroke") === "#b71c1c");
+  assert.ok(deepRedLine, "DeepRed should render with its own dedicated color (#b71c1c), not a fallback color");
+});
+
+test("a genuinely unrecognized channel name still falls through to the fallback palette (not left uncolored)", async () => {
+  const CUSTOM_GROUP = {
+    ...MOONLIGHT_GROUP,
+    channels: ["SomeCustomChannel"],
+    members: [
+      {
+        ...MOONLIGHT_GROUP.members[0],
+        channel_entity_ids: { SomeCustomChannel: "sensor.left_custom" },
+      },
+    ],
+  };
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeHass({
+    devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    wsResponse: { groups: [CUSTOM_GROUP] },
+    states: { "sensor.left_custom": { state: "40", attributes: {} } },
+    historyResponse: { "sensor.left_custom": [historyEntry(40, 0)] },
+  });
+  await settled(el);
+
+  const polyline = el.shadowRoot.querySelector(".chart polyline");
+  assert.ok(polyline);
+  assert.ok(/^#[0-9a-f]{6}$/i.test(polyline.getAttribute("stroke")));
+});

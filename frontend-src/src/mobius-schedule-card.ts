@@ -37,23 +37,51 @@ function joinNaturally(names: string[]): string {
 const CHART_WIDTH = 600;
 const CHART_HEIGHT = 140;
 
-// Best-effort visual match to a channel's own real-world color, for
-// the handful of channel names the app itself uses across its
-// current fixture lineup -- purely cosmetic (channel identity itself
-// comes entirely from the name/entity_id, never from this mapping).
-// Anything unmatched (including a channel name unique to a fixture
-// this map hasn't seen) cycles through a small fixed palette by
-// position, so it's still visually distinguishable from its neighbors
-// without pretending to know what color it actually corresponds to.
+// Best-effort visual match to a channel's own real-world color --
+// purely cosmetic (channel identity itself comes entirely from the
+// name/entity_id, never from this mapping). Covers every real
+// channel VisualID defines (see below), so the fallback palette
+// exists only for a name this map has genuinely never seen (a
+// renamed or custom channel), not for any real, currently-defined
+// channel -- it cycles through a small fixed palette by position, so
+// it's still visually distinguishable from its neighbors without
+// pretending to know what color it actually corresponds to.
+// Keyed by the exact channel name as python-mobius's own VisualID
+// enum reports it (IntEnum.name -- e.g. "DeepRed", "MoonlightBlue":
+// PascalCase, no spaces), lowercased to match channelColor()'s own
+// lookup. Covers every real light-color channel VisualID defines
+// (constants.py) -- excluding Brightness (not a color channel, the
+// separate per-point master dimmer) and the Status*/StormProbability/
+// CloudProbability entries (not lighting channels at all).
 const CHANNEL_COLOR_GUESSES: Record<string, string> = {
-  royalblue: "#4169e1",
+  coolwhite: "#d6ecff",
   blue: "#2f6fed",
-  violet: "#8a2be2",
-  uv: "#9400d3",
-  white: "#e0e0e0",
-  red: "#e53935",
+  royalblue: "#4169e1",
   green: "#43a047",
-  "deep red": "#b71c1c",
+  red: "#e53935",
+  uv: "#9400d3",
+  warmwhite: "#ffe0b2",
+  violet: "#8a2be2",
+  deepblue: "#1a237e",
+  deepred: "#b71c1c",
+  neutralwhite: "#f5f5dc",
+  yellow: "#fdd835",
+  amber: "#ffb300",
+  farred: "#4a0000",
+  // Moonlight channels are conceptually distinct from their daytime
+  // namesakes (a dim, cool night-cycle glow, not a bright display
+  // color) -- given their own dedicated, visually-distinguishable
+  // shades rather than reusing Blue/White's own colors or falling
+  // through to the generic hash-based fallback palette below.
+  moonlight: "#7986cb",
+  moonlightwhite: "#c5cae9",
+  moonlightblue: "#5c6bc0",
+  cyan: "#00bcd4",
+  lime: "#c0ca33",
+  blueandwhite: "#90a4ae",
+  redandwhite: "#ef9a9a",
+  uv_plus: "#7b1fa2",
+  white: "#e0e0e0",
 };
 const FALLBACK_PALETTE = ["#4fc3f7", "#ff8a65", "#aed581", "#ba68c8", "#ffd54f"];
 
