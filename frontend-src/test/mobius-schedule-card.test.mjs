@@ -85,7 +85,7 @@ const PUMP_GROUP = {
   ],
 };
 
-function makeHass({ devices, wsResponse, wsError, states } = {}) {
+function makeHass({ devices, wsResponse, wsError, historyResponse, states } = {}) {
   return {
     devices: devices ?? { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states: states ?? {},
@@ -93,6 +93,9 @@ function makeHass({ devices, wsResponse, wsError, states } = {}) {
       if (wsError) throw wsError;
       if (msg.type === "mobius/resolve_schedule_groups") {
         return wsResponse ?? { groups: [LIGHT_GROUP, PUMP_GROUP] };
+      }
+      if (msg.type === "history/history_during_period") {
+        return historyResponse ?? {};
       }
       throw new Error(`unexpected callWS message type: ${msg.type}`);
     },
@@ -204,18 +207,18 @@ test("shows a clear error when the websocket call itself fails", async () => {
 
 test("does not re-resolve on every hass update -- only when device_id changes", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
-  let callCount = 0;
+  let resolveCallCount = 0;
   const hass = makeHass();
   const originalCallWS = hass.callWS;
   hass.callWS = async (msg) => {
-    callCount++;
+    if (msg.type === "mobius/resolve_schedule_groups") resolveCallCount++;
     return originalCallWS(msg);
   };
   el.hass = hass;
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
-  assert.equal(callCount, 1);
+  assert.equal(resolveCallCount, 1);
 
   // A second, unrelated hass update (e.g. some other entity changed
   // state elsewhere in the system) must not trigger a second
@@ -224,7 +227,7 @@ test("does not re-resolve on every hass update -- only when device_id changes", 
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
-  assert.equal(callCount, 1);
+  assert.equal(resolveCallCount, 1);
 });
 
 test("re-resolves when the configured device_id itself changes", async () => {
@@ -256,10 +259,11 @@ function makePumpHass(states) {
   });
 }
 
-function makeLightHass(states) {
+function makeLightHass(states, historyResponse) {
   return makeHass({
     devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states,
+    historyResponse,
   });
 }
 
@@ -511,4 +515,82 @@ test("the debounced write eventually calls mobius.set_schedule_intensity with th
     service: "set_schedule_intensity",
     data: { device_id: LIGHT_DEVICE_ID, intensity: 75 },
   });
+});
+
+// --------------------------------------------------------------------------
+// Channel history chart
+// --------------------------------------------------------------------------
+
+function historyEntry(value, secondsSinceMidnight) {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  return { s: String(value), lu: midnight.getTime() / 1000 + secondsSinceMidnight };
+}
+
+test("chart renders a polyline for the source member's own channel history", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    {
+      "sensor.left_royalblue": [historyEntry(0, 0), historyEntry(80, 3600), historyEntry(60, 7200)],
+    },
+  );
+  await settled(el);
+
+  const polylines = el.shadowRoot.querySelectorAll(".chart polyline");
+  assert.equal(polylines.length, 1);
+  assert.ok(polylines[0].getAttribute("points").includes(","));
+});
+
+test("chart draws one polyline per channel with real history data", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    {
+      "sensor.left_royalblue": [historyEntry(50, 0)],
+      "sensor.left_violet": [historyEntry(30, 0)],
+    },
+  );
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelectorAll(".chart polyline").length, 2);
+});
+
+test("chart shows a clear message when the group has channels but no history yet", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, {});
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("No history recorded yet today"));
+});
+
+test("chart uses the fallback member's own history when the primary member is unavailable", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    {
+      "sensor.left_royalblue": { state: "unavailable", attributes: {} },
+      "sensor.right_royalblue": { state: "60", attributes: {} },
+    },
+    {
+      "sensor.left_royalblue": [historyEntry(99, 0)],
+      "sensor.right_royalblue": [historyEntry(40, 0)],
+    },
+  );
+  await settled(el);
+
+  // Only the fallback (Right Radion) member's own channels should be
+  // charted -- not the unavailable primary member's stale data.
+  const polylines = el.shadowRoot.querySelectorAll(".chart polyline");
+  assert.equal(polylines.length, 1);
+});
+
+test("chart shows hour gridline labels", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelectorAll(".chart-label").length, 4);
 });

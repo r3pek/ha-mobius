@@ -1,6 +1,7 @@
-import { LitElement, html, css, nothing } from "lit";
+import { LitElement, html, css, svg, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
+import { formatTime } from "custom-card-helpers";
 import { localize } from "./localize/localize";
 import { formatDuration } from "./format";
 
@@ -31,6 +32,37 @@ function joinNaturally(names: string[]): string {
   if (names.length <= 1) return names[0] || "";
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+const CHART_WIDTH = 600;
+const CHART_HEIGHT = 140;
+
+// Best-effort visual match to a channel's own real-world color, for
+// the handful of channel names the app itself uses across its
+// current fixture lineup -- purely cosmetic (channel identity itself
+// comes entirely from the name/entity_id, never from this mapping).
+// Anything unmatched (including a channel name unique to a fixture
+// this map hasn't seen) cycles through a small fixed palette by
+// position, so it's still visually distinguishable from its neighbors
+// without pretending to know what color it actually corresponds to.
+const CHANNEL_COLOR_GUESSES: Record<string, string> = {
+  royalblue: "#4169e1",
+  blue: "#2f6fed",
+  violet: "#8a2be2",
+  uv: "#9400d3",
+  white: "#e0e0e0",
+  red: "#e53935",
+  green: "#43a047",
+  "deep red": "#b71c1c",
+};
+const FALLBACK_PALETTE = ["#4fc3f7", "#ff8a65", "#aed581", "#ba68c8", "#ffd54f"];
+
+function channelColor(name: string): string {
+  const guess = CHANNEL_COLOR_GUESSES[name.toLowerCase()];
+  if (guess) return guess;
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
 }
 
 // custom-card-helpers' own HomeAssistant type is a deliberately
@@ -69,6 +101,22 @@ interface ScheduleGroup {
   schedule_intensity?: number | null;
 }
 
+// Home Assistant's own "compressed state" wire format, used by the
+// history/history_during_period websocket command -- s/lu/lc rather
+// than state/last_updated/last_changed. lu is itself optional: HA
+// omits it when it's identical to lc, so the real timestamp to use is
+// whichever of the two is actually present.
+interface CompressedStateEntry {
+  s: string;
+  lu?: number;
+  lc?: number;
+}
+
+interface HistoryPoint {
+  t: number; // ms since epoch
+  v: number;
+}
+
 @customElement("mobius-schedule-card")
 export class MobiusScheduleCard extends LitElement {
   @property({ attribute: false }) public hass!: ExtendedHomeAssistant;
@@ -86,6 +134,9 @@ export class MobiusScheduleCard extends LitElement {
   // Cleared once the debounced write itself resolves, so the display
   // reverts to tracking the live entity normally again afterward.
   @state() private _pendingIntensityPercent?: number;
+
+  @state() private _channelHistoryByEntity: Record<string, HistoryPoint[]> = {};
+  @state() private _historyLoading = false;
 
   // Not @state -- this is a plain timer handle, not something that
   // should itself trigger a re-render when it changes.
@@ -162,11 +213,64 @@ export class MobiusScheduleCard extends LitElement {
         throw new Error(localize("schedule_card.group_not_found"));
       }
       this._group = group;
+
+      if (group.kind === "light") {
+        // Deliberately not awaited -- the glance view itself doesn't
+        // depend on history to render (readings/slider/scene banner
+        // all come from live state), so a slow history query
+        // shouldn't hold up everything else. The chart area just
+        // shows its own loading state until this resolves.
+        this._fetchChannelHistory(group);
+      }
     } catch (err) {
       this._error = err instanceof Error ? err.message : String(err);
       this._group = undefined;
     } finally {
       this._loading = false;
+    }
+  }
+
+  // One entity_id -> point[] map covering EVERY member's own channel
+  // sensors, fetched once per group resolution -- not per currently-
+  // picked fallback member. This means a fallback switch (a member
+  // recovering or going unavailable) can redraw the chart instantly
+  // from already-fetched data, with no second network round-trip, by
+  // simply picking a different member's own entries out of this same
+  // map at render time (see _pickAvailableLightMember, used
+  // identically for both the live reading and the chart).
+  private async _fetchChannelHistory(group: ScheduleGroup): Promise<void> {
+    const entityIds = group.members
+      .flatMap((m) => Object.values(m.channel_entity_ids ?? {}))
+      .filter((id): id is string => !!id);
+    if (entityIds.length === 0) return;
+
+    this._historyLoading = true;
+    try {
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+
+      const response = await this.hass.callWS<Record<string, CompressedStateEntry[]>>({
+        type: "history/history_during_period",
+        start_time: startOfDay.toISOString(),
+        entity_ids: entityIds,
+        no_attributes: true,
+        minimal_response: true,
+      });
+
+      const byEntity: Record<string, HistoryPoint[]> = {};
+      for (const [entityId, entries] of Object.entries(response)) {
+        byEntity[entityId] = entries
+          .map((e) => ({ t: (e.lu ?? e.lc ?? 0) * 1000, v: Number(e.s) }))
+          .filter((p) => Number.isFinite(p.v));
+      }
+      this._channelHistoryByEntity = byEntity;
+    } catch {
+      // The glance view itself still works without history -- the
+      // chart area just shows its own "couldn't load" state instead
+      // of failing the whole card the way a resolution error does.
+      this._channelHistoryByEntity = {};
+    } finally {
+      this._historyLoading = false;
     }
   }
 
@@ -295,6 +399,69 @@ export class MobiusScheduleCard extends LitElement {
     }, 1200);
   }
 
+  private _renderChannelChart(sourceMember: ScheduleGroupMember) {
+    if (this._historyLoading) {
+      return html`<div class="chart-status">${localize("schedule_card.loading_history")}</div>`;
+    }
+
+    const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
+      (entry): entry is [string, string] => !!entry[1],
+    );
+    if (entries.length === 0) {
+      return html`<div class="chart-status">${localize("schedule_card.no_channel_data")}</div>`;
+    }
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const dayStartMs = startOfDay.getTime();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    const toX = (t: number) => ((t - dayStartMs) / dayMs) * CHART_WIDTH;
+    const toY = (v: number) => CHART_HEIGHT - (Math.max(0, Math.min(100, v)) / 100) * CHART_HEIGHT;
+
+    const lines = entries
+      .map(([channelName, entityId]) => {
+        const points = this._channelHistoryByEntity[entityId];
+        if (!points || points.length === 0) return nothing;
+        const path = points.map((p) => `${toX(p.t).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
+        return svg`<polyline points=${path} fill="none" stroke=${channelColor(channelName)} stroke-width="2" />`;
+      })
+      .filter((l) => l !== nothing);
+
+    if (lines.length === 0) {
+      return html`<div class="chart-status">${localize("schedule_card.no_history_yet")}</div>`;
+    }
+
+    const nowX = toX(Date.now());
+    const lang = this.hass?.locale;
+    const hourLabel = (hour: number) => {
+      const d = new Date(startOfDay);
+      d.setHours(hour);
+      return lang ? formatTime(d, lang) : `${hour}:00`;
+    };
+
+    return html`
+      <svg class="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT + 16}" preserveAspectRatio="none">
+        ${[0, 6, 12, 18].map(
+          (hour) => svg`
+            <line
+              x1=${toX(dayStartMs + hour * 3600000)}
+              x2=${toX(dayStartMs + hour * 3600000)}
+              y1="0"
+              y2=${CHART_HEIGHT}
+              class="chart-gridline"
+            />
+            <text x=${toX(dayStartMs + hour * 3600000)} y=${CHART_HEIGHT + 12} class="chart-label">
+              ${hourLabel(hour)}
+            </text>
+          `,
+        )}
+        <line x1=${nowX} x2=${nowX} y1="0" y2=${CHART_HEIGHT} class="chart-now-line" />
+        ${lines}
+      </svg>
+    `;
+  }
+
   private _renderLightGlance() {
     const group = this._group!;
     const { member: sourceMember, unavailableNames } = this._pickAvailableLightMember();
@@ -326,7 +493,9 @@ export class MobiusScheduleCard extends LitElement {
             : nothing
         }
         ${
-          sourceMember ? nothing : html`<div class="reading-missing">${localize("schedule_card.no_channel_data")}</div>`
+          sourceMember
+            ? this._renderChannelChart(sourceMember)
+            : html`<div class="reading-missing">${localize("schedule_card.no_channel_data")}</div>`
         }
         ${
           displayedIntensityPercent != null
@@ -482,6 +651,31 @@ export class MobiusScheduleCard extends LitElement {
     .intensity-row input[type="range"] {
       width: 100%;
       accent-color: var(--primary-color);
+    }
+    .chart {
+      width: 100%;
+      height: auto;
+      margin-bottom: 12px;
+    }
+    .chart-gridline {
+      stroke: var(--divider-color);
+      stroke-width: 1;
+    }
+    .chart-now-line {
+      stroke: var(--primary-color);
+      stroke-width: 1;
+      stroke-dasharray: 3, 3;
+    }
+    .chart-label {
+      font-size: 9px;
+      fill: var(--secondary-text-color);
+      text-anchor: middle;
+    }
+    .chart-status {
+      padding: 24px 0;
+      text-align: center;
+      color: var(--secondary-text-color);
+      font-size: 0.85em;
     }
   `;
 }

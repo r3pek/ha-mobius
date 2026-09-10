@@ -29,6 +29,8 @@
     "is_unavailable": "is unavailable.",
     "are_unavailable": "are unavailable.",
     "no_channel_data": "No channel data available -- every light in this group is currently unavailable.",
-    "overall_intensity": "Overall intensity"
+    "overall_intensity": "Overall intensity",
+    "loading_history": "Loading history…",
+    "no_history_yet": "No history recorded yet today."
   }
 }
