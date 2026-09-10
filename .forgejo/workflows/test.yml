@@ -77,3 +77,44 @@ jobs:
       # repo root on sys.path, which custom_components.mobius needs.
       - name: Run tests
         run: python -m pytest tests/ -q
+
+  frontend:
+    # Separate job from `test` above (not an extra step in it) so the
+    # two run in parallel and a failure here is unambiguous about
+    # which side (Python integration vs. the Lovelace card build)
+    # actually broke, rather than one long job conflating both.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: frontend-src
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: https://code.forgejo.org/actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend-src/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Catches exactly the "edited src/, forgot to rebuild dist/"
+      # mistake before it ships -- rebuilds in memory and diffs
+      # against custom_components/mobius/frontend/dist/, which is what
+      # actually reaches a real Home Assistant install (see this
+      # directory's own README.md for why the split exists at all).
+      # Deliberately BEFORE the test step below: if dist/ itself is
+      # stale, the tests would still be exercising the last-committed
+      # (correct) build, silently passing against something that no
+      # longer matches src/ -- this ordering makes that impossible to
+      # miss.
+      - name: Verify dist/ matches src/
+        run: npm run verify
+
+      # Executes the actual built dist/ file in a real jsdom DOM
+      # environment -- not a mock of the card's own logic.
+      - name: Run frontend tests
+        run: npm test

@@ -27,7 +27,16 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = join(HERE, "src");
-const DIST_DIR = join(HERE, "dist");
+// Outside this directory entirely -- see this project's own README.md
+// for why: only custom_components/mobius/frontend/dist/ actually ships
+// to an end user's Home Assistant instance (HACS installs directly
+// from the tagged source tree per this repo's own hacs.json
+// zip_release:false, so whatever's under custom_components/mobius/
+// goes to every install verbatim), while everything in THIS directory
+// (frontend-src/ -- src/, test/, node_modules/, this build script
+// itself) is a repository-only, developer-facing concern that should
+// never reach a real installation at all.
+const DIST_DIR = join(HERE, "..", "custom_components", "mobius", "frontend", "dist");
 const VERIFY = process.argv.includes("--verify");
 
 const entryPoints = readdirSync(SRC_DIR)
@@ -44,6 +53,16 @@ const result = await esbuild.build({
   bundle: true,
   minify: true,
   format: "esm",
+  // Explicit, not relying on esbuild's own current default (which
+  // already happens to preserve native class syntax as of this
+  // writing) -- Lit requires real ES6 class/extends semantics, and
+  // downleveling them to ES5 function-based prototypes produces a
+  // runtime "TypeError: Class constructor cannot be invoked without
+  // 'new'" (a well-documented gotcha for exactly this kind of card;
+  // see custom-cards/boilerplate-card's own README). Pinned so a
+  // future esbuild version changing its own default can't silently
+  // reintroduce that failure mode here.
+  target: "es2022",
   outdir: DIST_DIR,
   write: !VERIFY,
 });
