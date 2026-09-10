@@ -260,6 +260,15 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _scheduleError?: string;
   @state() private _schedulePoints: PumpScheduleEntry[] = [];
 
+  // The actual device write -- everything up to this point (per-point
+  // Save) only ever touches _schedulePoints in memory. A brief
+  // success message auto-clears itself; an error persists until the
+  // next save attempt, so it doesn't disappear before someone's had a
+  // chance to read it.
+  @state() private _savingSchedule = false;
+  @state() private _saveScheduleError?: string;
+  @state() private _saveScheduleSucceeded = false;
+
   // Which point (by index into _schedulePoints) is currently expanded
   // for editing -- null when none is. _workingPoint is a separate,
   // mutable copy of that point's own data, so edits in progress don't
@@ -443,6 +452,8 @@ export class MobiusScheduleCard extends LitElement {
     this._view = "glance";
     this._editingIndex = null;
     this._workingPoint = undefined;
+    this._saveScheduleError = undefined;
+    this._saveScheduleSucceeded = false;
   }
 
   private _startEditingPoint(index: number): void {
@@ -536,6 +547,31 @@ export class MobiusScheduleCard extends LitElement {
       this._schedulePoints = [];
     } finally {
       this._scheduleLoading = false;
+    }
+  }
+
+  private async _saveScheduleToDevice(): Promise<void> {
+    this._savingSchedule = true;
+    this._saveScheduleError = undefined;
+    this._saveScheduleSucceeded = false;
+    try {
+      // Sent exactly as-is -- read_schedule_group already handed the
+      // card this same shape (ParentSerial, not Master; already
+      // decoded params), and the write service expects that same
+      // shape back, translating ParentSerial to Master internally
+      // itself. No transformation needed on this end at all.
+      await this.hass.callService("mobius", "write_schedule_group", {
+        device_id: this._config!.device_id,
+        points: this._schedulePoints,
+      });
+      this._saveScheduleSucceeded = true;
+      setTimeout(() => {
+        this._saveScheduleSucceeded = false;
+      }, 4000);
+    } catch (err) {
+      this._saveScheduleError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this._savingSchedule = false;
     }
   }
 
@@ -854,6 +890,19 @@ export class MobiusScheduleCard extends LitElement {
             this._editingIndex === index ? this._renderPointEditForm() : this._renderPointRow(point, index),
           )}
         </div>
+        ${this._saveScheduleError ? html`<div class="save-schedule-error">${this._saveScheduleError}</div>` : nothing}
+        ${
+          this._saveScheduleSucceeded
+            ? html`<div class="save-schedule-success">${localize("schedule_card.schedule_saved")}</div>`
+            : nothing
+        }
+        <button
+          class="save-schedule-button"
+          ?disabled=${this._savingSchedule || this._editingIndex != null}
+          @click=${() => this._saveScheduleToDevice()}
+        >
+          ${this._savingSchedule ? localize("schedule_card.saving_schedule") : localize("schedule_card.save_schedule")}
+        </button>
       </ha-card>
     `;
   }
@@ -1216,6 +1265,39 @@ export class MobiusScheduleCard extends LitElement {
       background: var(--primary-color);
       border: none;
       color: var(--text-primary-color, #fff);
+    }
+    .save-schedule-button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 12px 0;
+      border-radius: 10px;
+      border: none;
+      background: var(--primary-color);
+      color: var(--text-primary-color, #fff);
+      font-family: inherit;
+      font-size: 0.95em;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .save-schedule-button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .save-schedule-error {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(219, 68, 55, 0.1);
+      color: var(--error-color, #db4437);
+      font-size: 0.9em;
+    }
+    .save-schedule-success {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(67, 160, 71, 0.1);
+      color: #43a047;
+      font-size: 0.9em;
     }
     .point-time {
       font-variant-numeric: tabular-nums;

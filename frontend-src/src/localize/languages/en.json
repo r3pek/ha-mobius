@@ -46,6 +46,9 @@
     "no_other_pumps": "No other pumps found on this tank.",
     "anti_sync": "Anti-Sync",
     "ecosmart_back": "EcoSmart Back",
-    "reverse_hint": "A negative value reverses rotation direction, on pumps that support it."
+    "reverse_hint": "A negative value reverses rotation direction, on pumps that support it.",
+    "schedule_saved": "Schedule saved.",
+    "saving_schedule": "Saving…",
+    "save_schedule": "Save schedule to device"
   }
 }

@@ -1449,3 +1449,112 @@ test("negative MaxSpeed round-trips correctly (encodes reverse rotation)", async
 
   assert.equal(el._schedulePoints[0].params.MaxSpeed, -300);
 });
+
+// --------------------------------------------------------------------------
+// Saving the schedule to the real device
+// --------------------------------------------------------------------------
+
+test("Save schedule to device calls mobius.write_schedule_group with the right device_id and points", async () => {
+  const points = [{ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }];
+  const el = await openEditWithPoints(points);
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => {
+    calls.push({ domain, service, data });
+  };
+
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await el.updateComplete;
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    domain: "mobius",
+    service: "write_schedule_group",
+    data: { device_id: PUMP_DEVICE_ID, points },
+  });
+});
+
+test("shows a success message after a successful save, which clears itself", async (t) => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.hass.callService = async () => {};
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".save-schedule-success"));
+
+  t.mock.timers.tick(4000);
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".save-schedule-success"), null);
+});
+
+test("shows a clear error when the write itself fails, and does not falsely claim success", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.hass.callService = async () => {
+    throw new Error("device did not acknowledge the write");
+  };
+
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.textContent.includes("device did not acknowledge the write"));
+  assert.equal(el.shadowRoot.querySelector(".save-schedule-success"), null);
+});
+
+test("the save-schedule button is disabled while a point is being actively edited", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".save-schedule-button").disabled);
+});
+
+test("the save-schedule button is re-enabled once point editing is cancelled", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.ok(!el.shadowRoot.querySelector(".save-schedule-button").disabled);
+});
+
+test("saving reflects locally-edited points, not just what was originally fetched", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  const input = el.shadowRoot.querySelector(".param-label input");
+  input.value = "500";
+  input.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => {
+    calls.push(data);
+  };
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(calls[0].points[0].params.MaxSpeed, 500);
+});
