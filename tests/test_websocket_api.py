@@ -279,6 +279,33 @@ async def test_pump_group_includes_modes(hass):
     assert "channels" not in groups[0].as_dict()
 
 
+def test_pump_mode_names_matches_every_real_mode_python_mobius_defines():
+    """PUMP_MODE_NAMES is derived from PumpMode (`[m.name for m in
+    PumpMode if m != PumpMode.Undefined]`), which protects it from
+    manual-transcription drift -- but a derivation can still be wrong
+    on its own terms (e.g. excluding the wrong member, or PumpMode
+    itself changing without anyone noticing this list should grow).
+    This checks it against an INDEPENDENT list transcribed directly
+    from python-mobius's own documentation
+    (documentation/07-pump-schedule.md's own mode/parameter table),
+    not derived from PumpMode at all -- so a regression in either the
+    enum or the derivation logic actually has something real to fail
+    against, not just itself.
+
+    All 15 real modes (Undefined(0) is a placeholder, not a real
+    mode); note value 11 is genuinely unused/skipped between Sync(10)
+    and EcoSmartBack(12).
+    """
+    expected = [
+        "ConstantSpeed", "Lagoon", "ReefCrest", "NutrientTransport", "TidalSwell",
+        "ShortPulse", "Gyre", "Transition", "ExpandingPulse", "Sync",
+        "EcoSmartBack", "Feed", "BatteryBackup", "Random", "Pulse",
+    ]
+    assert PUMP_MODE_NAMES == expected
+    assert len(PUMP_MODE_NAMES) == 15
+    assert PumpMode.Undefined.name not in PUMP_MODE_NAMES
+
+
 async def test_member_dict_has_device_id_serial_and_name(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left Radion", None)})
     groups = _resolve_tank_groups(hass, tank_device_id)
