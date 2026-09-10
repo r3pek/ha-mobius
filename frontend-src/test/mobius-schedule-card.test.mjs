@@ -361,6 +361,30 @@ test("pump glance has an edit button", async () => {
   assert.ok(el.shadowRoot.querySelector(".edit-button"));
 });
 
+test("pump glance updates the shown flow value when the entity's own state changes", async () => {
+  // Unlike the chart (a point-in-time history snapshot that needs its
+  // own periodic re-fetch to avoid going stale), the current flow
+  // reading is read live from hass.states on every render with no
+  // caching at all -- it needs no equivalent refresh mechanism, only
+  // a genuine hass reassignment, exactly like Home Assistant's own
+  // frontend performs on every real entity state change.
+  const el = makeCard(PUMP_DEVICE_ID);
+  const hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } });
+  el.hass = hass;
+  await settled(el);
+  // .reading-value specifically, not the whole shadow root's own
+  // textContent -- that also includes the <style> tag's own CSS text,
+  // which happens to contain the literal substring "300" from an
+  // unrelated rule (font-weight: 300), an easy false negative/positive
+  // trap for a plain substring check here.
+  assert.equal(el.shadowRoot.querySelector(".reading-value").textContent.trim(), "300");
+
+  el.hass = { ...hass, states: { ...hass.states, "sensor.pump_flow": { state: "450", attributes: {} } } };
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".reading-value").textContent.trim(), "450");
+});
+
 test("scene banner shows the active scene and its remaining time", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
