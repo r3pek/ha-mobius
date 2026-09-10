@@ -250,7 +250,7 @@ async function settled(el) {
   await el.updateComplete;
 }
 
-test("pump glance shows flow in L/h when the flow sensor is reliable", async () => {
+test("pump glance shows flow using whatever unit is configured on the sensor (L/h)", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
     "sensor.pump_flow": { state: "412", attributes: { unit_of_measurement: "L/h" } },
@@ -260,6 +260,25 @@ test("pump glance shows flow in L/h when the flow sensor is reliable", async () 
   const text = el.shadowRoot.textContent;
   assert.ok(text.includes("412"));
   assert.ok(text.includes("L/h"));
+});
+
+test("pump glance respects a different configured unit (GPH) -- never assumes L/h", async () => {
+  // The device itself always reports GPH; Home Assistant's own
+  // per-entity unit override converts both state and
+  // unit_of_measurement server-side for volume_flow_rate sensors, so
+  // a person who's switched their own sensor to a different unit
+  // (or left it at the device's native GPH) must see THAT unit, not
+  // a hardcoded assumption of L/h.
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "108", attributes: { unit_of_measurement: "gal/h" } },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.textContent;
+  assert.ok(text.includes("108"));
+  assert.ok(text.includes("gal/h"));
+  assert.ok(!text.includes("L/h"));
 });
 
 test("pump glance falls back to speed % when the flow sensor is unavailable", async () => {

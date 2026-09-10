@@ -197,7 +197,17 @@ export class MobiusScheduleCard extends LitElement {
             ? html`
                 <div class="reading">
                   <span class="reading-value">${flowState!.state}</span>
-                  <span class="reading-unit">${flowState!.attributes.unit_of_measurement || "L/h"}</span>
+                  <!-- Never a hardcoded assumption (e.g. "L/h") -- the
+                  device itself always reports GPH, but Home Assistant's
+                  own per-entity unit override (available for
+                  volume_flow_rate-class sensors) converts BOTH state
+                  and unit_of_measurement server-side, before this card
+                  ever sees them. Always displaying whatever this
+                  attribute actually says is what makes a person's own
+                  configured unit (GPH, L/h, or anything else) show up
+                  correctly, with zero unit-specific logic needed here
+                  at all. -->
+                  <span class="reading-unit">${flowState!.attributes.unit_of_measurement}</span>
                 </div>
               `
             : speedAvailable
