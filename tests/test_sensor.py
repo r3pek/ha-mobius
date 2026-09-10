@@ -885,6 +885,34 @@ class TestLightChannelIntensitySensorRounding:
         assert sensor.native_value is None
 
 
+class TestLightChannelIntensitySensorDisplayNameOverride:
+    """VisualID.Brightness displays as "Point" (giving "Point
+    intensity"), not "Brightness intensity" -- the app's own UI calls
+    this channel Point Intensity, and the raw name read as a
+    near-duplicate of ScheduleIntensitySensor's own "Schedule
+    intensity". unique_id/key must stay untouched regardless -- those
+    are wire-level identity, and changing them would delete and
+    recreate the entity for anyone who already has it."""
+
+    def _make_sensor(self, channel_name: str):
+        from custom_components.mobius.sensor import LightChannelIntensitySensor
+
+        return LightChannelIntensitySensor(MagicMock(), "SN1", MagicMock(), channel_name)
+
+    def test_brightness_channel_displays_as_point(self):
+        sensor = self._make_sensor("Brightness")
+        assert sensor.entity_description.translation_placeholders == {"channel": "Point"}
+
+    def test_brightness_channel_unique_id_and_key_are_unchanged(self):
+        sensor = self._make_sensor("Brightness")
+        assert sensor.unique_id == "SN1_intensity_brightness"
+        assert sensor.entity_description.key == "intensity_brightness"
+
+    def test_ordinary_channels_are_not_affected(self):
+        sensor = self._make_sensor("RoyalBlue")
+        assert sensor.entity_description.translation_placeholders == {"channel": "RoyalBlue"}
+
+
 class TestScheduleIntensitySensor:
     """ScheduleIntensitySensor.native_value -- reads coordinator.data's
     own schedule_intensity (a 0.0-1.0 fraction, see coordinator.py's own

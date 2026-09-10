@@ -408,16 +408,34 @@ class LightChannelIntensitySensor(MobiusEntity):
     (round() with no second argument, not round(x, 0) which would still
     be a float like 100.0), so the underlying state/history is whole
     numbers too, not just the display.
+
+    VisualID.Brightness's own display name is overridden to "Point" here
+    (giving "Point intensity", not "Brightness intensity") -- the app's
+    own UI calls this channel Point Intensity, not Brightness; showing
+    "Brightness intensity" here read as a near-duplicate of
+    ScheduleIntensitySensor's own "Schedule intensity" (both scale
+    every other channel, at different granularities -- see
+    python-mobius's own 06-light-schedule.md for the actual
+    per-point-vs-whole-schedule distinction between the two), risking
+    real confusion about which one is which. _channel_name itself
+    (used to look up current_intensities) and unique_id/key (both still
+    literally "brightness") are deliberately untouched -- those are
+    wire-level/identity concerns, not display ones, and changing
+    unique_id would delete and recreate this entity for anyone who
+    already has it, losing its history.
     """
+
+    _DISPLAY_NAME_OVERRIDES = {"Brightness": "Point"}
 
     def __init__(self, coordinator, serial, device_info, channel_name: str):
         self._channel_name = channel_name
+        display_name = self._DISPLAY_NAME_OVERRIDES.get(channel_name, channel_name)
         super().__init__(
             coordinator, serial, f"intensity_{channel_name.lower()}",
             SensorEntityDescription(
                 key=f"intensity_{channel_name.lower()}",
                 translation_key="channel_intensity",
-                translation_placeholders={"channel": channel_name},
+                translation_placeholders={"channel": display_name},
                 icon="mdi:brightness-percent",
                 native_unit_of_measurement="%",
                 state_class="measurement",
