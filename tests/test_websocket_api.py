@@ -290,6 +290,32 @@ async def test_pump_group_includes_modes(hass):
     assert "channels" not in groups[0].as_dict()
 
 
+async def test_pump_group_includes_mode_params_for_every_supported_mode(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    mode_params = groups[0].mode_params
+    assert set(mode_params.keys()) == set(groups[0].modes)
+    assert mode_params["ConstantSpeed"] == ["MaxSpeed"]
+    assert mode_params["ShortPulse"] == ["MaxSpeed", "Time"]
+
+
+async def test_sync_and_ecosmartback_are_distinct_entries_with_matching_params(hass):
+    """They share the exact same parameter shape (MaxSpeed, PhaseShift,
+    Master) -- confirming mode_params keeps them as two separate dict
+    keys rather than collapsing them, since a person picking either
+    one in the editor needs its own entry to look up, even though the
+    fields shown would be identical either way."""
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    mode_params = groups[0].mode_params
+    assert "Sync" in mode_params
+    assert "EcoSmartBack" in mode_params
+    assert mode_params["Sync"] == ["MaxSpeed", "PhaseShift", "Master"]
+    assert mode_params["Sync"] == mode_params["EcoSmartBack"]
+
+
 async def test_vectra_pump_group_reflects_closed_loop_true(hass):
     vectra_data = _pump_data("Vectra L2")
     vectra_data["primitive_type"] = "VectraV1"

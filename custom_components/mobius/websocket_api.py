@@ -25,7 +25,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from mobius import (
     PumpMode, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
     light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
-    supported_pump_modes,
+    supported_pump_modes, PUMP_MODE_PARAMS,
 )
 
 from . import MobiusRuntimeData
@@ -92,6 +92,7 @@ class ScheduleGroup:
     members: list[ScheduleGroupMember] = field(default_factory=list)
     channels: list[str] | None = None  # light only
     modes: list[str] | None = None  # pump only
+    mode_params: dict[str, list[str]] | None = None  # pump only -- which params each of `modes` needs
     active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
     schedule_intensity: float | None = None  # light only -- 0.0-1.0, see Schedule1Intensity
     scene_entity_id: str | None = None  # tank-wide -- same value for every group on the same tank
@@ -119,6 +120,7 @@ class ScheduleGroup:
             result["schedule_intensity"] = self.schedule_intensity
         else:
             result["modes"] = self.modes
+            result["mode_params"] = self.mode_params
         return result
 
 
@@ -339,9 +341,11 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         primitive_name = (coordinator.data or {}).get("primitive_type")
         primitive = PrimitiveType[primitive_name] if primitive_name else None
         closed_loop = (coordinator.data or {}).get("closed_loop")
+        pump_modes = supported_pump_modes(primitive, closed_loop) if primitive else []
         groups.append(ScheduleGroup(
             kind="pump", group_mask=None,
-            modes=[m.name for m in supported_pump_modes(primitive, closed_loop)] if primitive else [],
+            modes=[m.name for m in pump_modes],
+            mode_params={m.name: [p.name for p in PUMP_MODE_PARAMS.get(m, [])] for m in pump_modes},
             active_scene=active_scene,
             scene_entity_id=scene_entity_id,
             members=[ScheduleGroupMember(
