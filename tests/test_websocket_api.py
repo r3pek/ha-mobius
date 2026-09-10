@@ -302,18 +302,35 @@ async def test_pump_group_includes_mode_params_for_every_supported_mode(hass):
 
 async def test_sync_and_ecosmartback_are_distinct_entries_with_matching_params(hass):
     """They share the exact same parameter shape (MaxSpeed, PhaseShift,
-    Master) -- confirming mode_params keeps them as two separate dict
-    keys rather than collapsing them, since a person picking either
-    one in the editor needs its own entry to look up, even though the
-    fields shown would be identical either way."""
+    ParentSerial) -- confirming mode_params keeps them as two separate
+    dict keys rather than collapsing them, since a person picking
+    either one in the editor needs its own entry to look up, even
+    though the fields shown would be identical either way."""
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
     groups = _resolve_tank_groups(hass, tank_device_id)
 
     mode_params = groups[0].mode_params
     assert "Sync" in mode_params
     assert "EcoSmartBack" in mode_params
-    assert mode_params["Sync"] == ["MaxSpeed", "PhaseShift", "Master"]
+    assert mode_params["Sync"] == ["MaxSpeed", "PhaseShift", "ParentSerial"]
     assert mode_params["Sync"] == mode_params["EcoSmartBack"]
+
+
+async def test_mode_params_says_parent_serial_not_master(hass):
+    """mode_params describes what a real point's own params dict will
+    actually contain -- and read_schedule_group's own
+    _translate_master_to_parent_serial() always replaces a point's
+    Master key with ParentSerial before the card ever sees it. If
+    mode_params still said "Master" here, a card checking "does this
+    mode need a parent-pump field" against mode_params would be
+    checking for a key name that never actually appears in real point
+    data at all."""
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    groups = _resolve_tank_groups(hass, tank_device_id)
+
+    for mode_name in ("Sync", "EcoSmartBack"):
+        assert "ParentSerial" in groups[0].mode_params[mode_name]
+        assert "Master" not in groups[0].mode_params[mode_name]
 
 
 async def test_vectra_pump_group_reflects_closed_loop_true(hass):

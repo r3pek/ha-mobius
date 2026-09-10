@@ -23,7 +23,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from mobius import (
-    PumpMode, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
+    PumpMode, PumpParam, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
     light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
     supported_pump_modes, PUMP_MODE_PARAMS,
 )
@@ -345,7 +345,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         groups.append(ScheduleGroup(
             kind="pump", group_mask=None,
             modes=[m.name for m in pump_modes],
-            mode_params={m.name: [p.name for p in PUMP_MODE_PARAMS.get(m, [])] for m in pump_modes},
+            mode_params={m.name: _mode_param_names(m) for m in pump_modes},
             active_scene=active_scene,
             scene_entity_id=scene_entity_id,
             members=[ScheduleGroupMember(
@@ -422,6 +422,16 @@ def _master_hex_for_serial(serial: str, coordinator: MobiusDeviceCoordinator) ->
     if member is None or member.mesh_address is None:
         return None
     return member.mesh_address[-8:].hex()
+
+
+def _mode_param_names(mode: PumpMode) -> list[str]:
+    """The param names a card should expect for this mode's own point
+    data -- Master translated to ParentSerial, matching the same
+    translation _translate_master_to_parent_serial() applies to a
+    real point's own params before it ever reaches the card. Without
+    this, mode_params would say "Master" while every actual point
+    the card ever sees says "ParentSerial" for that same field."""
+    return ["ParentSerial" if p == PumpParam.Master else p.name for p in PUMP_MODE_PARAMS.get(mode, [])]
 
 
 def _translate_master_to_parent_serial(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:

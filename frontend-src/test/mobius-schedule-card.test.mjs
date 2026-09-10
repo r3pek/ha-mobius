@@ -74,8 +74,8 @@ const PUMP_GROUP = {
   mode_params: {
     ConstantSpeed: ["MaxSpeed"],
     Lagoon: ["MaxSpeed"],
-    Sync: ["MaxSpeed", "PhaseShift", "Master"],
-    EcoSmartBack: ["MaxSpeed", "PhaseShift", "Master"],
+    Sync: ["MaxSpeed", "PhaseShift", "ParentSerial"],
+    EcoSmartBack: ["MaxSpeed", "PhaseShift", "ParentSerial"],
   },
   active_scene: null,
   scene_entity_id: "select.reef_tank_scene_selection",
@@ -277,12 +277,13 @@ test("re-resolves when the configured device_id itself changes", async () => {
 // Pump glance view
 // --------------------------------------------------------------------------
 
-function makePumpHass(states, { scheduleResponse, scheduleError } = {}) {
+function makePumpHass(states, { scheduleResponse, scheduleError, wsResponse } = {}) {
   return makeHass({
     devices: { [PUMP_DEVICE_ID]: { id: PUMP_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states,
     scheduleResponse,
     scheduleError,
+    wsResponse,
   });
 }
 
@@ -998,7 +999,7 @@ test("switching mode updates which param fields are shown", async () => {
   assert.equal(paramLabels.length, 3);
   assert.ok(paramLabels.some((t) => t.includes("MaxSpeed")));
   assert.ok(paramLabels.some((t) => t.includes("PhaseShift")));
-  assert.ok(paramLabels.some((t) => t.includes("Parent pump serial")));
+  assert.ok(paramLabels.some((t) => t.includes("Parent pump")));
 });
 
 test("switching mode carries over a shared param's own value", async () => {
@@ -1018,7 +1019,7 @@ test("switching mode carries over a shared param's own value", async () => {
 
 test("Sync and EcoSmartBack show the identical set of param fields", async () => {
   const el = await openEditWithPoints([
-    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 180, Master: "aabbccdd" } },
+    { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 180, ParentSerial: "SN4" } },
   ]);
   el.shadowRoot.querySelector(".point-row").click();
   await el.updateComplete;
@@ -1112,4 +1113,98 @@ test("period dropdown edits the point's own flags correctly", async () => {
 
   assert.equal(el._schedulePoints[0].flags, 11);
   assert.ok(el.shadowRoot.querySelector(".point-row").textContent.includes("Sunset"));
+});
+
+// --------------------------------------------------------------------------
+// Parent-pump picker (Sync/EcoSmartBack's own ParentSerial field)
+// --------------------------------------------------------------------------
+
+const OTHER_PUMP_GROUP = {
+  kind: "pump",
+  group_mask: null,
+  modes: ["ConstantSpeed"],
+  mode_params: { ConstantSpeed: ["MaxSpeed"] },
+  active_scene: null,
+  scene_entity_id: "select.reef_tank_scene_selection",
+  members: [{ device_id: "other-pump-device", serial: "SN4", name: "Left Return Pump" }],
+};
+
+async function openSyncPointWithOtherPumps(otherGroups) {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      scheduleResponse: {
+        points: [
+          { time_minutes: 0, flags: 1, mode: "Sync", params: { MaxSpeed: 300, PhaseShift: 0, ParentSerial: "SN4" } },
+        ],
+      },
+      wsResponse: { groups: [PUMP_GROUP, ...otherGroups] },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  return el;
+}
+
+test("parent-pump picker lists other pumps on the tank, excluding this device itself", async () => {
+  const el = await openSyncPointWithOtherPumps([OTHER_PUMP_GROUP]);
+
+  const select = [...el.shadowRoot.querySelectorAll(".param-label select")].find((s) =>
+    [...s.options].some((o) => o.textContent.includes("Left Return Pump")),
+  );
+  assert.ok(select, "should show a combobox listing the other pump");
+
+  const optionTexts = [...select.options].map((o) => o.textContent.trim());
+  assert.deepEqual(optionTexts, ["Left Return Pump"]);
+  // Confirms self-exclusion isn't accidental -- PUMP_GROUP's own
+  // member ("Return Pump") must never appear as a choice for its own
+  // ParentSerial field.
+  assert.ok(!optionTexts.includes("Return Pump"));
+});
+
+test("parent-pump picker pre-selects the point's own current ParentSerial", async () => {
+  const el = await openSyncPointWithOtherPumps([
+    OTHER_PUMP_GROUP,
+    { ...OTHER_PUMP_GROUP, members: [{ device_id: "third-pump", serial: "SN5", name: "Right Return Pump" }] },
+  ]);
+
+  const select = [...el.shadowRoot.querySelectorAll(".param-label select")].find((s) =>
+    [...s.options].some((o) => o.value === "SN4"),
+  );
+  assert.equal(select.value, "SN4");
+});
+
+test("changing the parent-pump selection updates ParentSerial and saves correctly", async () => {
+  const el = await openSyncPointWithOtherPumps([
+    OTHER_PUMP_GROUP,
+    { ...OTHER_PUMP_GROUP, members: [{ device_id: "third-pump", serial: "SN5", name: "Right Return Pump" }] },
+  ]);
+
+  const select = [...el.shadowRoot.querySelectorAll(".param-label select")].find((s) =>
+    [...s.options].some((o) => o.value === "SN5"),
+  );
+  select.value = "SN5";
+  select.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].params.ParentSerial, "SN5");
+});
+
+test("parent-pump picker shows a clear message when no other pumps exist on the tank", async () => {
+  const el = await openSyncPointWithOtherPumps([]);
+
+  assert.ok(el.shadowRoot.textContent.includes("No other pumps found"));
+  assert.equal(
+    [...el.shadowRoot.querySelectorAll(".param-label select")].find((s) =>
+      [...s.options].some((o) => o.value === "SN4" || o.value === "SN5"),
+    ),
+    undefined,
+  );
 });

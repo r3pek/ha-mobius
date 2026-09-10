@@ -237,6 +237,11 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _editingIndex: number | null = null;
   @state() private _workingPoint?: PumpScheduleEntry;
 
+  // For the parent-pump picker -- every pump member on the same tank
+  // other than this device itself. Populated in _resolveGroup(); see
+  // its own comment there for why no separate fetch is needed.
+  @state() private _otherPumps: ScheduleGroupMember[] = [];
+
   // Not @state -- this is a plain timer handle, not something that
   // should itself trigger a re-render when it changes.
   private _intensityDebounceHandle?: ReturnType<typeof setTimeout>;
@@ -327,6 +332,16 @@ export class MobiusScheduleCard extends LitElement {
         throw new Error(localize("schedule_card.group_not_found"));
       }
       this._group = group;
+
+      // For the parent-pump picker (Sync/EcoSmartBack's own
+      // ParentSerial field) -- every pump member across every OTHER
+      // pump group on this same tank, excluding this device itself.
+      // Comes from this same response (every group on the tank, not
+      // just the matched one), so no separate round-trip is needed.
+      this._otherPumps = response.groups
+        .filter((g) => g.kind === "pump")
+        .flatMap((g) => g.members)
+        .filter((m) => m.device_id !== deviceId);
 
       clearInterval(this._historyRefreshHandle);
       if (group.kind === "light") {
@@ -447,8 +462,8 @@ export class MobiusScheduleCard extends LitElement {
         params[name] = this._workingPoint.params[name];
       } else if (name === "RampType") {
         params[name] = RAMP_TYPES[0];
-      } else if (name === "Master") {
-        params[name] = "";
+      } else if (name === "ParentSerial") {
+        params[name] = this._otherPumps[0]?.serial ?? "";
       } else {
         params[name] = 0;
       }
@@ -878,15 +893,25 @@ export class MobiusScheduleCard extends LitElement {
         </label>
       `;
     }
-    if (name === "Master") {
+    if (name === "ParentSerial") {
       return html`
         <label class="param-label">
-          ${localize("schedule_card.parent_pump_serial")}
-          <input
-            type="text"
-            .value=${String(value ?? "")}
-            @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLInputElement).value)}
-          />
+          ${localize("schedule_card.parent_pump")}
+          ${
+            this._otherPumps.length === 0
+              ? html`<div class="no-other-pumps">${localize("schedule_card.no_other_pumps")}</div>`
+              : html`
+                  <select
+                    .value=${String(value ?? "")}
+                    @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLSelectElement).value)}
+                  >
+                    ${this._otherPumps.map(
+                      (pump) =>
+                        html`<option value=${pump.serial} ?selected=${pump.serial === value}>${pump.name}</option>`,
+                    )}
+                  </select>
+                `
+          }
         </label>
       `;
     }
@@ -1079,6 +1104,11 @@ export class MobiusScheduleCard extends LitElement {
       font-size: 0.8em;
       color: var(--secondary-text-color);
       flex: 1;
+    }
+    .no-other-pumps {
+      font-size: 0.95em;
+      color: var(--error-color, #db4437);
+      padding: 4px 0;
     }
     .edit-row input,
     .edit-row select,

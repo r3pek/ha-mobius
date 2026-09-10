@@ -42,6 +42,7 @@
     "mode": "Mode",
     "cancel": "Cancel",
     "save": "Save",
-    "parent_pump_serial": "Parent pump serial"
+    "parent_pump": "Parent pump",
+    "no_other_pumps": "No other pumps found on this tank."
   }
 }
