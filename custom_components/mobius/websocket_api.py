@@ -20,7 +20,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from mobius import (
     PumpMode, SceneID, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
@@ -64,6 +64,21 @@ class ScheduleGroupMember:
     device_id: str
     serial: str
     name: str
+    # This member's own entity_ids for live-updating values (current
+    # channel intensity per channel + schedule intensity for a light;
+    # speed/flow for a pump) -- resolved via the entity registry, not
+    # guessed/reconstructed, since entity_id is a person-renameable,
+    # display-facing identifier unrelated to unique_id in general. A
+    # card reads these directly via hass.states for anything that
+    # changes live, rather than re-calling resolve_schedule_groups on
+    # every update -- this call is for structural metadata that rarely
+    # changes, not a live-data feed itself. None entries throughout
+    # (e.g. flow_entity_id when gph_reliable hasn't been confirmed
+    # yet) mean that entity doesn't exist right now, not an error.
+    channel_entity_ids: dict[str, str | None] | None = None  # light only
+    schedule_intensity_entity_id: str | None = None  # light only
+    speed_entity_id: str | None = None  # pump only
+    flow_entity_id: str | None = None  # pump only
 
 
 @dataclass
@@ -75,16 +90,25 @@ class ScheduleGroup:
     modes: list[str] | None = None  # pump only
     active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
     schedule_intensity: float | None = None  # light only -- 0.0-1.0, see Schedule1Intensity
+    scene_entity_id: str | None = None  # tank-wide -- same value for every group on the same tank
 
     def as_dict(self) -> dict[str, Any]:
+        def member_dict(m: ScheduleGroupMember) -> dict[str, Any]:
+            d: dict[str, Any] = {"device_id": m.device_id, "serial": m.serial, "name": m.name}
+            if self.kind == "light":
+                d["channel_entity_ids"] = m.channel_entity_ids
+                d["schedule_intensity_entity_id"] = m.schedule_intensity_entity_id
+            else:
+                d["speed_entity_id"] = m.speed_entity_id
+                d["flow_entity_id"] = m.flow_entity_id
+            return d
+
         result: dict[str, Any] = {
             "kind": self.kind,
             "group_mask": self.group_mask,
             "active_scene": self.active_scene,
-            "members": [
-                {"device_id": m.device_id, "serial": m.serial, "name": m.name}
-                for m in self.members
-            ],
+            "scene_entity_id": self.scene_entity_id,
+            "members": [member_dict(m) for m in self.members],
         }
         if self.kind == "light":
             result["channels"] = self.channels
@@ -109,6 +133,37 @@ def _member_device_id(hass: HomeAssistant, entry_id: str, serial: str) -> str | 
     device_registry = dr.async_get(hass)
     entry = device_registry.async_get_device_by_identifier((DOMAIN, serial), entry_id)
     return entry.id if entry is not None else None
+
+
+def _sensor_entity_id(hass: HomeAssistant, serial: str, key: str) -> str | None:
+    """
+    The real entity_id for a sensor.py entity, given the same
+    (serial, key) pair its own unique_id is built from there
+    (f"{serial}_{key}" -- see MobiusEntity's own __init__). A card
+    reading live values (current channel intensity, schedule
+    intensity, pump speed/flow) needs the real entity_id to watch via
+    hass.states, not a guessed/reconstructed one -- entity_id is a
+    person-renameable, display-facing identifier, unrelated to
+    unique_id in general, so this goes through the registry rather
+    than assuming any naming relationship between the two. None if
+    this entity doesn't exist (e.g. FlowRateSensor is only created
+    once gph_reliable is confirmed true -- see sensor.py's own
+    async_setup_entry()).
+    """
+    entity_registry = er.async_get(hass)
+    return entity_registry.async_get_entity_id("sensor", DOMAIN, f"{serial}_{key}")
+
+
+def _scene_entity_id(hass: HomeAssistant, entry_id: str) -> str | None:
+    """The real entity_id for this tank's own select.scene_selection
+    entity (see select.py's own SceneSelectionSelect, unique_id
+    f"{entry_id}_scene_selection") -- tank-wide, not per-serial, unlike
+    _sensor_entity_id() above. None if scenes aren't supported at all
+    on this tank (the entity is only created when at least one device
+    actually reports configured_scenes -- see select.py's own
+    async_setup_entry())."""
+    entity_registry = er.async_get(hass)
+    return entity_registry.async_get_entity_id("select", DOMAIN, f"{entry_id}_scene_selection")
 
 
 def _member_name(serial: str, coordinator: MobiusDeviceCoordinator) -> str:
@@ -237,6 +292,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
 
     groups: list[ScheduleGroup] = []
     active_scene = _tank_active_scene(runtime)
+    scene_entity_id = _scene_entity_id(hass, entry_id)
 
     for key, members in light_groups.items():
         # Sorted by serial -- members[0] (used both here for channels
@@ -260,11 +316,16 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         schedule_intensity = (first_coordinator.data or {}).get("schedule_intensity")
         groups.append(ScheduleGroup(
             kind="light", group_mask=group_mask, channels=channels, active_scene=active_scene,
-            schedule_intensity=schedule_intensity,
+            schedule_intensity=schedule_intensity, scene_entity_id=scene_entity_id,
             members=[
                 ScheduleGroupMember(
                     device_id=_member_device_id(hass, entry_id, serial) or "",
                     serial=serial, name=_member_name(serial, coordinator),
+                    channel_entity_ids={
+                        ch: _sensor_entity_id(hass, serial, f"intensity_{ch.lower()}")
+                        for ch in ((coordinator.data or {}).get("channels") or [])
+                    },
+                    schedule_intensity_entity_id=_sensor_entity_id(hass, serial, "schedule_intensity"),
                 )
                 for serial, coordinator in members
             ],
@@ -273,9 +334,12 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
     for serial, coordinator in pump_singles:
         groups.append(ScheduleGroup(
             kind="pump", group_mask=None, modes=PUMP_MODE_NAMES, active_scene=active_scene,
+            scene_entity_id=scene_entity_id,
             members=[ScheduleGroupMember(
                 device_id=_member_device_id(hass, entry_id, serial) or "",
                 serial=serial, name=_member_name(serial, coordinator),
+                speed_entity_id=_sensor_entity_id(hass, serial, "motor_speed"),
+                flow_entity_id=_sensor_entity_id(hass, serial, "flow_rate"),
             )],
         ))
 

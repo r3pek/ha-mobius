@@ -433,6 +433,38 @@ class LightChannelIntensitySensor(MobiusEntity):
         return round(raw / 10) if raw is not None else None
 
 
+class ScheduleIntensitySensor(MobiusEntity):
+    """
+    Light devices only -- Schedule1Intensity (see python-mobius's own
+    06-light-schedule.md), a schedule-level master dimmer applied on
+    top of every channel's own interpolated value, separate from the
+    schedule's own points entirely. A distinct entity from
+    LightChannelIntensitySensor (which reports each channel's own
+    fully-modified current output) -- this is specifically the one
+    scalar mobius.set_schedule_intensity itself writes, exposed here so
+    a schedule editor card's own "overall intensity" control has a
+    real entity to read reactively via hass.states, rather than being
+    stuck with a stale snapshot from whenever it last called
+    resolve_schedule_groups.
+    """
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, "schedule_intensity",
+            SensorEntityDescription(
+                key="schedule_intensity", translation_key="schedule_intensity",
+                icon="mdi:brightness-6", native_unit_of_measurement="%",
+                state_class="measurement", suggested_display_precision=0,
+            ),
+            device_info,
+        )
+
+    @property
+    def native_value(self):
+        fraction = (self.coordinator.data or {}).get("schedule_intensity")
+        return round(fraction * 100) if fraction is not None else None
+
+
 class CalibrationSensor(MobiusEntity):
     """
     Light devices only -- per the app's
@@ -767,6 +799,7 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
         channel_names = data.get("channels") or []
         for name in channel_names:
             entities.append(LightChannelIntensitySensor(coordinator, serial, device_info, name))
+        entities.append(ScheduleIntensitySensor(coordinator, serial, device_info))
         # Only added if calibration data was actually present at setup --
         # not all lights necessarily support this, and there's no point
         # creating a permanently unavailable entity for one that doesn't.

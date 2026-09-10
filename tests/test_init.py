@@ -1737,7 +1737,7 @@ class TestEnsureSensorsExist:
             "support": "light", "channels": ["RoyalBlue"], "current_intensities": {"RoyalBlue": 500},
             "calibration": MagicMock(completed=True, date_of_last=0, lower_bound=None, upper_bound=None),
         }
-        already = {f"{LIGHT_SERIAL}_intensity_royalblue"}  # calibration NOT yet in this set
+        already = {f"{LIGHT_SERIAL}_intensity_royalblue", f"{LIGHT_SERIAL}_schedule_intensity"}  # calibration NOT yet in this set
         runtime = _make_runtime_for_healing_test(hass, entry, LIGHT_SERIAL, data, already_created=already)
 
         await _async_ensure_sensors_exist(hass, entry)

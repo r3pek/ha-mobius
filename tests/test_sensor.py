@@ -884,3 +884,32 @@ class TestLightChannelIntensitySensorRounding:
         sensor = self._make_sensor({})
         assert sensor.native_value is None
 
+
+class TestScheduleIntensitySensor:
+    """ScheduleIntensitySensor.native_value -- reads coordinator.data's
+    own schedule_intensity (a 0.0-1.0 fraction, see coordinator.py's own
+    fetch logic) and reports it as a whole-number percentage, matching
+    the same instantiate-directly approach as the channel sensor tests
+    above (native_value only reads self.coordinator.data)."""
+
+    def _make_sensor(self, schedule_intensity):
+        from custom_components.mobius.sensor import ScheduleIntensitySensor
+
+        sensor = object.__new__(ScheduleIntensitySensor)
+        sensor.coordinator = MagicMock()
+        sensor.coordinator.data = {"schedule_intensity": schedule_intensity}
+        return sensor
+
+    def test_converts_fraction_to_whole_percent(self):
+        sensor = self._make_sensor(0.588)
+        assert sensor.native_value == 59
+        assert isinstance(sensor.native_value, int)
+
+    def test_full_and_zero_fractions(self):
+        assert self._make_sensor(1.0).native_value == 100
+        assert self._make_sensor(0.0).native_value == 0
+
+    def test_returns_none_when_not_yet_known(self):
+        sensor = self._make_sensor(None)
+        assert sensor.native_value is None
+

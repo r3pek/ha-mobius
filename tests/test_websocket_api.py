@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius import MobiusRuntimeData, tank_device_identifier
@@ -29,7 +29,7 @@ from custom_components.mobius.websocket_api import (
     handle_resolve_schedule_groups, handle_read_schedule_group,
     handle_export_schedule_group_mob, handle_parse_schedule_mob,
     _serial_for_master_hex, _master_hex_for_serial, _translate_master_to_parent_serial,
-    _tank_active_scene,
+    _tank_active_scene, _sensor_entity_id, _scene_entity_id,
 )
 from mobius import (
     SchedulePoint, LightPrimitive, VisualID, PumpSchedulePoint, PumpPrimitiveValue, PumpMode, PumpParam,
@@ -740,3 +740,92 @@ async def test_parse_schedule_mob_unsupported_device(hass):
 
     connection.send_error.assert_called_once()
     assert connection.send_error.call_args[0][1] == "not_supported"
+
+
+# --------------------------------------------------------------------------
+# Entity_id resolution for live-updating data (_sensor_entity_id,
+# _scene_entity_id, and their wiring into resolve_schedule_groups)
+# --------------------------------------------------------------------------
+
+async def test_sensor_entity_id_resolves_a_registered_entity(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    entity_registry = er.async_get(hass)
+    entity_registry.async_get_or_create(
+        "sensor", DOMAIN, "SN1_intensity_royalblue", config_entry=entry,
+        suggested_object_id="left_royalblue_intensity",
+    )
+
+    result = _sensor_entity_id(hass, "SN1", "intensity_royalblue")
+    assert result == "sensor.left_royalblue_intensity"
+
+
+async def test_sensor_entity_id_returns_none_when_not_registered(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    assert _sensor_entity_id(hass, "SN1", "intensity_royalblue") is None
+
+
+async def test_scene_entity_id_resolves_a_registered_entity(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _light_data("Left", None)})
+    entity_registry = er.async_get(hass)
+    entity_registry.async_get_or_create(
+        "select", DOMAIN, f"{entry.entry_id}_scene_selection", config_entry=entry,
+        suggested_object_id="reef_tank_scene_selection",
+    )
+
+    assert _scene_entity_id(hass, entry.entry_id) == "select.reef_tank_scene_selection"
+
+
+async def test_light_group_members_include_resolved_entity_ids(hass):
+    entry, tank_device_id = _setup_tank(hass, {
+        "SN1": _light_data("Left", None, channels=["RoyalBlue", "Violet"]),
+    })
+    entity_registry = er.async_get(hass)
+    entity_registry.async_get_or_create(
+        "sensor", DOMAIN, "SN1_intensity_royalblue", config_entry=entry,
+        suggested_object_id="left_royalblue_intensity",
+    )
+    entity_registry.async_get_or_create(
+        "sensor", DOMAIN, "SN1_schedule_intensity", config_entry=entry,
+        suggested_object_id="left_schedule_intensity",
+    )
+    # Violet's own sensor deliberately left unregistered -- confirms a
+    # partially-resolved dict (one real entity_id, one None) rather
+    # than an all-or-nothing failure.
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    member = groups[0].as_dict()["members"][0]
+    assert member["channel_entity_ids"] == {
+        "RoyalBlue": "sensor.left_royalblue_intensity", "Violet": None,
+    }
+    assert member["schedule_intensity_entity_id"] == "sensor.left_schedule_intensity"
+
+
+async def test_pump_group_members_include_resolved_entity_ids(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump")})
+    entity_registry = er.async_get(hass)
+    entity_registry.async_get_or_create(
+        "sensor", DOMAIN, "SN1_motor_speed", config_entry=entry,
+        suggested_object_id="pump_speed",
+    )
+    # flow_rate deliberately left unregistered (matches a real pump
+    # whose gph_reliable hasn't been confirmed true yet).
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    member = groups[0].as_dict()["members"][0]
+    assert member["speed_entity_id"] == "sensor.pump_speed"
+    assert member["flow_entity_id"] is None
+
+
+async def test_scene_entity_id_is_the_same_across_every_group_on_the_tank(hass):
+    entry, tank_device_id = _setup_tank(hass, {
+        "SN1": _light_data("Left", None), "SN2": _pump_data("Pump"),
+    })
+    entity_registry = er.async_get(hass)
+    entity_registry.async_get_or_create(
+        "select", DOMAIN, f"{entry.entry_id}_scene_selection", config_entry=entry,
+        suggested_object_id="reef_tank_scene_selection",
+    )
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert len(groups) == 2
+    assert all(g.as_dict()["scene_entity_id"] == "select.reef_tank_scene_selection" for g in groups)
