@@ -11,7 +11,7 @@ from typing import Optional
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, CoreState, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -153,6 +153,25 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
     from .services import async_register_services
     async_register_services(hass)
+
+    # Best-effort, optional-feature registration -- see frontend/
+    # __init__.py's own docstring for why this is never allowed to
+    # block or fail the rest of this integration's own setup, and why
+    # it's done here directly rather than via a manifest.json
+    # dependency. Deferred until HA has actually finished starting
+    # (matching the same reasoning Lovelace's own resource store
+    # readiness check inside JSModuleRegistration handles for itself)
+    # since async_setup() itself runs very early in HA's own startup
+    # sequence, often before "frontend"/"http" have finished their own
+    # setup yet even when they're about to succeed.
+    async def _setup_frontend(_event=None) -> None:
+        from .frontend import JSModuleRegistration
+        await JSModuleRegistration(hass).async_register()
+
+    if hass.state == CoreState.running:
+        await _setup_frontend()
+    else:
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _setup_frontend)
 
     return True
 

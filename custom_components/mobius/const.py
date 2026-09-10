@@ -239,3 +239,29 @@ CONF_DEVICES = "devices"
 # prefix to have discovered in the first place.
 CONF_MLPREFIX = "mlprefix"
 
+# --------------------------------------------------------------------------
+# Frontend (Lovelace custom card) registration -- see frontend/__init__.py.
+# --------------------------------------------------------------------------
+
+import json as _json
+from pathlib import Path as _Path
+
+_MANIFEST_PATH = _Path(__file__).parent / "manifest.json"
+with open(_MANIFEST_PATH, encoding="utf-8") as _f:
+    INTEGRATION_VERSION: str = _json.load(_f).get("version", "0.0.0")
+
+# Base URL these cards' own static files are served from -- registered
+# via hass.http.async_register_static_paths() in frontend/__init__.py.
+URL_BASE = "/mobius_frontend"
+
+# The schedule editor and scene selection cards designed this session --
+# one entry per compiled JS file, versioned off the integration's own
+# manifest.json so a person's browser cache is invalidated on update
+# (see frontend/__init__.py's own JSModuleRegistration for how the
+# version query string gets attached and compared against what's
+# already registered in storage-mode Lovelace).
+JSMODULES: list[dict[str, str]] = [
+    {"name": "Mobius Schedule Card", "filename": "mobius-schedule-card.js", "version": INTEGRATION_VERSION},
+    {"name": "Mobius Scene Card", "filename": "mobius-scene-card.js", "version": INTEGRATION_VERSION},
+]
+
