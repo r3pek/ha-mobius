@@ -154,6 +154,23 @@ interface PumpScheduleEntry {
   params: Record<string, unknown>;
 }
 
+// Matches light_schedule_to_dict()'s own output shape exactly (python-mobius).
+interface LightScheduleEntry {
+  time_minutes: number;
+  flags: number;
+  channels: Record<string, number>;
+}
+
+// Everything that's genuinely generic across both kinds (time editing,
+// period editing, the read/save-to-device flow itself) operates on
+// this union rather than PumpScheduleEntry specifically -- see
+// isPumpEntry() below for the one place that needs to tell them apart.
+type ScheduleEntry = PumpScheduleEntry | LightScheduleEntry;
+
+function isPumpEntry(entry: ScheduleEntry): entry is PumpScheduleEntry {
+  return "mode" in entry;
+}
+
 // Bit values confirmed against python-mobius's own documentation
 // (06-light-schedule.md's own flags table -- shared by light and pump
 // points, same wire framing for both). ACTIVE(1) is not a period on
@@ -258,7 +275,7 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _view: "glance" | "edit" = "glance";
   @state() private _scheduleLoading = false;
   @state() private _scheduleError?: string;
-  @state() private _schedulePoints: PumpScheduleEntry[] = [];
+  @state() private _schedulePoints: ScheduleEntry[] = [];
 
   // The actual device write -- everything up to this point (per-point
   // Save) only ever touches _schedulePoints in memory. A brief
@@ -275,7 +292,7 @@ export class MobiusScheduleCard extends LitElement {
   // touch _schedulePoints (and thus don't affect the read-only list's
   // own rendering) until Save is actually pressed.
   @state() private _editingIndex: number | null = null;
-  @state() private _workingPoint?: PumpScheduleEntry;
+  @state() private _workingPoint?: ScheduleEntry;
 
   // For the parent-pump picker -- every pump member on the same tank
   // other than this device itself. Populated in _resolveGroup(); see
@@ -458,11 +475,13 @@ export class MobiusScheduleCard extends LitElement {
 
   private _startEditingPoint(index: number): void {
     this._editingIndex = index;
-    // A real clone, not a reference -- params is itself an object, and
-    // mutating it in place would leak edits-in-progress into
-    // _schedulePoints (and thus the read-only list) before Save.
+    // A real clone, not a reference -- params/channels is itself an
+    // object, and mutating it in place would leak edits-in-progress
+    // into _schedulePoints (and thus the read-only list) before Save.
     const point = this._schedulePoints[index];
-    this._workingPoint = { ...point, params: { ...point.params } };
+    this._workingPoint = isPumpEntry(point)
+      ? { ...point, params: { ...point.params } }
+      : { ...point, channels: { ...point.channels } };
   }
 
   private _cancelEditingPoint(): void {
@@ -489,8 +508,13 @@ export class MobiusScheduleCard extends LitElement {
     this._workingPoint = { ...this._workingPoint, flags: PERIOD_FLAGS[period] };
   }
 
-  private _updateWorkingPointMode(displayMode: DisplayMode): void {
-    if (!this._workingPoint || !this._group) return;
+  // Pump-specific (mode/params only exist on PumpScheduleEntry) --
+  // only ever called from the pump edit form, itself only reachable
+  // when _group.kind === "pump", so the cast is safe by construction
+  // rather than needing a runtime check on every call.
+  private _updateWorkingPumpMode(displayMode: DisplayMode): void {
+    const working = this._workingPoint as PumpScheduleEntry | undefined;
+    if (!working || !this._group) return;
 
     // Anti-Sync isn't a real mode at all -- it's Sync with
     // PhaseShift=180 (see the DisplayMode helpers above for the full
@@ -514,8 +538,8 @@ export class MobiusScheduleCard extends LitElement {
     for (const name of paramNames) {
       if (name === "PhaseShift" && presetPhaseShift !== undefined) {
         params[name] = presetPhaseShift;
-      } else if (name in this._workingPoint.params) {
-        params[name] = this._workingPoint.params[name];
+      } else if (name in working.params) {
+        params[name] = working.params[name];
       } else if (name === "RampType") {
         params[name] = RAMP_TYPES[0];
       } else if (name === "ParentSerial") {
@@ -524,12 +548,13 @@ export class MobiusScheduleCard extends LitElement {
         params[name] = 0;
       }
     }
-    this._workingPoint = { ...this._workingPoint, mode: realMode, params };
+    this._workingPoint = { ...working, mode: realMode, params };
   }
 
-  private _updateWorkingPointParam(name: string, value: string | number): void {
-    if (!this._workingPoint) return;
-    this._workingPoint = { ...this._workingPoint, params: { ...this._workingPoint.params, [name]: value } };
+  private _updateWorkingPumpParam(name: string, value: string | number): void {
+    const working = this._workingPoint as PumpScheduleEntry | undefined;
+    if (!working) return;
+    this._workingPoint = { ...working, params: { ...working.params, [name]: value } };
   }
 
   private async _openEdit(): Promise<void> {
@@ -537,7 +562,7 @@ export class MobiusScheduleCard extends LitElement {
     this._scheduleLoading = true;
     this._scheduleError = undefined;
     try {
-      const response = await this.hass.callWS<{ points: PumpScheduleEntry[] }>({
+      const response = await this.hass.callWS<{ points: ScheduleEntry[] }>({
         type: "mobius/read_schedule_group",
         device_id: this._config!.device_id,
       });
@@ -857,70 +882,127 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  private _renderPumpEditView() {
-    if (this._scheduleError) {
-      return html`
-        <ha-card>
-          <div class="edit-header">
-            <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
-          </div>
-          <div class="warning">${this._scheduleError}</div>
-        </ha-card>
-      `;
-    }
-    if (this._scheduleLoading) {
-      return html`
-        <ha-card>
-          <div class="edit-header">
-            <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
-          </div>
-          <div class="loading">${localize("schedule_card.loading")}</div>
-        </ha-card>
-      `;
-    }
-
+  // The "ha-card + back button (+ title)" wrapper shared by every
+  // state of the edit view (error, loading, and the real content) --
+  // reused as-is by light's own edit view once it exists, since none
+  // of this cares what kind of group is being edited.
+  private _renderEditShell(content: unknown) {
     return html`
       <ha-card>
         <div class="edit-header">
           <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
           <div class="title">${localize("schedule_card.edit_schedule")}</div>
         </div>
-        <div class="point-list">
-          ${this._schedulePoints.map((point, index) =>
-            this._editingIndex === index ? this._renderPointEditForm() : this._renderPointRow(point, index),
-          )}
-        </div>
-        ${this._saveScheduleError ? html`<div class="save-schedule-error">${this._saveScheduleError}</div>` : nothing}
-        ${
-          this._saveScheduleSucceeded
-            ? html`<div class="save-schedule-success">${localize("schedule_card.schedule_saved")}</div>`
-            : nothing
-        }
-        <button
-          class="save-schedule-button"
-          ?disabled=${this._savingSchedule || this._editingIndex != null}
-          @click=${() => this._saveScheduleToDevice()}
-        >
-          ${this._savingSchedule ? localize("schedule_card.saving_schedule") : localize("schedule_card.save_schedule")}
-        </button>
+        ${content}
       </ha-card>
     `;
   }
 
-  private _renderPointRow(point: PumpScheduleEntry, index: number) {
-    const period = periodForFlags(point.flags);
+  // The save-to-device button plus its own status messages -- entirely
+  // generic (write_schedule_group takes whatever's in _schedulePoints
+  // as-is, regardless of kind), reused unchanged by light's own edit
+  // view.
+  private _renderSaveScheduleControls() {
     return html`
-      <button class="point-row" @click=${() => this._startEditingPoint(index)}>
-        <span class="point-time">${formatMinutes(point.time_minutes)}</span>
-        <span class="point-period period-${period}">${periodLabel(period)}</span>
-        <span class="point-mode">${point.mode}</span>
+      ${this._saveScheduleError ? html`<div class="save-schedule-error">${this._saveScheduleError}</div>` : nothing}
+      ${
+        this._saveScheduleSucceeded
+          ? html`<div class="save-schedule-success">${localize("schedule_card.schedule_saved")}</div>`
+          : nothing
+      }
+      <button
+        class="save-schedule-button"
+        ?disabled=${this._savingSchedule || this._editingIndex != null}
+        @click=${() => this._saveScheduleToDevice()}
+      >
+        ${this._savingSchedule ? localize("schedule_card.saving_schedule") : localize("schedule_card.save_schedule")}
       </button>
     `;
   }
 
-  private _renderPointEditForm() {
-    const point = this._workingPoint!;
+  // Fully generic across both kinds -- error/loading states, the
+  // point list, and the save controls are identical either way; the
+  // only thing that differs is what a single point's own edit form
+  // looks like, passed in rather than hardcoded here.
+  private _renderScheduleEditView(renderPointEditForm: () => unknown) {
+    if (this._scheduleError) {
+      return this._renderEditShell(html`<div class="warning">${this._scheduleError}</div>`);
+    }
+    if (this._scheduleLoading) {
+      return this._renderEditShell(html`<div class="loading">${localize("schedule_card.loading")}</div>`);
+    }
+
+    return this._renderEditShell(html`
+      <div class="point-list">
+        ${this._schedulePoints.map((point, index) =>
+          this._editingIndex === index ? renderPointEditForm() : this._renderPointRow(point, index),
+        )}
+      </div>
+      ${this._renderSaveScheduleControls()}
+    `);
+  }
+
+  private _renderPumpEditView() {
+    return this._renderScheduleEditView(() => this._renderPumpPointEditForm());
+  }
+
+  // Generic across both kinds -- time, period, and a one-line summary
+  // (the mode name for a pump point; light's own summary, once it
+  // exists, would describe its channels instead). isPumpEntry() is
+  // the only place this needs to tell the two apart at all.
+  private _renderPointRow(point: ScheduleEntry, index: number) {
     const period = periodForFlags(point.flags);
+    const summary = isPumpEntry(point) ? point.mode : Object.keys(point.channels).join(", ");
+    return html`
+      <button class="point-row" @click=${() => this._startEditingPoint(index)}>
+        <span class="point-time">${formatMinutes(point.time_minutes)}</span>
+        <span class="point-period period-${period}">${periodLabel(period)}</span>
+        <span class="point-mode">${summary}</span>
+      </button>
+    `;
+  }
+
+  // The time + period inputs -- fully generic (both operate on
+  // time_minutes/flags, present on every ScheduleEntry regardless of
+  // kind), reused as-is inside light's own point edit form.
+  private _renderTimeAndPeriodFields(point: ScheduleEntry) {
+    const period = periodForFlags(point.flags);
+    const [hours, minutes] = [Math.floor(point.time_minutes / 60), point.time_minutes % 60];
+    return html`
+      <div class="edit-row">
+        <label>
+          ${localize("schedule_card.time")}
+          <input
+            type="time"
+            .value=${`${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`}
+            @change=${(e: Event) => {
+              const [h, m] = (e.target as HTMLInputElement).value.split(":").map(Number);
+              this._updateWorkingPointTime(h * 60 + m);
+            }}
+          />
+        </label>
+        <label>
+          ${localize("schedule_card.period")}
+          <select
+            .value=${period}
+            @change=${(e: Event) => this._updateWorkingPointPeriod((e.target as HTMLSelectElement).value as Period)}
+          >
+            ${(["day", "night", "sunrise", "sunset"] as Period[]).map(
+              (p) => html`<option value=${p} ?selected=${p === period}>${periodLabel(p)}</option>`,
+            )}
+          </select>
+        </label>
+      </div>
+    `;
+  }
+
+  // Pump-specific from here down -- mode dropdown and its own dynamic
+  // param fields. Light's own point edit form (channel sliders
+  // instead) is a sibling of this method, not a variant of it; both
+  // share _renderTimeAndPeriodFields/_renderEditShell/
+  // _renderSaveScheduleControls/_renderPointRow above.
+  private _renderPumpPointEditForm() {
+    const point = this._workingPoint as PumpScheduleEntry;
     const modes = this._group?.modes ?? [];
     const displayModes = displayModeOptions(modes);
     const currentDisplayMode = displayModeFor(point.mode, point.params.PhaseShift);
@@ -928,46 +1010,22 @@ export class MobiusScheduleCard extends LitElement {
     // by which of Sync/Anti-Sync/EcoSmart Back was chosen above (see
     // the DisplayMode helpers' own reasoning).
     const paramNames = (this._group?.mode_params?.[point.mode] ?? []).filter((name) => name !== "PhaseShift");
-    const [hours, minutes] = [Math.floor(point.time_minutes / 60), point.time_minutes % 60];
 
     return html`
       <div class="point-edit-form">
-        <div class="edit-row">
-          <label>
-            ${localize("schedule_card.time")}
-            <input
-              type="time"
-              .value=${`${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`}
-              @change=${(e: Event) => {
-                const [h, m] = (e.target as HTMLInputElement).value.split(":").map(Number);
-                this._updateWorkingPointTime(h * 60 + m);
-              }}
-            />
-          </label>
-          <label>
-            ${localize("schedule_card.period")}
-            <select
-              .value=${period}
-              @change=${(e: Event) => this._updateWorkingPointPeriod((e.target as HTMLSelectElement).value as Period)}
-            >
-              ${(["day", "night", "sunrise", "sunset"] as Period[]).map(
-                (p) => html`<option value=${p} ?selected=${p === period}>${periodLabel(p)}</option>`,
-              )}
-            </select>
-          </label>
-        </div>
+        ${this._renderTimeAndPeriodFields(point)}
         <label class="mode-label">
           ${localize("schedule_card.mode")}
           <select
             .value=${currentDisplayMode}
-            @change=${(e: Event) => this._updateWorkingPointMode((e.target as HTMLSelectElement).value)}
+            @change=${(e: Event) => this._updateWorkingPumpMode((e.target as HTMLSelectElement).value)}
           >
             ${displayModes.map(
               (dm) => html`<option value=${dm} ?selected=${dm === currentDisplayMode}>${displayModeLabel(dm)}</option>`,
             )}
           </select>
         </label>
-        ${paramNames.map((name) => this._renderParamInput(name, point.params[name]))}
+        ${paramNames.map((name) => this._renderPumpParamInput(name, point.params[name]))}
         <div class="edit-actions">
           <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
             ${localize("schedule_card.cancel")}
@@ -980,14 +1038,14 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  private _renderParamInput(name: string, value: unknown) {
+  private _renderPumpParamInput(name: string, value: unknown) {
     if (name === "RampType") {
       return html`
         <label class="param-label">
           ${name}
           <select
             .value=${String(value)}
-            @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLSelectElement).value)}
+            @change=${(e: Event) => this._updateWorkingPumpParam(name, (e.target as HTMLSelectElement).value)}
           >
             ${RAMP_TYPES.map((rt) => html`<option value=${rt} ?selected=${rt === value}>${rt}</option>`)}
           </select>
@@ -1004,7 +1062,7 @@ export class MobiusScheduleCard extends LitElement {
               : html`
                   <select
                     .value=${String(value ?? "")}
-                    @change=${(e: Event) => this._updateWorkingPointParam(name, (e.target as HTMLSelectElement).value)}
+                    @change=${(e: Event) => this._updateWorkingPumpParam(name, (e.target as HTMLSelectElement).value)}
                   >
                     ${this._otherPumps.map(
                       (pump) =>
@@ -1033,10 +1091,62 @@ export class MobiusScheduleCard extends LitElement {
           type="number"
           .value=${String(value ?? 0)}
           title=${isSpeedParam ? localize("schedule_card.reverse_hint") : nothing}
-          @change=${(e: Event) => this._updateWorkingPointParam(name, Number((e.target as HTMLInputElement).value))}
+          @change=${(e: Event) => this._updateWorkingPumpParam(name, Number((e.target as HTMLInputElement).value))}
         />
         ${isSpeedParam ? html`<span class="field-hint">${localize("schedule_card.reverse_hint")}</span>` : nothing}
       </label>
+    `;
+  }
+
+  private _renderLightEditView() {
+    return this._renderScheduleEditView(() => this._renderLightPointEditForm());
+  }
+
+  // Light-specific from here down -- one intensity slider per real
+  // channel this group actually has, instead of a mode dropdown.
+  // Shares exactly the same _renderTimeAndPeriodFields/_renderEditShell/
+  // _renderSaveScheduleControls/_renderPointRow/_renderScheduleEditView
+  // the pump-specific section above does -- everything above this
+  // point in the file is what made that possible.
+  private _updateWorkingLightChannel(channel: string, percent: number): void {
+    const working = this._workingPoint as LightScheduleEntry | undefined;
+    if (!working) return;
+    this._workingPoint = { ...working, channels: { ...working.channels, [channel]: percent } };
+  }
+
+  private _renderLightPointEditForm() {
+    const point = this._workingPoint as LightScheduleEntry;
+    const channels = this._group?.channels ?? [];
+
+    return html`
+      <div class="point-edit-form">
+        ${this._renderTimeAndPeriodFields(point)}
+        ${channels.map((channel) => {
+          const value = point.channels[channel] ?? 0;
+          return html`
+            <label class="channel-slider-label">
+              <span class="channel-slider-name" style="color: ${channelColor(channel)}">${channel}</span>
+              <span class="channel-slider-value">${value}%</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                .value=${String(value)}
+                @input=${(e: Event) =>
+                  this._updateWorkingLightChannel(channel, Number((e.target as HTMLInputElement).value))}
+              />
+            </label>
+          `;
+        })}
+        <div class="edit-actions">
+          <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
+            ${localize("schedule_card.cancel")}
+          </button>
+          <button class="save-point-button" @click=${() => this._saveEditingPoint()}>
+            ${localize("schedule_card.save")}
+          </button>
+        </div>
+      </div>
     `;
   }
 
@@ -1060,12 +1170,7 @@ export class MobiusScheduleCard extends LitElement {
     }
 
     if (this._view === "edit") {
-      // Light's own point editor lands in follow-up work -- for now,
-      // opening edit on a light group still shows the glance view
-      // rather than a half-built editor with no real controls in it.
-      if (this._group.kind === "pump") {
-        return this._renderPumpEditView();
-      }
+      return this._group.kind === "pump" ? this._renderPumpEditView() : this._renderLightEditView();
     }
 
     if (this._group.kind === "pump") {
@@ -1304,6 +1409,26 @@ export class MobiusScheduleCard extends LitElement {
       color: var(--primary-text-color);
       font-weight: 500;
       min-width: 44px;
+    }
+    .channel-slider-label {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 4px 8px;
+      font-size: 0.85em;
+    }
+    .channel-slider-name {
+      font-weight: 500;
+    }
+    .channel-slider-value {
+      color: var(--secondary-text-color);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .channel-slider-label input[type="range"] {
+      grid-column: 1 / -1;
+      width: 100%;
+      accent-color: var(--primary-color);
     }
     .point-period {
       font-size: 0.8em;

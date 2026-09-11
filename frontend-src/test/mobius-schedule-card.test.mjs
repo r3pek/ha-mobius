@@ -287,11 +287,13 @@ function makePumpHass(states, { scheduleResponse, scheduleError, wsResponse } = 
   });
 }
 
-function makeLightHass(states, historyResponse) {
+function makeLightHass(states, historyResponse, { scheduleResponse, scheduleError } = {}) {
   return makeHass({
     devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states,
     historyResponse,
+    scheduleResponse,
+    scheduleError,
   });
 }
 
@@ -1557,4 +1559,127 @@ test("saving reflects locally-edited points, not just what was originally fetche
   await el.updateComplete;
 
   assert.equal(calls[0].points[0].params.MaxSpeed, 500);
+});
+
+// --------------------------------------------------------------------------
+// Light edit view -- channel sliders, reusing the same generic scaffolding
+// --------------------------------------------------------------------------
+
+async function openLightEditWithPoints(points) {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(60, 0)] },
+    { scheduleResponse: { points } },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  return el;
+}
+
+test("clicking Edit schedule on a light group fetches the real schedule and shows the edit view", async () => {
+  const el = await openLightEditWithPoints([
+    { time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } },
+    { time_minutes: 480, flags: 3, channels: { RoyalBlue: 0, Violet: 0 } },
+  ]);
+
+  assert.equal(el.shadowRoot.querySelectorAll(".point-row").length, 2);
+  assert.ok(el.shadowRoot.querySelector(".back-button"));
+});
+
+test("light point rows summarize by channel names, not a mode", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
+
+  const text = el.shadowRoot.querySelector(".point-row").textContent;
+  assert.ok(text.includes("RoyalBlue"));
+  assert.ok(text.includes("Violet"));
+});
+
+test("clicking a light point opens one slider per real channel, pre-filled with its own value", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 90, flags: 1, channels: { RoyalBlue: 45, Violet: 10 } }]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const sliders = [...el.shadowRoot.querySelectorAll(".channel-slider-label")];
+  assert.equal(sliders.length, 2);
+
+  const royalBlueSlider = sliders.find((s) => s.textContent.includes("RoyalBlue"));
+  const violetSlider = sliders.find((s) => s.textContent.includes("Violet"));
+  assert.equal(royalBlueSlider.querySelector('input[type="range"]').value, "45");
+  assert.equal(violetSlider.querySelector('input[type="range"]').value, "10");
+
+  // Reuses the exact same time/period fields the pump form uses.
+  assert.equal(el.shadowRoot.querySelector('input[type="time"]').value, "01:30");
+});
+
+test("adjusting a channel slider and saving updates that point's own channels", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 45, Violet: 10 } }]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const royalBlueSlider = [...el.shadowRoot.querySelectorAll(".channel-slider-label")]
+    .find((s) => s.textContent.includes("RoyalBlue"))
+    .querySelector('input[type="range"]');
+  royalBlueSlider.value = "90";
+  royalBlueSlider.dispatchEvent(new window.Event("input"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].channels.RoyalBlue, 90);
+  assert.equal(el._schedulePoints[0].channels.Violet, 10); // untouched channel survives
+});
+
+test("cancel discards light point edits without touching the original", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 45, Violet: 10 } }]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const slider = el.shadowRoot.querySelector('input[type="range"]');
+  slider.value = "99";
+  slider.dispatchEvent(new window.Event("input"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].channels.RoyalBlue, 45);
+});
+
+test("Save schedule to device works identically for a light group", async () => {
+  const points = [{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }];
+  const el = await openLightEditWithPoints(points);
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => calls.push({ domain, service, data });
+
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.deepEqual(calls[0], {
+    domain: "mobius",
+    service: "write_schedule_group",
+    data: { device_id: LIGHT_DEVICE_ID, points },
+  });
+  assert.ok(el.shadowRoot.querySelector(".save-schedule-success"));
+});
+
+test("light edit view shows a clear error when the schedule fetch fails, with working back navigation", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    {},
+    { scheduleError: new Error("relay connection lost") },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("relay connection lost"));
+  el.shadowRoot.querySelector(".back-button").click();
+  await el.updateComplete;
+  assert.ok(el.shadowRoot.querySelector(".edit-button"));
 });
