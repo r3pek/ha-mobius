@@ -2,13 +2,19 @@
 
 ## Unreleased
 
-- A pump's own schedule group now reports only the modes that pump
-  actually supports, instead of every possible mode.
-
-- Added backend support for a future schedule editor card: a
-  mobius/resolve_schedule_groups and mobius/read_schedule_group
-  websocket command, and a mobius.write_schedule_group service that
-  re-verifies group membership live immediately before writing.
+- Added two Lovelace cards: a scene card (activate a tank's scenes,
+  or resume its normal schedule) and a schedule editor card (view and
+  edit a light or pump's own schedule).
+- The schedule editor supports adding, editing, and deleting points
+  for both light and pump schedules; downloading and loading .mob
+  files; and writing changes back to the device.
+- A pump's own point editor only offers the modes that pump actually
+  supports, and shows Sync/Anti-Sync/EcoSmart Back the same way the
+  official app does, including a combobox to pick which other pump on
+  the tank to follow.
+- The light glance view shows a channel intensity history chart, an
+  overall intensity slider, and falls back to another light in the
+  same group if one goes offline.
 - The scene selection combo box now exposes how long the active scene
   has left as a duration_remaining_seconds attribute.
 - Fixed a device's batch-disabled state persisting across a gateway
