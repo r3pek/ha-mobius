@@ -1683,3 +1683,138 @@ test("light edit view shows a clear error when the schedule fetch fails, with wo
   await el.updateComplete;
   assert.ok(el.shadowRoot.querySelector(".edit-button"));
 });
+
+// --------------------------------------------------------------------------
+// Adding and deleting points
+// --------------------------------------------------------------------------
+
+test("Add point (pump) opens a new point defaulted to the first supported mode", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".point-edit-form"));
+  assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "ConstantSpeed");
+});
+
+test("saving a newly-added pump point adds it to the list", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 2);
+  assert.equal(el.shadowRoot.querySelectorAll(".point-row").length, 2);
+});
+
+test("cancelling a freshly-added pump point removes it -- no half-configured point left behind", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+  assert.equal(el._schedulePoints.length, 2, "Add itself already appends the point, before any confirmation");
+
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 1, "cancelling the addition must remove it again");
+  assert.equal(el.shadowRoot.querySelectorAll(".point-row").length, 1);
+});
+
+test("pressing Back while a freshly-added point is still mid-edit also removes it", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".back-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 1);
+});
+
+test("cancelling an edit to an EXISTING point does NOT remove it (only fresh additions get removed)", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 1);
+});
+
+test("Delete removes an existing point being edited", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+    { time_minutes: 480, flags: 3, mode: "Feed", params: { MaxSpeed: 200 } },
+  ]);
+  el.shadowRoot.querySelectorAll(".point-row")[0].click();
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".delete-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 1);
+  assert.equal(el._schedulePoints[0].mode, "Feed");
+});
+
+test("Add point button is disabled while another point is being edited", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".add-point-button").disabled);
+});
+
+test("Add point (light) opens a new point with every real channel defaulted to 0", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
+
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+
+  const sliders = [...el.shadowRoot.querySelectorAll('.channel-slider-label input[type="range"]')];
+  assert.equal(sliders.length, 2);
+  assert.ok(sliders.every((s) => s.value === "0"));
+});
+
+test("cancelling a freshly-added light point removes it", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+  assert.equal(el._schedulePoints.length, 2);
+
+  el.shadowRoot.querySelector(".cancel-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 1);
+});
+
+test("saving a newly-added light point adds it to the list with the edited channel values", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
+  el.shadowRoot.querySelector(".add-point-button").click();
+  await el.updateComplete;
+
+  const slider = el.shadowRoot.querySelector('.channel-slider-label input[type="range"]');
+  slider.value = "77";
+  slider.dispatchEvent(new window.Event("input"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints.length, 2);
+  assert.equal(el._schedulePoints[1].channels.RoyalBlue, 77);
+});

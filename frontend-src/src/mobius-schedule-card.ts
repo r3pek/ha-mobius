@@ -294,6 +294,16 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _editingIndex: number | null = null;
   @state() private _workingPoint?: ScheduleEntry;
 
+  // True only when the point currently open for editing was just
+  // created by Add point, not an existing one someone opened to
+  // modify. Cancel needs to tell these apart: discarding an edit to
+  // an existing point means leaving it as it was, but discarding a
+  // brand new point means removing it -- Add already appended a real
+  // (if default-valued) entry to _schedulePoints before editing even
+  // starts, so without this a cancelled Add would silently leave that
+  // half-configured point sitting in the list.
+  @state() private _isNewPoint = false;
+
   // For the parent-pump picker -- every pump member on the same tank
   // other than this device itself. Populated in _resolveGroup(); see
   // its own comment there for why no separate fetch is needed.
@@ -466,15 +476,24 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   private _closeEdit(): void {
+    // Same reasoning as _cancelEditingPoint() -- leaving edit mode
+    // entirely while a freshly-added point is still mid-edit must
+    // remove that point, not leave a half-configured default sitting
+    // in the list the person never actually confirmed.
+    if (this._isNewPoint && this._editingIndex != null) {
+      this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
+    }
     this._view = "glance";
     this._editingIndex = null;
     this._workingPoint = undefined;
+    this._isNewPoint = false;
     this._saveScheduleError = undefined;
     this._saveScheduleSucceeded = false;
   }
 
   private _startEditingPoint(index: number): void {
     this._editingIndex = index;
+    this._isNewPoint = false;
     // A real clone, not a reference -- params/channels is itself an
     // object, and mutating it in place would leak edits-in-progress
     // into _schedulePoints (and thus the read-only list) before Save.
@@ -485,8 +504,18 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   private _cancelEditingPoint(): void {
+    // A fresh Add already appended a real (default-valued) entry to
+    // _schedulePoints before editing started -- cancelling it needs
+    // to remove that entry entirely, not just close the form on top
+    // of it, or a half-configured point would silently stay in the
+    // list. Cancelling an edit to an EXISTING point, by contrast,
+    // should leave that point exactly as it was.
+    if (this._isNewPoint && this._editingIndex != null) {
+      this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
+    }
     this._editingIndex = null;
     this._workingPoint = undefined;
+    this._isNewPoint = false;
   }
 
   private _saveEditingPoint(): void {
@@ -496,6 +525,20 @@ export class MobiusScheduleCard extends LitElement {
     this._schedulePoints = points;
     this._editingIndex = null;
     this._workingPoint = undefined;
+    this._isNewPoint = false;
+  }
+
+  // Generic across both kinds -- deletes whichever point is currently
+  // open for editing. Local-only, same as every other point edit:
+  // nothing reaches the device until Save schedule to device is
+  // pressed, so there's no separate confirmation step here -- the
+  // save action itself is the actual point of no return.
+  private _deleteEditingPoint(): void {
+    if (this._editingIndex == null) return;
+    this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
+    this._editingIndex = null;
+    this._workingPoint = undefined;
+    this._isNewPoint = false;
   }
 
   private _updateWorkingPointTime(minutes: number): void {
@@ -924,7 +967,7 @@ export class MobiusScheduleCard extends LitElement {
   // point list, and the save controls are identical either way; the
   // only thing that differs is what a single point's own edit form
   // looks like, passed in rather than hardcoded here.
-  private _renderScheduleEditView(renderPointEditForm: () => unknown) {
+  private _renderScheduleEditView(renderPointEditForm: () => unknown, onAddPoint: () => void) {
     if (this._scheduleError) {
       return this._renderEditShell(html`<div class="warning">${this._scheduleError}</div>`);
     }
@@ -938,12 +981,18 @@ export class MobiusScheduleCard extends LitElement {
           this._editingIndex === index ? renderPointEditForm() : this._renderPointRow(point, index),
         )}
       </div>
+      <button class="add-point-button" ?disabled=${this._editingIndex != null} @click=${onAddPoint}>
+        ${localize("schedule_card.add_point")}
+      </button>
       ${this._renderSaveScheduleControls()}
     `);
   }
 
   private _renderPumpEditView() {
-    return this._renderScheduleEditView(() => this._renderPumpPointEditForm());
+    return this._renderScheduleEditView(
+      () => this._renderPumpPointEditForm(),
+      () => this._addPumpPoint(),
+    );
   }
 
   // Generic across both kinds -- time, period, and a one-line summary
@@ -996,11 +1045,44 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  // Cancel/Delete/Save -- fully generic (delete/save/cancel all
+  // operate on _editingIndex/_workingPoint directly, neither cares
+  // what kind of point they're holding), reused by both edit forms.
+  private _renderEditActions() {
+    return html`
+      <div class="edit-actions">
+        <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
+          ${localize("schedule_card.cancel")}
+        </button>
+        <button class="delete-point-button" @click=${() => this._deleteEditingPoint()}>
+          ${localize("schedule_card.delete")}
+        </button>
+        <button class="save-point-button" @click=${() => this._saveEditingPoint()}>
+          ${localize("schedule_card.save")}
+        </button>
+      </div>
+    `;
+  }
+
   // Pump-specific from here down -- mode dropdown and its own dynamic
   // param fields. Light's own point edit form (channel sliders
   // instead) is a sibling of this method, not a variant of it; both
   // share _renderTimeAndPeriodFields/_renderEditShell/
   // _renderSaveScheduleControls/_renderPointRow above.
+  private _addPumpPoint(): void {
+    const firstMode = this._group?.modes?.[0];
+    if (!firstMode) return;
+    const newPoint: PumpScheduleEntry = { time_minutes: 0, flags: 1, mode: firstMode, params: {} };
+    this._schedulePoints = [...this._schedulePoints, newPoint];
+    this._startEditingPoint(this._schedulePoints.length - 1);
+    this._isNewPoint = true;
+    // Reuses the exact same "populate this mode's own real params"
+    // logic a person switching mode on an existing point already
+    // gets -- a brand new point is no different from any other point
+    // whose mode just changed from nothing.
+    this._updateWorkingPumpMode(displayModeFor(firstMode, undefined));
+  }
+
   private _renderPumpPointEditForm() {
     const point = this._workingPoint as PumpScheduleEntry;
     const modes = this._group?.modes ?? [];
@@ -1025,15 +1107,7 @@ export class MobiusScheduleCard extends LitElement {
             )}
           </select>
         </label>
-        ${paramNames.map((name) => this._renderPumpParamInput(name, point.params[name]))}
-        <div class="edit-actions">
-          <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
-            ${localize("schedule_card.cancel")}
-          </button>
-          <button class="save-point-button" @click=${() => this._saveEditingPoint()}>
-            ${localize("schedule_card.save")}
-          </button>
-        </div>
+        ${paramNames.map((name) => this._renderPumpParamInput(name, point.params[name]))} ${this._renderEditActions()}
       </div>
     `;
   }
@@ -1099,7 +1173,10 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   private _renderLightEditView() {
-    return this._renderScheduleEditView(() => this._renderLightPointEditForm());
+    return this._renderScheduleEditView(
+      () => this._renderLightPointEditForm(),
+      () => this._addLightPoint(),
+    );
   }
 
   // Light-specific from here down -- one intensity slider per real
@@ -1108,6 +1185,19 @@ export class MobiusScheduleCard extends LitElement {
   // _renderSaveScheduleControls/_renderPointRow/_renderScheduleEditView
   // the pump-specific section above does -- everything above this
   // point in the file is what made that possible.
+  private _addLightPoint(): void {
+    const channels = this._group?.channels ?? [];
+    if (channels.length === 0) return;
+    const newPoint: LightScheduleEntry = {
+      time_minutes: 0,
+      flags: 1,
+      channels: Object.fromEntries(channels.map((c) => [c, 0])),
+    };
+    this._schedulePoints = [...this._schedulePoints, newPoint];
+    this._startEditingPoint(this._schedulePoints.length - 1);
+    this._isNewPoint = true;
+  }
+
   private _updateWorkingLightChannel(channel: string, percent: number): void {
     const working = this._workingPoint as LightScheduleEntry | undefined;
     if (!working) return;
@@ -1138,14 +1228,7 @@ export class MobiusScheduleCard extends LitElement {
             </label>
           `;
         })}
-        <div class="edit-actions">
-          <button class="cancel-button" @click=${() => this._cancelEditingPoint()}>
-            ${localize("schedule_card.cancel")}
-          </button>
-          <button class="save-point-button" @click=${() => this._saveEditingPoint()}>
-            ${localize("schedule_card.save")}
-          </button>
-        </div>
+        ${this._renderEditActions()}
       </div>
     `;
   }
@@ -1352,6 +1435,7 @@ export class MobiusScheduleCard extends LitElement {
       margin-top: 4px;
     }
     .cancel-button,
+    .delete-point-button,
     .save-point-button {
       flex: 1;
       padding: 8px 0;
@@ -1366,10 +1450,32 @@ export class MobiusScheduleCard extends LitElement {
       border: 1px solid var(--divider-color);
       color: var(--primary-text-color);
     }
+    .delete-point-button {
+      background: none;
+      border: 1px solid var(--error-color, #db4437);
+      color: var(--error-color, #db4437);
+    }
     .save-point-button {
       background: var(--primary-color);
       border: none;
       color: var(--text-primary-color, #fff);
+    }
+    .add-point-button {
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px 0;
+      border-radius: 10px;
+      border: 1px dashed var(--divider-color);
+      background: none;
+      color: var(--primary-color);
+      font-family: inherit;
+      font-size: 0.9em;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .add-point-button:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
     .save-schedule-button {
       width: 100%;

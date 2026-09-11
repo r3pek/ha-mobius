@@ -49,6 +49,8 @@
     "reverse_hint": "A negative value reverses rotation direction, on pumps that support it.",
     "schedule_saved": "Schedule saved.",
     "saving_schedule": "Saving…",
-    "save_schedule": "Save schedule to device"
+    "save_schedule": "Save schedule to device",
+    "add_point": "Add point",
+    "delete": "Delete"
   }
 }
