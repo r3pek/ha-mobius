@@ -51,6 +51,12 @@
     "saving_schedule": "Saving…",
     "save_schedule": "Save schedule to device",
     "add_point": "Add point",
-    "delete": "Delete"
+    "delete": "Delete",
+    "download_mob": "Download .mob",
+    "exporting_mob": "Exporting…",
+    "load_mob": "Load .mob",
+    "importing_mob": "Loading…",
+    "mob_wrong_extension": "Please choose a .mob file.",
+    "mob_invalid_json": "This file doesn't look like a valid .mob file."
   }
 }

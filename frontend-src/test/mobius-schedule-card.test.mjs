@@ -33,6 +33,12 @@ before(async () => {
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
 
+  // JSDOM itself doesn't implement these (a real browser always
+  // would) -- mocked minimally so the .mob download flow can run at
+  // all in tests, without needing real blob-URL semantics.
+  window.URL.createObjectURL = () => "blob:mock-url";
+  window.URL.revokeObjectURL = () => {};
+
   await import(DIST_FILE);
   ctor = customElements.get("mobius-schedule-card");
 });
@@ -91,7 +97,19 @@ const PUMP_GROUP = {
   ],
 };
 
-function makeHass({ devices, wsResponse, wsError, historyResponse, states, scheduleResponse, scheduleError } = {}) {
+function makeHass({
+  devices,
+  wsResponse,
+  wsError,
+  historyResponse,
+  states,
+  scheduleResponse,
+  scheduleError,
+  exportMobResponse,
+  exportMobError,
+  parseMobResponse,
+  parseMobError,
+} = {}) {
   return {
     devices: devices ?? { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states: states ?? {},
@@ -106,6 +124,14 @@ function makeHass({ devices, wsResponse, wsError, historyResponse, states, sched
       if (msg.type === "mobius/read_schedule_group") {
         if (scheduleError) throw scheduleError;
         return scheduleResponse ?? { points: [] };
+      }
+      if (msg.type === "mobius/export_schedule_group_mob") {
+        if (exportMobError) throw exportMobError;
+        return exportMobResponse ?? { mob: { schedules: [] } };
+      }
+      if (msg.type === "mobius/parse_schedule_mob") {
+        if (parseMobError) throw parseMobError;
+        return parseMobResponse ?? { points: [] };
       }
       throw new Error(`unexpected callWS message type: ${msg.type}`);
     },
@@ -277,13 +303,28 @@ test("re-resolves when the configured device_id itself changes", async () => {
 // Pump glance view
 // --------------------------------------------------------------------------
 
-function makePumpHass(states, { scheduleResponse, scheduleError, wsResponse } = {}) {
+function makePumpHass(
+  states,
+  {
+    scheduleResponse,
+    scheduleError,
+    wsResponse,
+    exportMobResponse,
+    exportMobError,
+    parseMobResponse,
+    parseMobError,
+  } = {},
+) {
   return makeHass({
     devices: { [PUMP_DEVICE_ID]: { id: PUMP_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states,
     scheduleResponse,
     scheduleError,
     wsResponse,
+    exportMobResponse,
+    exportMobError,
+    parseMobResponse,
+    parseMobError,
   });
 }
 
@@ -1817,4 +1858,191 @@ test("saving a newly-added light point adds it to the list with the edited chann
 
   assert.equal(el._schedulePoints.length, 2);
   assert.equal(el._schedulePoints[1].channels.RoyalBlue, 77);
+});
+
+// --------------------------------------------------------------------------
+// .mob export/import
+// --------------------------------------------------------------------------
+
+function makeMobFile(name, content) {
+  return new window.File([typeof content === "string" ? content : JSON.stringify(content)], name, {
+    type: "application/json",
+  });
+}
+
+function selectMobFile(el, file) {
+  const input = el.shadowRoot.querySelector(".mob-file-input");
+  Object.defineProperty(input, "files", { value: [file], configurable: true });
+  input.dispatchEvent(new window.Event("change"));
+}
+
+test("Download .mob calls export_schedule_group_mob with the right device_id", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  const calls = [];
+  const originalCallWS = el.hass.callWS;
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "mobius/export_schedule_group_mob") calls.push(msg);
+    return originalCallWS(msg);
+  };
+
+  el.shadowRoot.querySelector(".mob-button").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].device_id, PUMP_DEVICE_ID);
+  assert.equal(el.shadowRoot.querySelector(".save-schedule-error"), null);
+});
+
+test("Download .mob shows a clear error when the export itself fails", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      scheduleResponse: { points: [] },
+      exportMobError: new Error("device did not respond"),
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  el.shadowRoot.querySelectorAll(".mob-button")[0].click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.textContent.includes("device did not respond"));
+});
+
+test("Load .mob button triggers the hidden file input", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  const input = el.shadowRoot.querySelector(".mob-file-input");
+  let clicked = false;
+  input.addEventListener("click", () => {
+    clicked = true;
+  });
+
+  el.shadowRoot.querySelectorAll(".mob-button")[1].click();
+  assert.ok(clicked);
+});
+
+test("selecting a valid .mob file replaces the schedule with the parsed points", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  const newPoints = [
+    { time_minutes: 60, flags: 1, mode: "Lagoon", params: { MaxSpeed: 400 } },
+    { time_minutes: 720, flags: 3, mode: "Feed", params: { MaxSpeed: 200 } },
+  ];
+  const calls = [];
+  const originalCallWS = el.hass.callWS;
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "mobius/parse_schedule_mob") {
+      calls.push(msg);
+      return { points: newPoints };
+    }
+    return originalCallWS(msg);
+  };
+
+  selectMobFile(el, makeMobFile("schedule.mob", { schedules: [{ primitiveType: 4 }] }));
+  await settled(el);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].device_id, PUMP_DEVICE_ID);
+  assert.deepEqual(calls[0].mob, { schedules: [{ primitiveType: 4 }] });
+  assert.equal(el._schedulePoints.length, 2);
+  assert.equal(el._schedulePoints[0].mode, "Lagoon");
+});
+
+test("a file with the wrong extension is rejected without ever calling parse_schedule_mob", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  let called = false;
+  const originalCallWS = el.hass.callWS;
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "mobius/parse_schedule_mob") called = true;
+    return originalCallWS(msg);
+  };
+
+  selectMobFile(el, makeMobFile("schedule.json", { schedules: [] }));
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(called, false);
+  assert.ok(el.shadowRoot.textContent.includes(".mob file"));
+  // The original schedule must survive an outright-rejected file untouched.
+  assert.equal(el._schedulePoints.length, 1);
+  assert.equal(el._schedulePoints[0].mode, "ConstantSpeed");
+});
+
+test("a .mob file with invalid JSON content shows a clear error, not a raw parse exception", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  let called = false;
+  const originalCallWS = el.hass.callWS;
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "mobius/parse_schedule_mob") called = true;
+    return originalCallWS(msg);
+  };
+
+  selectMobFile(el, makeMobFile("schedule.mob", "{not valid json"));
+  await settled(el);
+
+  assert.equal(called, false);
+  assert.ok(el.shadowRoot.textContent.toLowerCase().includes("valid"));
+  assert.equal(el._schedulePoints.length, 1);
+});
+
+test("a real, valid .mob file the backend itself rejects shows the backend's own error", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  const el2Hass = el.hass;
+  el2Hass.callWS = async (msg) => {
+    if (msg.type === "mobius/parse_schedule_mob") {
+      throw new Error("Couldn't parse this .mob file: wrong primitive type");
+    }
+    return { points: [] };
+  };
+
+  selectMobFile(el, makeMobFile("schedule.mob", { schedules: [{ primitiveType: 999 }] }));
+  await settled(el);
+
+  assert.ok(el.shadowRoot.textContent.includes("wrong primitive type"));
+  assert.equal(el._schedulePoints.length, 1);
+});
+
+test("mob buttons are disabled while a point is being actively edited", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const mobButtons = el.shadowRoot.querySelectorAll(".mob-button");
+  assert.ok(mobButtons[0].disabled);
+  assert.ok(mobButtons[1].disabled);
+});
+
+test(".mob import works identically for a light group", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
+  const newPoints = [{ time_minutes: 30, flags: 1, channels: { RoyalBlue: 80, Violet: 5 } }];
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "mobius/parse_schedule_mob") return { points: newPoints };
+    throw new Error(`unexpected: ${msg.type}`);
+  };
+
+  selectMobFile(el, makeMobFile("schedule.mob", { schedules: [{ primitiveType: 1 }] }));
+  await settled(el);
+
+  assert.equal(el._schedulePoints.length, 1);
+  assert.equal(el._schedulePoints[0].channels.RoyalBlue, 80);
 });

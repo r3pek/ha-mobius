@@ -286,6 +286,16 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _saveScheduleError?: string;
   @state() private _saveScheduleSucceeded = false;
 
+  // .mob export/import -- both local browser file operations, never
+  // touching the device directly. Import replaces _schedulePoints
+  // wholesale (a .mob file represents a whole schedule, not a single
+  // point) but doesn't write anything on its own -- the person still
+  // reviews and presses Save schedule to device afterward, same as
+  // any other local edit.
+  @state() private _exportingMob = false;
+  @state() private _importingMob = false;
+  @state() private _mobError?: string;
+
   // Which point (by index into _schedulePoints) is currently expanded
   // for editing -- null when none is. _workingPoint is a separate,
   // mutable copy of that point's own data, so edits in progress don't
@@ -643,6 +653,79 @@ export class MobiusScheduleCard extends LitElement {
     }
   }
 
+  private async _exportMob(): Promise<void> {
+    this._exportingMob = true;
+    this._mobError = undefined;
+    try {
+      // The card never encodes/decodes primitiveData itself -- the
+      // response is already the finished .mob file's own JSON
+      // content, built server-side by python-mobius.
+      const response = await this.hass.callWS<{ mob: unknown }>({
+        type: "mobius/export_schedule_group_mob",
+        device_id: this._config!.device_id,
+      });
+      const blob = new Blob([JSON.stringify(response.mob, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${this._config!.device_id}.mob`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      this._mobError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this._exportingMob = false;
+    }
+  }
+
+  private _triggerMobFilePicker(): void {
+    this._mobError = undefined;
+    this.shadowRoot?.querySelector<HTMLInputElement>(".mob-file-input")?.click();
+  }
+
+  private async _handleMobFileSelected(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allows re-selecting the same file name later
+    if (!file) return;
+
+    // An explicit extension check, not just the file input's own
+    // accept=".mob" attribute -- that's only a picker hint and is
+    // trivial for a person to bypass (drag-and-drop, "all files").
+    if (!file.name.toLowerCase().endsWith(".mob")) {
+      this._mobError = localize("schedule_card.mob_wrong_extension");
+      return;
+    }
+
+    this._importingMob = true;
+    this._mobError = undefined;
+    try {
+      const text = await file.text();
+      let mob: unknown;
+      try {
+        mob = JSON.parse(text);
+      } catch {
+        throw new Error(localize("schedule_card.mob_invalid_json"));
+      }
+      const response = await this.hass.callWS<{ points: ScheduleEntry[] }>({
+        type: "mobius/parse_schedule_mob",
+        device_id: this._config!.device_id,
+        mob,
+      });
+      // Replaces the whole schedule -- a .mob file represents an
+      // entire schedule, not a single point. Nothing is written to
+      // the device yet; the person still reviews this and presses
+      // Save schedule to device themselves, same as any local edit.
+      this._schedulePoints = response.points;
+      this._editingIndex = null;
+      this._workingPoint = undefined;
+    } catch (err) {
+      this._mobError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this._importingMob = false;
+    }
+  }
+
   // Reads live, not the group's own active_scene snapshot (only
   // current as of whenever resolve_schedule_groups last ran) --
   // scene_entity_id is tank-wide structural metadata that rarely
@@ -963,6 +1046,38 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  // .mob download/load -- fully generic (export/parse_schedule_mob
+  // both just take/return whatever ScheduleEntry data the card
+  // already works with either way), reused unchanged by both kinds.
+  private _renderMobControls() {
+    return html`
+      ${this._mobError ? html`<div class="save-schedule-error">${this._mobError}</div>` : nothing}
+      <div class="mob-controls">
+        <button
+          class="mob-button"
+          ?disabled=${this._exportingMob || this._editingIndex != null}
+          @click=${() => this._exportMob()}
+        >
+          ${this._exportingMob ? localize("schedule_card.exporting_mob") : localize("schedule_card.download_mob")}
+        </button>
+        <button
+          class="mob-button"
+          ?disabled=${this._importingMob || this._editingIndex != null}
+          @click=${() => this._triggerMobFilePicker()}
+        >
+          ${this._importingMob ? localize("schedule_card.importing_mob") : localize("schedule_card.load_mob")}
+        </button>
+        <input
+          type="file"
+          class="mob-file-input"
+          accept=".mob"
+          style="display: none"
+          @change=${(e: Event) => this._handleMobFileSelected(e)}
+        />
+      </div>
+    `;
+  }
+
   // Fully generic across both kinds -- error/loading states, the
   // point list, and the save controls are identical either way; the
   // only thing that differs is what a single point's own edit form
@@ -984,7 +1099,7 @@ export class MobiusScheduleCard extends LitElement {
       <button class="add-point-button" ?disabled=${this._editingIndex != null} @click=${onAddPoint}>
         ${localize("schedule_card.add_point")}
       </button>
-      ${this._renderSaveScheduleControls()}
+      ${this._renderMobControls()} ${this._renderSaveScheduleControls()}
     `);
   }
 
@@ -1474,6 +1589,27 @@ export class MobiusScheduleCard extends LitElement {
       cursor: pointer;
     }
     .add-point-button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .mob-controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .mob-button {
+      flex: 1;
+      padding: 8px 0;
+      border-radius: 10px;
+      border: 1px solid var(--divider-color);
+      background: none;
+      color: var(--primary-text-color);
+      font-family: inherit;
+      font-size: 0.85em;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .mob-button:disabled {
       opacity: 0.5;
       cursor: default;
     }
