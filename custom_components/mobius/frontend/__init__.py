@@ -6,20 +6,23 @@ by hand -- see custom-card development guide at
 https://developers.home-assistant.io/docs/frontend/custom-ui/custom-card
 and the "embedding a card in an integration" pattern this follows.
 
-Deliberately NOT declared as manifest.json dependencies ("frontend",
-"http") -- both are core components almost always already loaded by
-the time a custom integration's own async_setup() runs in a real HA
-instance, but declaring them as hard dependencies forces them to be
-FULLY set up (including their own component-level async_setup, not
-just importable) before this integration's own setup can proceed at
-all, and a failure there would then block this integration's entire
-setup -- device control, sensors, everything -- over what is, for
+"http" is declared in manifest.json's own after_dependencies (not
+dependencies) -- hassfest requires it be declared one way or the
+other for a component this module actually imports from, but
+after_dependencies only affects setup ORDER (http first, if it's
+being set up anyway), unlike dependencies, which would force http to
+be FULLY set up (including its own component-level async_setup, not
+just importable) before this integration's own setup could proceed
+at all -- and a failure there would then block this integration's
+entire setup (device control, sensors, everything) over what is, for
 this integration, a purely cosmetic, optional feature (a nicer
 Lovelace card; the same devices and data are otherwise fully usable
-through generic entities and cards without it at all). async_setup_component()
-below is called directly and defensively instead, and every step here
-is wrapped so a failure never propagates out to block the rest of
-this integration's own setup.
+through generic entities and cards without it at all). Confirmed via
+a real test run that after_dependencies doesn't reintroduce that
+failure mode the way dependencies did. async_setup_component() below
+is still called directly and defensively regardless, and every step
+here is wrapped so a failure never propagates out to block the rest
+of this integration's own setup.
 """
 
 from __future__ import annotations

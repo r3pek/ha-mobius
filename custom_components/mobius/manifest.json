@@ -1,6 +1,7 @@
 {
   "domain": "mobius",
   "name": "Mobius",
+  "after_dependencies": ["http"],
   "bluetooth": [
     { "local_name": "MOBIUS" },
     { "manufacturer_id": 514 },
