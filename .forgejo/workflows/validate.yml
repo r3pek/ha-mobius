@@ -7,11 +7,14 @@ name: Validate
 # (push/pull_request/daily schedule, confirmed directly against
 # https://hacs.xyz/docs/publish/action/) -- these checks only need to
 # be current at the moment something's actually released, not on every
-# push/PR in between.
+# push/PR in between. Daily schedule added anyway, since HACS can
+# tighten its own rules independent of any change here.
 "on":
   push:
     tags:
       - "v*"
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch: {}
   # Deliberately bare -- Forgejo's own workflow_call schema only
   # supports "inputs" and "outputs" here, NOT "secrets" (confirmed via
