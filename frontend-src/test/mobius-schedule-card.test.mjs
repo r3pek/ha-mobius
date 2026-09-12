@@ -356,6 +356,26 @@ test("pump glance shows flow using whatever unit is configured on the sensor (L/
   assert.ok(text.includes("L/h"));
 });
 
+test("pump glance rounds a decimal flow reading to a whole number", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "412.73", attributes: { unit_of_measurement: "GPH" } },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".reading-value").textContent, "413");
+});
+
+test("pump glance rounds a decimal speed reading (fallback path) to a whole number", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_speed": { state: "42.4", attributes: {} },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".reading-value").textContent, "42%");
+});
+
 test("pump glance respects a different configured unit (GPH) -- never assumes L/h", async () => {
   // The device itself always reports GPH; Home Assistant's own
   // per-entity unit override converts both state and
@@ -2186,4 +2206,118 @@ test("choosing a Variance category and saving stores its own representative raw 
   await el.updateComplete;
 
   assert.equal(el._schedulePoints[0].params.Variance, 850);
+});
+
+// --------------------------------------------------------------------------
+// Chart hover tooltip and color legend
+// --------------------------------------------------------------------------
+
+test("chart shows a legend with each channel's own color and name, unconditionally", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    {
+      "sensor.left_royalblue": [historyEntry(50, 0)],
+      "sensor.left_violet": [historyEntry(30, 0)],
+    },
+  );
+  await settled(el);
+
+  const legendItems = [...el.shadowRoot.querySelectorAll(".chart-legend-item")];
+  assert.equal(legendItems.length, 2);
+  assert.ok(legendItems.some((i) => i.textContent.includes("RoyalBlue")));
+  assert.ok(legendItems.some((i) => i.textContent.includes("Violet")));
+  for (const item of legendItems) {
+    assert.ok(item.querySelector(".chart-legend-swatch"));
+  }
+});
+
+test("no hover tooltip is shown until the chart is actually hovered", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".chart-tooltip"), null);
+});
+
+test("hovering the chart shows a tooltip with each channel's own value at that point in time", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    {
+      "sensor.left_royalblue": [historyEntry(0, 0), historyEntry(80, 3600 * 12), historyEntry(60, 3600 * 20)],
+      "sensor.left_violet": [historyEntry(10, 0), historyEntry(40, 3600 * 12)],
+    },
+  );
+  await settled(el);
+
+  // Simulate hovering at the exact midday point (0.5 of the day).
+  el._chartHoverFraction = 0.5;
+  await el.updateComplete;
+
+  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
+  assert.ok(tooltip);
+  const rows = [...tooltip.querySelectorAll(".chart-tooltip-row")];
+  assert.equal(rows.length, 2);
+
+  const royalBlueRow = rows.find((r) => r.textContent.includes("RoyalBlue"));
+  const violetRow = rows.find((r) => r.textContent.includes("Violet"));
+  assert.ok(royalBlueRow.querySelector(".chart-tooltip-value").textContent.includes("80"));
+  assert.ok(violetRow.querySelector(".chart-tooltip-value").textContent.includes("40"));
+});
+
+test("the hover line is positioned at the hovered fraction across the chart", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0.75;
+  await el.updateComplete;
+
+  const line = el.shadowRoot.querySelector(".chart-hover-line");
+  assert.ok(line.getAttribute("style").includes("75%"));
+});
+
+test("moving the mouse off the chart clears the tooltip", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0.5;
+  await el.updateComplete;
+  assert.ok(el.shadowRoot.querySelector(".chart-tooltip"));
+
+  el.shadowRoot.querySelector(".chart-container").dispatchEvent(new window.Event("mouseleave"));
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".chart-tooltip"), null);
+});
+
+test("mousemove over the chart container converts pixel position to the correct hover fraction", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const container = el.shadowRoot.querySelector(".chart-container");
+  container.getBoundingClientRect = () => ({ left: 100, width: 400 });
+
+  const event = new window.MouseEvent("mousemove", { clientX: 300 });
+  Object.defineProperty(event, "currentTarget", { value: container });
+  container.dispatchEvent(event);
+  await el.updateComplete;
+
+  // (300 - 100) / 400 = 0.5
+  assert.equal(el._chartHoverFraction, 0.5);
 });

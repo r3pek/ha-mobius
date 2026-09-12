@@ -210,6 +210,16 @@ function formatMinutes(minutes: number): string {
   return `${h}:${String(m).padStart(2, "0")}`;
 }
 
+// hass.states[...].state is always the raw, unrounded string --
+// suggested_display_precision on the backend's own SensorEntity only
+// applies inside Home Assistant's own frontend components, never to
+// a state read directly like this. Falls back to the state as-is if
+// it isn't actually numeric, rather than ever showing "NaN".
+function roundedState(state: string): string {
+  const n = Number(state);
+  return Number.isFinite(n) ? String(Math.round(n)) : state;
+}
+
 // A fixed, universal enum (python-mobius's own RampType) -- unlike
 // PumpMode/channels, its own valid values don't vary by pump model,
 // so unlike those this doesn't need to come from the backend at all.
@@ -271,6 +281,14 @@ export class MobiusScheduleCard extends LitElement {
 
   @state() private _channelHistoryByEntity: Record<string, HistoryPoint[]> = {};
   @state() private _historyLoading = false;
+
+  // 0-1 fraction across the chart's own width -- a fraction rather
+  // than a pixel X so it doesn't depend on the SVG's actual rendered
+  // size (which varies with the card's own layout width, unlike its
+  // fixed viewBox). Deliberately kept OUT of _renderChannelChart's own
+  // memoization key -- see _renderChartHoverOverlay's own comment for
+  // why.
+  @state() private _chartHoverFraction?: number;
 
   @state() private _view: "glance" | "edit" = "glance";
   @state() private _scheduleLoading = false;
@@ -771,7 +789,7 @@ export class MobiusScheduleCard extends LitElement {
           flowAvailable
             ? html`
                 <div class="reading">
-                  <span class="reading-value">${flowState!.state}</span>
+                  <span class="reading-value">${roundedState(flowState!.state)}</span>
                   <!-- Never a hardcoded assumption (e.g. "L/h") -- the
                   device itself always reports GPH, but Home Assistant's
                   own per-entity unit override (available for
@@ -788,7 +806,7 @@ export class MobiusScheduleCard extends LitElement {
             : speedAvailable
               ? html`
                   <div class="reading">
-                    <span class="reading-value">${speedState!.state}%</span>
+                    <span class="reading-value">${roundedState(speedState!.state)}%</span>
                     <span class="reading-unit">${localize("schedule_card.speed_not_reliable")}</span>
                   </div>
                 `
@@ -865,6 +883,86 @@ export class MobiusScheduleCard extends LitElement {
   // for a result that would come out identical every time anyway.
   private _lastChartKey?: string;
   private _lastChartResult?: TemplateResult;
+
+  private _handleChartMouseMove(e: MouseEvent): void {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this._chartHoverFraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  }
+
+  private _handleChartMouseLeave(): void {
+    this._chartHoverFraction = undefined;
+  }
+
+  // Deliberately NOT part of _renderChannelChart's own memoized
+  // result -- that memoization exists specifically to skip
+  // re-stringifying every channel's own SVG path on renders the chart
+  // itself hasn't changed for (see its own comment), and
+  // _chartHoverFraction changes on every mousemove. Recomputing just
+  // this small overlay each time is cheap; recomputing the whole
+  // chart on every mouse pixel would defeat the point of memoizing it
+  // at all.
+  private _renderChartHoverOverlay(sourceMember: ScheduleGroupMember) {
+    if (this._chartHoverFraction === undefined) return nothing;
+
+    const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
+      (entry): entry is [string, string] => !!entry[1],
+    );
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const hoverTimeMs = startOfDay.getTime() + this._chartHoverFraction * 24 * 60 * 60 * 1000;
+
+    // Nearest point in time per channel, not interpolated -- history
+    // is already a step function server-side (HA's own compressed
+    // state format), so the value that was actually true at the
+    // nearest recorded moment is more honest than a value invented
+    // between two real ones.
+    const readings = entries
+      .map(([channelName, entityId]) => {
+        const points = this._channelHistoryByEntity[entityId];
+        if (!points || points.length === 0) return null;
+        const nearest = points.reduce((best, p) =>
+          Math.abs(p.t - hoverTimeMs) < Math.abs(best.t - hoverTimeMs) ? p : best,
+        );
+        return { channelName, value: Math.round(nearest.v) };
+      })
+      .filter((r): r is { channelName: string; value: number } => r !== null);
+
+    if (readings.length === 0) return nothing;
+
+    return html`
+      <div class="chart-hover-line" style="left: ${this._chartHoverFraction * 100}%"></div>
+      <div class="chart-tooltip" style="left: ${this._chartHoverFraction * 100}%">
+        ${readings.map(
+          (r) => html`
+            <div class="chart-tooltip-row">
+              <span class="chart-tooltip-swatch" style="background: ${channelColor(r.channelName)}"></span>
+              <span class="chart-tooltip-name">${r.channelName}</span>
+              <span class="chart-tooltip-value">${r.value}%</span>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  private _renderChartLegend(sourceMember: ScheduleGroupMember) {
+    const channelNames = Object.keys(sourceMember.channel_entity_ids ?? {}).filter(
+      (name) => sourceMember.channel_entity_ids![name],
+    );
+    if (channelNames.length === 0) return nothing;
+    return html`
+      <div class="chart-legend">
+        ${channelNames.map(
+          (name) => html`
+            <span class="chart-legend-item">
+              <span class="chart-legend-swatch" style="background: ${channelColor(name)}"></span>
+              ${name}
+            </span>
+          `,
+        )}
+      </div>
+    `;
+  }
 
   private _renderChannelChart(sourceMember: ScheduleGroupMember) {
     if (this._historyLoading) {
@@ -977,7 +1075,16 @@ export class MobiusScheduleCard extends LitElement {
         }
         ${
           sourceMember
-            ? this._renderChannelChart(sourceMember)
+            ? html`
+                <div
+                  class="chart-container"
+                  @mousemove=${this._handleChartMouseMove}
+                  @mouseleave=${this._handleChartMouseLeave}
+                >
+                  ${this._renderChannelChart(sourceMember)} ${this._renderChartHoverOverlay(sourceMember)}
+                </div>
+                ${this._renderChartLegend(sourceMember)}
+              `
             : html`<div class="reading-missing">${localize("schedule_card.no_channel_data")}</div>`
         }
         ${
@@ -1775,6 +1882,70 @@ export class MobiusScheduleCard extends LitElement {
       width: 100%;
       height: auto;
       margin-bottom: 12px;
+    }
+    .chart-container {
+      position: relative;
+    }
+    .chart-hover-line {
+      position: absolute;
+      top: 0;
+      bottom: 16px;
+      width: 1px;
+      background: var(--primary-text-color);
+      opacity: 0.3;
+      pointer-events: none;
+      transform: translateX(-50%);
+    }
+    .chart-tooltip {
+      position: absolute;
+      top: 0;
+      transform: translateX(-50%);
+      background: var(--card-background-color);
+      border: 1px solid var(--divider-color);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 0.78em;
+      pointer-events: none;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      white-space: nowrap;
+      z-index: 1;
+    }
+    .chart-tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .chart-tooltip-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .chart-tooltip-name {
+      flex: 1;
+    }
+    .chart-tooltip-value {
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: -6px 0 12px;
+      font-size: 0.78em;
+      color: var(--secondary-text-color);
+    }
+    .chart-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .chart-legend-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
     }
     .chart-gridline {
       stroke: var(--divider-color);
