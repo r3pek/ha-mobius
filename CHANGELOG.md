@@ -2,30 +2,23 @@
 
 ## Unreleased
 
-- Added two Lovelace cards: a scene card (activate a tank's scenes,
-  or resume its normal schedule) and a schedule editor card (view and
-  edit a light or pump's own schedule).
+- Added two Lovelace cards: a scene card and a schedule editor card
+  for a light or pump's own schedule.
 - The schedule editor supports adding, editing, and deleting points
-  for both light and pump schedules; downloading and loading .mob
-  files; and writing changes back to the device.
+  for both light and pump schedules, downloading and loading .mob
+  files, and writing changes back to the device.
 - A pump's own point editor only offers the modes that pump actually
-  supports, and shows Sync/Anti-Sync/EcoSmart Back the same way the
-  official app does, including a combobox to pick which other pump on
-  the tank to follow.
+  supports, and shows Sync/Anti-Sync/EcoSmart Back the way the
+  official app does.
 - The light glance view shows a channel intensity history chart, an
   overall intensity slider, and falls back to another light in the
   same group if one goes offline.
 - The scene selection combo box now exposes how long the active scene
   has left as a duration_remaining_seconds attribute.
 - Fixed a device's batch-disabled state persisting across a gateway
-  change -- it now resets when a new gateway is elected, since a
-  batch failure through one gateway/relay path doesn't mean the same
-  device's batching would also fail through a different one.
-- Fixed a single transient get_supported_attributes() failure
-  permanently starving a device of almost all batched data on every
-  poll after that, silently, with no error ever raised again -- the
-  fetch now correctly retries on the next poll instead of caching
-  that one failure as if it meant "this device supports nothing."
+  change.
+- Fixed a transient get_supported_attributes() failure permanently
+  disabling batched data for a device on every poll after that.
 
 ## 0.7.0
 
