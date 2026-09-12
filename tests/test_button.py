@@ -18,12 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType, Tank, MetadataSnapshot
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
-from custom_components.mobius.button import RebootButton
+from custom_components.mobius.button import RebootButton, RestartAllButton
 
 PAN_ID = 0x3D0F
 PUMP_ADDRESS = "AA:AA:AA:AA:AA:01"
@@ -147,3 +148,107 @@ async def test_async_press_raises_homeassistanterror_on_reboot_failure(hass):
 
     with pytest.raises(HomeAssistantError, match="Failed to reboot"):
         await button.async_press()
+
+
+def _fake_entry_with_coordinators(*coordinators):
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.runtime_data.coordinators = {f"serial{i}": c for i, c in enumerate(coordinators)}
+    return entry
+
+
+async def test_pump_entry_setup_creates_a_restart_all_button_on_the_tank_device(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_registry = er.async_get(hass)
+    # Looked up by unique_id, since the entity_id's own slug depends
+    # on the tank device's own name, which this test doesn't control
+    # directly.
+    matches = [
+        e for e in entity_registry.entities.values()
+        if e.unique_id == f"{entry.entry_id}_restart_all"
+    ]
+    assert len(matches) == 1
+    state = hass.states.get(matches[0].entity_id)
+    assert state is not None
+    assert state.attributes.get("device_class") == "restart"
+
+
+async def test_restart_all_calls_reboot_all_via_the_first_connectable_coordinator():
+    fake_device = MagicMock()
+    fake_device.reboot_all = AsyncMock()
+    fake_coordinator = MagicMock()
+    fake_coordinator.serial = "serial0"
+    fake_coordinator.async_get_connected_device = AsyncMock(return_value=fake_device)
+
+    entry = _fake_entry_with_coordinators(fake_coordinator)
+    button = RestartAllButton(entry, ("mobius", "tank_test"))
+
+    await button.async_press()
+
+    fake_device.reboot_all.assert_awaited_once()
+
+
+async def test_restart_all_falls_back_to_the_next_coordinator_if_the_first_fails():
+    """The broadcast only needs to reach the mesh once -- a device
+    that's individually unreachable right now shouldn't block using
+    whichever other device IS reachable as the entry point."""
+    failing_coordinator = MagicMock()
+    failing_coordinator.serial = "serial0"
+    failing_coordinator.async_get_connected_device = AsyncMock(
+        side_effect=HomeAssistantError("No gateway currently available")
+    )
+
+    working_device = MagicMock()
+    working_device.reboot_all = AsyncMock()
+    working_coordinator = MagicMock()
+    working_coordinator.serial = "serial1"
+    working_coordinator.async_get_connected_device = AsyncMock(return_value=working_device)
+
+    entry = _fake_entry_with_coordinators(failing_coordinator, working_coordinator)
+    button = RestartAllButton(entry, ("mobius", "tank_test"))
+
+    await button.async_press()
+
+    working_device.reboot_all.assert_awaited_once()
+
+
+async def test_restart_all_raises_homeassistanterror_only_once_every_coordinator_fails():
+    coordinator_a = MagicMock()
+    coordinator_a.serial = "serial0"
+    coordinator_a.async_get_connected_device = AsyncMock(
+        side_effect=HomeAssistantError("No gateway currently available")
+    )
+    coordinator_b = MagicMock()
+    coordinator_b.serial = "serial1"
+    device_b = MagicMock()
+    device_b.reboot_all = AsyncMock(side_effect=IOError("device returned FSCI status Failed setting attribute 6"))
+    coordinator_b.async_get_connected_device = AsyncMock(return_value=device_b)
+
+    entry = _fake_entry_with_coordinators(coordinator_a, coordinator_b)
+    button = RestartAllButton(entry, ("mobius", "tank_test"))
+
+    with pytest.raises(HomeAssistantError, match="Failed to restart all devices"):
+        await button.async_press()
+

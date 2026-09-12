@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a "Restart all devices" button on the tank device, matching
+  the app's own tank-settings option -- one broadcast write reboots
+  every device on the mesh.
 - Added two Lovelace cards: a scene card and a schedule editor card
   for a light or pump's own schedule.
 - The schedule editor supports adding, editing, and deleting points
