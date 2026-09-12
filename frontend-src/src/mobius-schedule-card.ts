@@ -1027,11 +1027,26 @@ export class MobiusScheduleCard extends LitElement {
     const toX = (t: number) => ((t - dayStartMs) / dayMs) * CHART_WIDTH;
     const toY = (v: number) => CHART_HEIGHT - (Math.max(0, Math.min(100, v)) / 100) * CHART_HEIGHT;
 
+    const nowMs = Date.now();
+    const nowX = toX(nowMs);
     const lines = entries
       .map(([channelName, entityId]) => {
         const points = this._channelHistoryByEntity[entityId];
         if (!points || points.length === 0) return nothing;
-        const path = points.map((p) => `${toX(p.t).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
+        // Confirmed from Home Assistant's own state-history-chart-line:
+        // a sensor that stops changing stops producing new history
+        // points at all (no state_changed event fires for a repeated
+        // value), so without this the line would just stop wherever
+        // the value last actually changed instead of holding flat to
+        // now, leaving a growing blank gap for anything that's been
+        // steady for a while. Extends with the last known value at
+        // the current time, same as HA's own chart does -- only when
+        // that's actually later than the last real point, so a stale
+        // point in the future (a clock skew edge case) never draws
+        // backwards.
+        const last = points[points.length - 1];
+        const extended = nowMs > last.t ? [...points, { t: nowMs, v: last.v }] : points;
+        const path = extended.map((p) => `${toX(p.t).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
         return svg`<polyline points=${path} fill="none" stroke=${channelColor(channelName)} stroke-width="2" />`;
       })
       .filter((l) => l !== nothing);
@@ -1040,7 +1055,6 @@ export class MobiusScheduleCard extends LitElement {
       return html`<div class="chart-status">${localize("schedule_card.no_history_yet")}</div>`;
     }
 
-    const nowX = toX(Date.now());
     const lang = this.hass?.locale;
     const hourLabel = (hour: number) => {
       const d = new Date(startOfDay);

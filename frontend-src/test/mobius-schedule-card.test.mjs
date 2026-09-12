@@ -2457,3 +2457,60 @@ test("pressing Enter on the reading also opens more-info (keyboard accessible)",
 
   assert.ok(fired);
 });
+
+// --------------------------------------------------------------------------
+// Chart lines extend to "now" using the last known value (no new
+// history point exists for a channel whose value hasn't changed,
+// since HA never emits a state_changed event for a repeated value)
+// --------------------------------------------------------------------------
+
+function expectedNowX() {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const dayMs = 24 * 60 * 60 * 1000;
+  return ((Date.now() - startOfDay.getTime()) / dayMs) * 600; // CHART_WIDTH
+}
+
+test("a channel line extends to the current time using its last known value, not stopping where history ends", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    // Last real point is at 8am -- far from "now" (this test runs at
+    // whatever the actual wall-clock time is).
+    { "sensor.left_royalblue": [historyEntry(0, 0), historyEntry(60, 3600 * 8)] },
+  );
+  await settled(el);
+
+  const polyline = el.shadowRoot.querySelector(".chart polyline");
+  const points = polyline.getAttribute("points").trim().split(" ");
+  const lastPoint = points[points.length - 1];
+  const [lastX, lastY] = lastPoint.split(",").map(Number);
+
+  // Extended to "now" (within a couple of chart-width units to allow
+  // for the few ms between the card's own Date.now() and this
+  // assertion's), not left sitting at the 8am mark.
+  assert.ok(Math.abs(lastX - expectedNowX()) < 2, `expected lastX near ${expectedNowX()}, got ${lastX}`);
+
+  // Y position (thus value) is unchanged -- extending in time never
+  // means inventing a different value, only holding the last real one.
+  const secondToLastPoint = points[points.length - 2];
+  const [, secondToLastY] = secondToLastPoint.split(",").map(Number);
+  assert.equal(lastY, secondToLastY);
+});
+
+test("a channel that DID just report a value at the current moment isn't given a redundant duplicate point", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const nowSeconds = Math.floor((Date.now() - new Date().setHours(0, 0, 0, 0)) / 1000) + 60; // just in the future
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(0, 0), historyEntry(60, nowSeconds)] },
+  );
+  await settled(el);
+
+  const polyline = el.shadowRoot.querySelector(".chart polyline");
+  const points = polyline.getAttribute("points").trim().split(" ");
+  // Only the two real points -- a "future" last point (relative to
+  // Date.now()) must never get a synthetic point appended after it,
+  // which would draw the line backwards.
+  assert.equal(points.length, 2);
+});
