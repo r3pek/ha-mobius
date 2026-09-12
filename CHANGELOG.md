@@ -1,10 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta2
 
 - Added a "Restart all devices" button on the tank device, matching
   the app's own tank-settings option -- one broadcast write reboots
   every device on the mesh.
+- The pump schedule editor shows MaxSpeed/MinSpeed as whole-number
+  percentages and Variance as None/Low/Medium/High, matching the
+  app's own display.
+- The light channel intensity chart has a hover tooltip, a color
+  legend, and lines that hold flat to the current time instead of
+  stopping wherever a channel's value last changed.
+- The light schedule editor's own point rows show a small colored bar
+  per channel instead of a plain list of names.
+- The pump glance view rounds flow/speed readings to whole numbers,
+  and clicking either one opens Home Assistant's own history dialog
+  for that sensor.
+- The schedule editor's Back/Load/Download buttons are now icons.
+- Centered the scene card's own tiles on the available width.
+- Fixed a schedule sensor showing the device's own name instead of
+  "Schedule intensity", caused by a missing translation entry.
+
+## 0.8.0-beta1
+
 - Added two Lovelace cards: a scene card and a schedule editor card
   for a light or pump's own schedule.
 - The schedule editor supports adding, editing, and deleting points
