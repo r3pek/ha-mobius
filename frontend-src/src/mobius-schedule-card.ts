@@ -768,6 +768,17 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  // Opens Home Assistant's own native more-info dialog (history,
+  // attributes, everything it already shows for any entity) --
+  // hass-more-info is the standard event HA's own frontend and other
+  // custom cards use for this; bubbles and crosses shadow DOM
+  // boundaries so HA's own dialog manager, listening at the top
+  // level, always sees it regardless of how deep this card's own
+  // shadow root nesting goes.
+  private _showMoreInfo(entityId: string): void {
+    this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
+  }
+
   private _renderPumpGlance() {
     const group = this._group!;
     const member = group.members[0];
@@ -788,7 +799,15 @@ export class MobiusScheduleCard extends LitElement {
         ${
           flowAvailable
             ? html`
-                <div class="reading">
+                <div
+                  class="reading reading-clickable"
+                  role="button"
+                  tabindex="0"
+                  @click=${() => this._showMoreInfo(member.flow_entity_id!)}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === "Enter" || e.key === " ") this._showMoreInfo(member.flow_entity_id!);
+                  }}
+                >
                   <span class="reading-value">${roundedState(flowState!.state)}</span>
                   <!-- Never a hardcoded assumption (e.g. "L/h") -- the
                   device itself always reports GPH, but Home Assistant's
@@ -805,7 +824,15 @@ export class MobiusScheduleCard extends LitElement {
               `
             : speedAvailable
               ? html`
-                  <div class="reading">
+                  <div
+                    class="reading reading-clickable"
+                    role="button"
+                    tabindex="0"
+                    @click=${() => this._showMoreInfo(member.speed_entity_id!)}
+                    @keydown=${(e: KeyboardEvent) => {
+                      if (e.key === "Enter" || e.key === " ") this._showMoreInfo(member.speed_entity_id!);
+                    }}
+                  >
                     <span class="reading-value">${roundedState(speedState!.state)}%</span>
                     <span class="reading-unit">${localize("schedule_card.speed_not_reliable")}</span>
                   </div>
@@ -1123,7 +1150,14 @@ export class MobiusScheduleCard extends LitElement {
     return html`
       <ha-card>
         <div class="edit-header">
-          <button class="back-button" @click=${() => this._closeEdit()}>${localize("schedule_card.back")}</button>
+          <button
+            class="back-button"
+            title=${localize("schedule_card.back")}
+            aria-label=${localize("schedule_card.back")}
+            @click=${() => this._closeEdit()}
+          >
+            <ha-icon icon="mdi:arrow-left"></ha-icon>
+          </button>
           <div class="title">${localize("schedule_card.edit_schedule")}</div>
         </div>
         ${content}
@@ -1163,16 +1197,22 @@ export class MobiusScheduleCard extends LitElement {
         <button
           class="mob-button"
           ?disabled=${this._exportingMob || this._editingIndex != null}
+          title=${localize("schedule_card.download_mob")}
+          aria-label=${localize("schedule_card.download_mob")}
           @click=${() => this._exportMob()}
         >
-          ${this._exportingMob ? localize("schedule_card.exporting_mob") : localize("schedule_card.download_mob")}
+          ${
+            this._exportingMob ? localize("schedule_card.exporting_mob") : html`<ha-icon icon="mdi:download"></ha-icon>`
+          }
         </button>
         <button
           class="mob-button"
           ?disabled=${this._importingMob || this._editingIndex != null}
+          title=${localize("schedule_card.load_mob")}
+          aria-label=${localize("schedule_card.load_mob")}
           @click=${() => this._triggerMobFilePicker()}
         >
-          ${this._importingMob ? localize("schedule_card.importing_mob") : localize("schedule_card.load_mob")}
+          ${this._importingMob ? localize("schedule_card.importing_mob") : html`<ha-icon icon="mdi:upload"></ha-icon>`}
         </button>
         <input
           type="file"
@@ -1223,13 +1263,36 @@ export class MobiusScheduleCard extends LitElement {
   // the only place this needs to tell the two apart at all.
   private _renderPointRow(point: ScheduleEntry, index: number) {
     const period = periodForFlags(point.flags);
-    const summary = isPumpEntry(point) ? point.mode : Object.keys(point.channels).join(", ");
     return html`
       <button class="point-row" @click=${() => this._startEditingPoint(index)}>
         <span class="point-time">${formatMinutes(point.time_minutes)}</span>
+        ${
+          isPumpEntry(point) ? html`<span class="point-mode">${point.mode}</span>` : this._renderLightChannelBars(point)
+        }
         <span class="point-period period-${period}">${periodLabel(period)}</span>
-        <span class="point-mode">${summary}</span>
       </button>
+    `;
+  }
+
+  // Light-only -- one small vertical bar per real channel, height and
+  // opacity both scaled by that channel's own intensity at this
+  // point, so the row itself reads at a glance without opening it.
+  private _renderLightChannelBars(point: LightScheduleEntry) {
+    return html`
+      <span class="point-channel-bars">
+        ${Object.entries(point.channels).map(([channel, value]) => {
+          const pct = Math.max(0, Math.min(100, value));
+          return html`
+            <span
+              class="point-channel-bar"
+              title="${channel}: ${Math.round(pct)}%"
+              style="height: ${Math.max(3, (pct / 100) * 18)}px; background: ${channelColor(
+                channel,
+              )}; opacity: ${0.5 + 0.5 * (pct / 100)}"
+            ></span>
+          `;
+        })}
+      </span>
     `;
   }
 
@@ -1589,6 +1652,17 @@ export class MobiusScheduleCard extends LitElement {
       gap: 8px;
       margin: 4px 0 6px 0;
     }
+    .reading-clickable {
+      cursor: pointer;
+      border-radius: 8px;
+      padding: 2px 6px;
+      margin-left: -6px;
+    }
+    .reading-clickable:hover,
+    .reading-clickable:focus-visible {
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.08);
+      outline: none;
+    }
     .reading-value {
       font-size: 2.2em;
       font-weight: 300;
@@ -1630,14 +1704,22 @@ export class MobiusScheduleCard extends LitElement {
       margin-bottom: 14px;
     }
     .back-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       background: none;
       border: none;
       color: var(--primary-color);
-      font-family: inherit;
-      font-size: 0.9em;
-      font-weight: 500;
       cursor: pointer;
-      padding: 4px 0;
+      padding: 6px;
+      margin: -6px;
+      border-radius: 50%;
+    }
+    .back-button:hover {
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.08);
+    }
+    .back-button ha-icon {
+      --mdc-icon-size: 22px;
     }
     .point-list {
       display: flex;
@@ -1762,6 +1844,9 @@ export class MobiusScheduleCard extends LitElement {
       margin-top: 10px;
     }
     .mob-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       flex: 1;
       padding: 8px 0;
       border-radius: 10px;
@@ -1776,6 +1861,9 @@ export class MobiusScheduleCard extends LitElement {
     .mob-button:disabled {
       opacity: 0.5;
       cursor: default;
+    }
+    .mob-button ha-icon {
+      --mdc-icon-size: 20px;
     }
     .save-schedule-button {
       width: 100%;
@@ -1858,6 +1946,18 @@ export class MobiusScheduleCard extends LitElement {
     .point-mode {
       color: var(--secondary-text-color);
       margin-left: auto;
+    }
+    .point-channel-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 18px;
+      flex: 1;
+      margin-left: 8px;
+    }
+    .point-channel-bar {
+      width: 7px;
+      border-radius: 2px;
     }
     .unavailable-note {
       font-size: 0.8em;

@@ -30,6 +30,15 @@ before(async () => {
       }
     }
   }
+  // Node 18+ ships its own native CustomEvent/Event globals, which
+  // the loop above skips (they're already "in globalThis") -- but
+  // dispatchEvent on a JSDOM node only recognizes JSDOM's own Event
+  // class hierarchy, not Node's native one, so code under test
+  // constructing `new CustomEvent(...)` would otherwise throw
+  // "parameter 1 is not of type 'Event'" the moment it tries to
+  // dispatch. Force these two specifically to JSDOM's own versions.
+  globalThis.CustomEvent = dom.window.CustomEvent;
+  globalThis.Event = dom.window.Event;
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
 
@@ -1647,12 +1656,20 @@ test("clicking Edit schedule on a light group fetches the real schedule and show
   assert.ok(el.shadowRoot.querySelector(".back-button"));
 });
 
-test("light point rows summarize by channel names, not a mode", async () => {
+test("light point rows summarize with a mini colored bar chart, one bar per real channel", async () => {
   const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 50, Violet: 20 } }]);
 
-  const text = el.shadowRoot.querySelector(".point-row").textContent;
-  assert.ok(text.includes("RoyalBlue"));
-  assert.ok(text.includes("Violet"));
+  const bars = el.shadowRoot.querySelectorAll(".point-row .point-channel-bar");
+  assert.equal(bars.length, 2);
+  // Confirmed from the mockup: bar height and opacity both scale with
+  // that channel's own intensity -- RoyalBlue (50%) should stand
+  // taller and more opaque than Violet (20%).
+  const royalBlueBar = [...bars].find((b) => b.title.startsWith("RoyalBlue"));
+  const violetBar = [...bars].find((b) => b.title.startsWith("Violet"));
+  assert.ok(parseFloat(royalBlueBar.style.height) > parseFloat(violetBar.style.height));
+  assert.ok(parseFloat(royalBlueBar.style.opacity) > parseFloat(violetBar.style.opacity));
+  // No pump-style mode summary ever shows for a light point.
+  assert.equal(el.shadowRoot.querySelector(".point-row .point-mode"), null);
 });
 
 test("clicking a light point opens one slider per real channel, pre-filled with its own value", async () => {
@@ -2320,4 +2337,123 @@ test("mousemove over the chart container converts pixel position to the correct 
 
   // (300 - 100) / 400 = 0.5
   assert.equal(el._chartHoverFraction, 0.5);
+});
+
+// --------------------------------------------------------------------------
+// Icon buttons (Back, Load .mob, Download .mob)
+// --------------------------------------------------------------------------
+
+test("the back button shows an icon, not text, with an accessible label", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+
+  const backButton = el.shadowRoot.querySelector(".back-button");
+  const icon = backButton.querySelector("ha-icon");
+  assert.ok(icon);
+  assert.equal(icon.getAttribute("icon"), "mdi:arrow-left");
+  assert.equal(backButton.getAttribute("aria-label"), "Back");
+});
+
+test("Download/Load .mob buttons show icons, not text, when idle", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+
+  const [downloadButton, loadButton] = el.shadowRoot.querySelectorAll(".mob-button");
+  assert.equal(downloadButton.querySelector("ha-icon").getAttribute("icon"), "mdi:download");
+  assert.equal(downloadButton.getAttribute("aria-label"), "Download .mob");
+  assert.equal(loadButton.querySelector("ha-icon").getAttribute("icon"), "mdi:upload");
+  assert.equal(loadButton.getAttribute("aria-label"), "Load .mob");
+});
+
+test("Download .mob shows text feedback while exporting, not just an icon", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  // Never resolves during this test -- keeps the export "in flight".
+  el.hass.callWS = () => new Promise(() => {});
+
+  el.shadowRoot.querySelector(".mob-button").click();
+  await el.updateComplete;
+
+  const downloadButton = el.shadowRoot.querySelector(".mob-button");
+  assert.equal(downloadButton.querySelector("ha-icon"), null);
+  assert.ok(downloadButton.textContent.includes("Exporting"));
+});
+
+// --------------------------------------------------------------------------
+// Click pump reading -> HA's native more-info dialog (history, etc.)
+// --------------------------------------------------------------------------
+
+test("clicking the flow reading opens HA's native more-info dialog for that entity", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: { unit_of_measurement: "GPH" } },
+  });
+  await settled(el);
+
+  let firedDetail = null;
+  el.addEventListener("hass-more-info", (e) => {
+    firedDetail = e.detail;
+  });
+
+  el.shadowRoot.querySelector(".reading-clickable").click();
+
+  assert.deepEqual(firedDetail, { entityId: "sensor.pump_flow" });
+});
+
+test("clicking the speed reading (fallback path) opens more-info for the speed entity", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_speed": { state: "42", attributes: {} },
+  });
+  await settled(el);
+
+  let firedDetail = null;
+  el.addEventListener("hass-more-info", (e) => {
+    firedDetail = e.detail;
+  });
+
+  el.shadowRoot.querySelector(".reading-clickable").click();
+
+  assert.deepEqual(firedDetail, { entityId: "sensor.pump_speed" });
+});
+
+test("the more-info event bubbles and crosses shadow DOM boundaries", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: { unit_of_measurement: "GPH" } },
+  });
+  await settled(el);
+
+  let firedOnDocument = false;
+  document.addEventListener("hass-more-info", () => {
+    firedOnDocument = true;
+  });
+  document.body.appendChild(el);
+
+  el.shadowRoot.querySelector(".reading-clickable").click();
+
+  assert.ok(firedOnDocument);
+  el.remove();
+});
+
+test("pressing Enter on the reading also opens more-info (keyboard accessible)", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_flow": { state: "300", attributes: { unit_of_measurement: "GPH" } },
+  });
+  await settled(el);
+
+  let fired = false;
+  el.addEventListener("hass-more-info", () => {
+    fired = true;
+  });
+
+  el.shadowRoot
+    .querySelector(".reading-clickable")
+    .dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter" }));
+
+  assert.ok(fired);
 });
