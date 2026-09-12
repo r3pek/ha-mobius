@@ -40,6 +40,9 @@
       "flow_rate": {
         "name": "Estimated flow"
       },
+      "schedule_intensity": {
+        "name": "Schedule intensity"
+      },
       "schedule_point_count": {
         "name": "Schedule points"
       },

@@ -1263,6 +1263,41 @@ export class MobiusScheduleCard extends LitElement {
         </label>
       `;
     }
+    if (name === "Variance") {
+      // Confirmed from the app's own formatter: this isn't a plain
+      // number at all -- the raw 0-1000 value maps to one of four
+      // categorical labels (thresholds: 0, <400, <700, else), so the
+      // choice itself is what a person actually picks, not a number.
+      const VARIANCE_OPTIONS: [string, number][] = [
+        [localize("schedule_card.variance_none"), 0],
+        [localize("schedule_card.variance_low"), 200],
+        [localize("schedule_card.variance_medium"), 550],
+        [localize("schedule_card.variance_high"), 850],
+      ];
+      const currentLabel = (() => {
+        const n = Number(value ?? 0);
+        if (n === 0) return VARIANCE_OPTIONS[0][0];
+        if (n < 400) return VARIANCE_OPTIONS[1][0];
+        if (n < 700) return VARIANCE_OPTIONS[2][0];
+        return VARIANCE_OPTIONS[3][0];
+      })();
+      return html`
+        <label class="param-label">
+          ${name}
+          <select
+            .value=${currentLabel}
+            @change=${(e: Event) => {
+              const picked = VARIANCE_OPTIONS.find((o) => o[0] === (e.target as HTMLSelectElement).value);
+              if (picked) this._updateWorkingPumpParam(name, picked[1]);
+            }}
+          >
+            ${VARIANCE_OPTIONS.map(
+              ([label]) => html`<option value=${label} ?selected=${label === currentLabel}>${label}</option>`,
+            )}
+          </select>
+        </label>
+      `;
+    }
     // Confirmed in the app's own PumpPrimitive.getReverse(): a
     // negative MaxSpeed/MinSpeed reverses rotation direction, on
     // pumps whose model actually supports it (sliderSettings'
@@ -1273,16 +1308,38 @@ export class MobiusScheduleCard extends LitElement {
     // either way (python-mobius passes it through as-is), this is
     // purely about not leaving a negative-number field unexplained.
     const isSpeedParam = name === "MaxSpeed" || name === "MinSpeed";
+    if (isSpeedParam) {
+      // Confirmed from the app's own formatter:
+      // String.format("%d%%", Math.round(raw / 10.0)) -- the raw
+      // wire value is tenths of a percent, never shown to a person
+      // as-is. Sign is preserved through the round-trip (negative =
+      // reverse, see the hint below), only the magnitude is scaled.
+      const raw = Number(value ?? 0);
+      const displayPercent = Math.sign(raw) * Math.round(Math.abs(raw) / 10);
+      return html`
+        <label class="param-label">
+          ${name} (%)
+          <input
+            type="number"
+            .value=${String(displayPercent)}
+            title=${localize("schedule_card.reverse_hint")}
+            @change=${(e: Event) => {
+              const percent = Number((e.target as HTMLInputElement).value);
+              this._updateWorkingPumpParam(name, Math.sign(percent) * Math.round(Math.abs(percent) * 10));
+            }}
+          />
+          <span class="field-hint">${localize("schedule_card.reverse_hint")}</span>
+        </label>
+      `;
+    }
     return html`
       <label class="param-label">
         ${name}
         <input
           type="number"
           .value=${String(value ?? 0)}
-          title=${isSpeedParam ? localize("schedule_card.reverse_hint") : nothing}
           @change=${(e: Event) => this._updateWorkingPumpParam(name, Number((e.target as HTMLInputElement).value))}
         />
-        ${isSpeedParam ? html`<span class="field-hint">${localize("schedule_card.reverse_hint")}</span>` : nothing}
       </label>
     `;
   }

@@ -1022,7 +1022,7 @@ test("clicking a point row opens an edit form pre-filled with its own values", a
   assert.ok(form);
   assert.equal(el.shadowRoot.querySelector('input[type="time"]').value, "01:30");
   assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "ConstantSpeed");
-  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "300");
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "30");
 });
 
 test("switching to Sync shows MaxSpeed and the parent-pump picker, but never a raw PhaseShift field", async () => {
@@ -1061,7 +1061,7 @@ test("switching mode carries over a shared param's own value", async () => {
   modeSelect.dispatchEvent(new window.Event("change"));
   await el.updateComplete;
 
-  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "450");
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "45");
 });
 
 test("Sync and EcoSmartBack show the identical set of param fields", async () => {
@@ -1371,7 +1371,7 @@ test("switching between Sync and Anti-Sync preserves MaxSpeed and the parent pum
   const maxSpeedInput = [...el.shadowRoot.querySelectorAll(".param-label input")].find(
     (i) => i.previousSibling?.textContent?.includes("MaxSpeed") || i.parentElement.textContent.includes("MaxSpeed"),
   );
-  assert.equal(maxSpeedInput.value, "450");
+  assert.equal(maxSpeedInput.value, "45");
   assert.equal(el._workingPoint.params.ParentSerial, "SN4");
 });
 
@@ -1385,18 +1385,21 @@ test("switching between Sync and Anti-Sync preserves MaxSpeed and the parent pum
 // any real pump, confirmed in python-mobius's own test suite, so the
 // card's own mode dropdown never needs to render it at all).
 const ALL_MODE_EXPECTATIONS = {
-  ConstantSpeed: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  Lagoon: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  ReefCrest: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  NutrientTransport: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  TidalSwell: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  Feed: { params: { MaxSpeed: 300 }, fieldCount: 1 },
-  ShortPulse: { params: { MaxSpeed: 300, Time: 30 }, fieldCount: 2 },
-  Gyre: { params: { MaxSpeed: 300, BigTime: 1000 }, fieldCount: 2 },
-  Transition: { params: { RampType: "Linear" }, fieldCount: 1, hasDropdown: true },
-  ExpandingPulse: { params: { MaxSpeed: 300, StartTime: 10, EndTime: 60 }, fieldCount: 3 },
-  Random: { params: { MinSpeed: 100, MaxSpeed: 300, Variance: 50 }, fieldCount: 3 },
-  Pulse: { params: { MaxSpeed: 300, OnTime: 5, OffTime: 10 }, fieldCount: 3 },
+  ConstantSpeed: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  Lagoon: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  ReefCrest: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  NutrientTransport: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  TidalSwell: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  Feed: { params: { MaxSpeed: 300 }, fieldCount: 1, inputCount: 1 },
+  ShortPulse: { params: { MaxSpeed: 300, Time: 30 }, fieldCount: 2, inputCount: 2 },
+  Gyre: { params: { MaxSpeed: 300, BigTime: 1000 }, fieldCount: 2, inputCount: 2 },
+  Transition: { params: { RampType: "Linear" }, fieldCount: 1, inputCount: 0 },
+  ExpandingPulse: { params: { MaxSpeed: 300, StartTime: 10, EndTime: 60 }, fieldCount: 3, inputCount: 3 },
+  // Variance renders as a dropdown (categorical None/Low/Medium/High
+  // label, confirmed from the app's own formatter), not an input --
+  // only MinSpeed/MaxSpeed are inputs here.
+  Random: { params: { MinSpeed: 100, MaxSpeed: 300, Variance: 50 }, fieldCount: 3, inputCount: 2 },
+  Pulse: { params: { MaxSpeed: 300, OnTime: 5, OffTime: 10 }, fieldCount: 3, inputCount: 3 },
 };
 
 for (const [mode, expectation] of Object.entries(ALL_MODE_EXPECTATIONS)) {
@@ -1426,12 +1429,7 @@ for (const [mode, expectation] of Object.entries(ALL_MODE_EXPECTATIONS)) {
     // own params call for.
     assert.equal(el.shadowRoot.querySelectorAll(".param-label").length, expectation.fieldCount);
     assert.equal(el.shadowRoot.querySelector(".mode-label select").value, mode);
-
-    if (expectation.hasDropdown) {
-      assert.ok(el.shadowRoot.querySelector(".param-label select"));
-    } else {
-      assert.equal(el.shadowRoot.querySelectorAll(".param-label input").length, expectation.fieldCount);
-    }
+    assert.equal(el.shadowRoot.querySelectorAll(".param-label input").length, expectation.inputCount);
 
     // Editing and saving works for every mode, not just the ones
     // already covered by earlier, more targeted tests.
@@ -1484,7 +1482,7 @@ test("negative MaxSpeed round-trips correctly (encodes reverse rotation)", async
   await el.updateComplete;
 
   const input = el.shadowRoot.querySelector(".param-label input");
-  input.value = "-300";
+  input.value = "-30";
   input.dispatchEvent(new window.Event("change"));
   await el.updateComplete;
   el.shadowRoot.querySelector(".save-point-button").click();
@@ -1584,7 +1582,7 @@ test("saving reflects locally-edited points, not just what was originally fetche
   el.shadowRoot.querySelector(".point-row").click();
   await el.updateComplete;
   const input = el.shadowRoot.querySelector(".param-label input");
-  input.value = "500";
+  input.value = "50";
   input.dispatchEvent(new window.Event("change"));
   await el.updateComplete;
   el.shadowRoot.querySelector(".save-point-button").click();
@@ -2045,4 +2043,147 @@ test(".mob import works identically for a light group", async () => {
 
   assert.equal(el._schedulePoints.length, 1);
   assert.equal(el._schedulePoints[0].channels.RoyalBlue, 80);
+});
+
+// --------------------------------------------------------------------------
+// MaxSpeed/MinSpeed percentage display, Variance categorical display
+// --------------------------------------------------------------------------
+
+test("MaxSpeed displays as a rounded whole-number percentage, not the raw tenths value", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 427 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  // 427 raw -> round(427/10) = 43%, not 427 or 42.7.
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "43");
+});
+
+test("a negative MaxSpeed displays as a negative percentage, preserving the reverse-rotation sign", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: -300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".param-label input").value, "-30");
+});
+
+test("editing the MaxSpeed percentage stores the correctly-scaled raw tenths value", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const input = el.shadowRoot.querySelector(".param-label input");
+  input.value = "75";
+  input.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].params.MaxSpeed, 750);
+});
+
+test("Variance renders as a None/Low/Medium/High dropdown, not a number field", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      scheduleResponse: {
+        points: [
+          { time_minutes: 0, flags: 1, mode: "Random", params: { MinSpeed: 100, MaxSpeed: 300, Variance: 550 } },
+        ],
+      },
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, modes: ["Random"], mode_params: { Random: ["MinSpeed", "MaxSpeed", "Variance"] } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const varianceLabel = [...el.shadowRoot.querySelectorAll(".param-label")].find((l) =>
+    l.textContent.includes("Variance"),
+  );
+  const select = varianceLabel.querySelector("select");
+  assert.ok(select, "Variance should render as a dropdown, not an input");
+  assert.equal(select.querySelectorAll("option").length, 4);
+  // 550 falls in the [400,700) "Medium" bucket.
+  assert.equal(select.value, "Medium");
+});
+
+test("each Variance category boundary maps to the correct label", async () => {
+  const cases = [
+    [0, "None"],
+    [1, "Low"],
+    [399, "Low"],
+    [400, "Medium"],
+    [699, "Medium"],
+    [700, "High"],
+    [1000, "High"],
+  ];
+  for (const [raw, expectedLabel] of cases) {
+    const el = makeCard(PUMP_DEVICE_ID);
+    el.hass = makePumpHass(
+      { "sensor.pump_flow": { state: "300", attributes: {} } },
+      {
+        scheduleResponse: {
+          points: [
+            { time_minutes: 0, flags: 1, mode: "Random", params: { MinSpeed: 100, MaxSpeed: 300, Variance: raw } },
+          ],
+        },
+        wsResponse: {
+          groups: [{ ...PUMP_GROUP, modes: ["Random"], mode_params: { Random: ["MinSpeed", "MaxSpeed", "Variance"] } }],
+        },
+      },
+    );
+    await settled(el);
+    el.shadowRoot.querySelector(".edit-button").click();
+    await settled(el);
+    el.shadowRoot.querySelector(".point-row").click();
+    await el.updateComplete;
+
+    const varianceLabel = [...el.shadowRoot.querySelectorAll(".param-label")].find((l) =>
+      l.textContent.includes("Variance"),
+    );
+    assert.equal(varianceLabel.querySelector("select").value, expectedLabel, `raw=${raw}`);
+  }
+});
+
+test("choosing a Variance category and saving stores its own representative raw value", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      scheduleResponse: {
+        points: [{ time_minutes: 0, flags: 1, mode: "Random", params: { MinSpeed: 100, MaxSpeed: 300, Variance: 0 } }],
+      },
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, modes: ["Random"], mode_params: { Random: ["MinSpeed", "MaxSpeed", "Variance"] } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const varianceLabel = [...el.shadowRoot.querySelectorAll(".param-label")].find((l) =>
+    l.textContent.includes("Variance"),
+  );
+  const select = varianceLabel.querySelector("select");
+  select.value = "High";
+  select.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].params.Variance, 850);
 });
