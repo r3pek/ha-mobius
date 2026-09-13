@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The light channel intensity chart now shows a rolling last-24h
+  window ending at now, matching Home Assistant's own history chart,
+  instead of always starting and ending at midnight.
 - The light channel intensity chart shows a 0/50/100% Y-axis scale
   with matching horizontal gridlines.
 - The pump glance view shows the pump's own current mode -- the

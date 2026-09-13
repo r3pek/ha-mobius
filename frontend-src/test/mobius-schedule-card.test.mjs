@@ -645,10 +645,9 @@ test("the debounced write eventually calls mobius.set_schedule_intensity with th
 // Channel history chart
 // --------------------------------------------------------------------------
 
-function historyEntry(value, secondsSinceMidnight) {
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
-  return { s: String(value), lu: midnight.getTime() / 1000 + secondsSinceMidnight };
+function historyEntry(value, secondsIntoWindow) {
+  const windowStart = Date.now() - 24 * 60 * 60 * 1000;
+  return { s: String(value), lu: windowStart / 1000 + secondsIntoWindow };
 }
 
 test("chart renders a polyline for the source member's own channel history", async () => {
@@ -2487,10 +2486,7 @@ test("pressing Enter on the reading also opens more-info (keyboard accessible)",
 // --------------------------------------------------------------------------
 
 function expectedNowX() {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const dayMs = 24 * 60 * 60 * 1000;
-  return ((Date.now() - startOfDay.getTime()) / dayMs) * 600; // CHART_WIDTH
+  return 600; // CHART_WIDTH -- now is always the right edge in a rolling window
 }
 
 test("a channel line extends to the current time using its last known value, not stopping where history ends", async () => {
@@ -2522,7 +2518,7 @@ test("a channel line extends to the current time using its last known value, not
 
 test("a channel that DID just report a value at the current moment isn't given a redundant duplicate point", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
-  const nowSeconds = Math.floor((Date.now() - new Date().setHours(0, 0, 0, 0)) / 1000) + 60; // just in the future
+  const nowSeconds = 24 * 3600 + 60; // 60 seconds past "now" (the window's own end)
   el.hass = makeLightHass(
     { "sensor.left_royalblue": { state: "60", attributes: {} } },
     { "sensor.left_royalblue": [historyEntry(0, 0), historyEntry(60, nowSeconds)] },
@@ -2705,4 +2701,74 @@ test("horizontal gridlines span the full chart width", async () => {
     assert.equal(line.getAttribute("x1"), "0");
     assert.equal(line.getAttribute("x2"), "600"); // CHART_WIDTH
   }
+});
+
+// --------------------------------------------------------------------------
+// Rolling 24h window (matching HA's own history chart), not a fixed
+// midnight-to-midnight calendar day
+// --------------------------------------------------------------------------
+
+test("the history fetch requests the last 24h ending now, not midnight to midnight", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  const calls = [];
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  const originalCallWS = el.hass.callWS;
+  el.hass.callWS = async (msg) => {
+    if (msg.type === "history/history_during_period") calls.push(msg);
+    return originalCallWS(msg);
+  };
+  await settled(el);
+
+  assert.equal(calls.length, 1);
+  const requestedStart = new Date(calls[0].start_time).getTime();
+  const expectedStart = Date.now() - 24 * 60 * 60 * 1000;
+  // Within a couple of seconds of "24h ago from now" -- never midnight
+  // of the current calendar day (which would only coincidentally
+  // match this within a few seconds around midnight itself).
+  assert.ok(Math.abs(requestedStart - expectedStart) < 5000, `expected ~${expectedStart}, got ${requestedStart}`);
+});
+
+test("there is no separate 'now' line -- now is always the chart's own right edge in a rolling window", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".chart-now-line"), null);
+});
+
+test("hour gridlines are positioned at rolling offsets into the window, not fixed calendar hours", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const gridlines = [...el.shadowRoot.querySelectorAll(".chart-gridline")];
+  assert.equal(gridlines.length, 4);
+  const xs = gridlines.map((g) => Number(g.getAttribute("x1"))).sort((a, b) => a - b);
+  // 0h, 6h, 12h, 18h into a 24h window spanning CHART_WIDTH=600 ->
+  // evenly spaced at 0, 150, 300, 450.
+  assert.deepEqual(xs, [0, 150, 300, 450]);
+});
+
+test("hover at the left edge resolves to a point in time roughly 24h ago, not midnight", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(42, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0;
+  await el.updateComplete;
+
+  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
+  assert.ok(tooltip.textContent.includes("42"));
 });

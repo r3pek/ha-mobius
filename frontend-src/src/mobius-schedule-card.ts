@@ -220,6 +220,16 @@ function roundedState(state: string): string {
   return Number.isFinite(n) ? String(Math.round(n)) : state;
 }
 
+// Confirmed from Home Assistant's own state-history-chart-line: its
+// own chart shows a rolling window ending at "now", not a fixed
+// calendar-day window that resets to a blank chart at midnight. This
+// is called fresh each time (never cached), so the fetch range and
+// the chart's own X-axis both advance together as time passes,
+// rather than drifting apart.
+function chartWindowStartMs(): number {
+  return Date.now() - 24 * 60 * 60 * 1000;
+}
+
 // A fixed, universal enum (python-mobius's own RampType) -- unlike
 // PumpMode/channels, its own valid values don't vary by pump model,
 // so unlike those this doesn't need to come from the backend at all.
@@ -475,12 +485,9 @@ export class MobiusScheduleCard extends LitElement {
 
     this._historyLoading = true;
     try {
-      const startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-
       const response = await this.hass.callWS<Record<string, CompressedStateEntry[]>>({
         type: "history/history_during_period",
-        start_time: startOfDay.toISOString(),
+        start_time: new Date(chartWindowStartMs()).toISOString(),
         entity_ids: entityIds,
         no_attributes: true,
         minimal_response: true,
@@ -957,9 +964,7 @@ export class MobiusScheduleCard extends LitElement {
     const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
       (entry): entry is [string, string] => !!entry[1],
     );
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const hoverTimeMs = startOfDay.getTime() + this._chartHoverFraction * 24 * 60 * 60 * 1000;
+    const hoverTimeMs = chartWindowStartMs() + this._chartHoverFraction * 24 * 60 * 60 * 1000;
 
     // Nearest point in time per channel, not interpolated -- history
     // is already a step function server-side (HA's own compressed
@@ -1042,16 +1047,13 @@ export class MobiusScheduleCard extends LitElement {
       return html`<div class="chart-status">${localize("schedule_card.no_channel_data")}</div>`;
     }
 
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const dayStartMs = startOfDay.getTime();
+    const windowStartMs = chartWindowStartMs();
     const dayMs = 24 * 60 * 60 * 1000;
 
-    const toX = (t: number) => ((t - dayStartMs) / dayMs) * CHART_WIDTH;
+    const toX = (t: number) => ((t - windowStartMs) / dayMs) * CHART_WIDTH;
     const toY = (v: number) => CHART_HEIGHT - (Math.max(0, Math.min(100, v)) / 100) * CHART_HEIGHT;
 
     const nowMs = Date.now();
-    const nowX = toX(nowMs);
     const lines = entries
       .map(([channelName, entityId]) => {
         const points = this._channelHistoryByEntity[entityId];
@@ -1079,10 +1081,13 @@ export class MobiusScheduleCard extends LitElement {
     }
 
     const lang = this.hass?.locale;
-    const hourLabel = (hour: number) => {
-      const d = new Date(startOfDay);
-      d.setHours(hour);
-      return lang ? formatTime(d, lang) : `${hour}:00`;
+    // A rolling window ending at "now" (matching HA's own history
+    // chart), not a fixed calendar day -- so a label needs the real
+    // clock time at that offset into the window, not an assumption
+    // that hour 0 of the window is midnight.
+    const hourLabel = (hoursIntoWindow: number) => {
+      const d = new Date(windowStartMs + hoursIntoWindow * 3600000);
+      return lang ? formatTime(d, lang) : `${d.getHours()}:00`;
     };
 
     return html`
@@ -1093,20 +1098,19 @@ export class MobiusScheduleCard extends LitElement {
           `,
         )}
         ${[0, 6, 12, 18].map(
-          (hour) => svg`
+          (hoursIntoWindow) => svg`
             <line
-              x1=${toX(dayStartMs + hour * 3600000)}
-              x2=${toX(dayStartMs + hour * 3600000)}
+              x1=${toX(windowStartMs + hoursIntoWindow * 3600000)}
+              x2=${toX(windowStartMs + hoursIntoWindow * 3600000)}
               y1="0"
               y2=${CHART_HEIGHT}
               class="chart-gridline"
             />
-            <text x=${toX(dayStartMs + hour * 3600000)} y=${CHART_HEIGHT + 12} class="chart-label">
-              ${hourLabel(hour)}
+            <text x=${toX(windowStartMs + hoursIntoWindow * 3600000)} y=${CHART_HEIGHT + 12} class="chart-label">
+              ${hourLabel(hoursIntoWindow)}
             </text>
           `,
         )}
-        <line x1=${nowX} x2=${nowX} y1="0" y2=${CHART_HEIGHT} class="chart-now-line" />
         ${lines}
       </svg>
     `;
@@ -2125,11 +2129,6 @@ export class MobiusScheduleCard extends LitElement {
       stroke: var(--divider-color);
       stroke-width: 1;
       opacity: 0.5;
-    }
-    .chart-now-line {
-      stroke: var(--primary-color);
-      stroke-width: 1;
-      stroke-dasharray: 3, 3;
     }
     .chart-label {
       font-size: 9px;
