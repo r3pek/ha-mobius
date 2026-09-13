@@ -230,6 +230,29 @@ function chartWindowStartMs(): number {
   return Date.now() - 24 * 60 * 60 * 1000;
 }
 
+// Real clock-hour marks (0:00, 6:00, 12:00, 18:00, ...) that fall
+// within [windowStartMs, windowEndMs], not fixed fractional offsets
+// into the window. A rolling window means which actual hours are
+// visible keeps changing as it advances -- an old mark scrolls off
+// the left as a new one appears on the right -- but each individual
+// mark itself always lands on a clean, predictable hour, matching
+// how real time-series charts (including HA's own) label a rolling
+// window, rather than always showing exactly 4 labels at whatever
+// (likely not-on-the-hour) times happen to be 0/6/12/18h before now.
+function niceHourMarks(windowStartMs: number, windowEndMs: number, intervalHours: number): number[] {
+  const marks: number[] = [];
+  const cursor = new Date(windowStartMs);
+  cursor.setMinutes(0, 0, 0);
+  while (cursor.getTime() < windowStartMs || cursor.getHours() % intervalHours !== 0) {
+    cursor.setHours(cursor.getHours() + 1);
+  }
+  while (cursor.getTime() <= windowEndMs) {
+    marks.push(cursor.getTime());
+    cursor.setHours(cursor.getHours() + intervalHours);
+  }
+  return marks;
+}
+
 // A fixed, universal enum (python-mobius's own RampType) -- unlike
 // PumpMode/channels, its own valid values don't vary by pump model,
 // so unlike those this doesn't need to come from the backend at all.
@@ -1081,20 +1104,11 @@ export class MobiusScheduleCard extends LitElement {
     }
 
     const lang = this.hass?.locale;
-    // A rolling window ending at "now" (matching HA's own history
-    // chart), not a fixed calendar day -- so a label needs the real
-    // clock time at that offset into the window, not an assumption
-    // that hour 0 of the window is midnight.
-    const hourLabel = (hoursIntoWindow: number) => {
-      const d = new Date(windowStartMs + hoursIntoWindow * 3600000);
-      // windowStartMs is "now minus exactly 24h", so it carries the
-      // same minute-of-hour "now" itself has -- almost never :00.
-      // formatTime() (the real, locale-aware path) already handles
-      // this correctly; the fallback needs to show the actual minutes
-      // too, not hardcode ":00" and silently mislead by up to 59
-      // minutes.
+    const hourLabel = (t: number) => {
+      const d = new Date(t);
       return lang ? formatTime(d, lang) : `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
     };
+    const hourMarks = niceHourMarks(windowStartMs, nowMs, 6);
 
     return html`
       <svg class="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT + 16}" preserveAspectRatio="none">
@@ -1103,18 +1117,10 @@ export class MobiusScheduleCard extends LitElement {
             <line x1="0" x2=${CHART_WIDTH} y1=${toY(percent)} y2=${toY(percent)} class="chart-gridline-h" />
           `,
         )}
-        ${[0, 6, 12, 18].map(
-          (hoursIntoWindow) => svg`
-            <line
-              x1=${toX(windowStartMs + hoursIntoWindow * 3600000)}
-              x2=${toX(windowStartMs + hoursIntoWindow * 3600000)}
-              y1="0"
-              y2=${CHART_HEIGHT}
-              class="chart-gridline"
-            />
-            <text x=${toX(windowStartMs + hoursIntoWindow * 3600000)} y=${CHART_HEIGHT + 12} class="chart-label">
-              ${hourLabel(hoursIntoWindow)}
-            </text>
+        ${hourMarks.map(
+          (t) => svg`
+            <line x1=${toX(t)} x2=${toX(t)} y1="0" y2=${CHART_HEIGHT} class="chart-gridline" />
+            <text x=${toX(t)} y=${CHART_HEIGHT + 12} class="chart-label">${hourLabel(t)}</text>
           `,
         )}
         ${lines}

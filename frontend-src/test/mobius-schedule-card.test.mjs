@@ -2742,7 +2742,13 @@ test("there is no separate 'now' line -- now is always the chart's own right edg
   assert.equal(el.shadowRoot.querySelector(".chart-now-line"), null);
 });
 
-test("hour gridlines are positioned at rolling offsets into the window, not fixed calendar hours", async () => {
+test("hour gridlines land on nice clock hours (multiples of 6), not raw offsets from now", async (t) => {
+  const fixedNow = new Date("2026-09-13T14:37:22").getTime();
+  t.mock.timers.enable({ apis: ["Date"], now: fixedNow });
+  const windowStart = fixedNow - 24 * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const toX = (ms) => ((ms - windowStart) / dayMs) * 600; // CHART_WIDTH
+
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHass(
     { "sensor.left_royalblue": { state: "60", attributes: {} } },
@@ -2753,9 +2759,18 @@ test("hour gridlines are positioned at rolling offsets into the window, not fixe
   const gridlines = [...el.shadowRoot.querySelectorAll(".chart-gridline")];
   assert.equal(gridlines.length, 4);
   const xs = gridlines.map((g) => Number(g.getAttribute("x1"))).sort((a, b) => a - b);
-  // 0h, 6h, 12h, 18h into a 24h window spanning CHART_WIDTH=600 ->
-  // evenly spaced at 0, 150, 300, 450.
-  assert.deepEqual(xs, [0, 150, 300, 450]);
+  // Nice marks within [windowStart, fixedNow]: 18:00 (Sep 12), 0:00,
+  // 6:00, 12:00 (Sep 13) -- 18:00 (Sep 13) itself is excluded, since
+  // it's after "now" (14:37).
+  const expected = [
+    toX(new Date("2026-09-12T18:00:00").getTime()),
+    toX(new Date("2026-09-13T00:00:00").getTime()),
+    toX(new Date("2026-09-13T06:00:00").getTime()),
+    toX(new Date("2026-09-13T12:00:00").getTime()),
+  ];
+  for (let i = 0; i < 4; i++) {
+    assert.ok(Math.abs(xs[i] - expected[i]) < 0.5, `mark ${i}: expected ~${expected[i]}, got ${xs[i]}`);
+  }
 });
 
 test("hover at the left edge resolves to a point in time roughly 24h ago, not midnight", async () => {
@@ -2773,9 +2788,7 @@ test("hover at the left edge resolves to a point in time roughly 24h ago, not mi
   assert.ok(tooltip.textContent.includes("42"));
 });
 
-test("hour labels show the actual clock time, including minutes -- never a misleading :00", async (t) => {
-  // 2:37:22 PM on a fixed date -- deliberately not on the hour, so a
-  // fallback label hardcoding ":00" would be caught immediately.
+test("hour labels show nice, clean clock hours -- never a raw, awkward offset from now", async (t) => {
   const fixedNow = new Date("2026-09-13T14:37:22").getTime();
   t.mock.timers.enable({ apis: ["Date"], now: fixedNow });
 
@@ -2788,7 +2801,36 @@ test("hour labels show the actual clock time, including minutes -- never a misle
 
   const labels = [...el.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
   assert.equal(labels.length, 4);
-  // windowStartMs = fixedNow - 24h = 2026-09-12T14:37:22 -- 0/6/12/18h
-  // into the window land at 14:37, 20:37, 2:37, 8:37 respectively.
-  assert.deepEqual(labels, ["14:37", "20:37", "2:37", "8:37"]);
+  // Nice marks within the window: 18:00 (Sep 12), 0:00, 6:00, 12:00
+  // (Sep 13) -- never "14:37"-style raw offsets from "now" itself.
+  assert.deepEqual(labels, ["18:00", "0:00", "6:00", "12:00"]);
+});
+
+test("as time advances past a nice hour, an old mark scrolls off the left and a new one appears on the right", async (t) => {
+  // Just before 18:00 -- the last mark should be 12:00 (Sep 13).
+  const beforeRollover = new Date("2026-09-13T17:59:00").getTime();
+  t.mock.timers.enable({ apis: ["Date"], now: beforeRollover });
+
+  const elBefore = makeCard(LIGHT_DEVICE_ID);
+  elBefore.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(elBefore);
+  const labelsBefore = [...elBefore.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  assert.deepEqual(labelsBefore, ["18:00", "0:00", "6:00", "12:00"]);
+
+  // 90 minutes later -- now just past 18:00. The 18:00 (Sep 12) mark
+  // has scrolled out of the window entirely, and 18:00 (Sep 13) has
+  // newly entered it.
+  t.mock.timers.tick(90 * 60 * 1000);
+
+  const elAfter = makeCard(LIGHT_DEVICE_ID);
+  elAfter.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(elAfter);
+  const labelsAfter = [...elAfter.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  assert.deepEqual(labelsAfter, ["0:00", "6:00", "12:00", "18:00"]);
 });
