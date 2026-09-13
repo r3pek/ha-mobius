@@ -1010,6 +1010,24 @@ test("edit view shows a clear error when the schedule fetch fails", async () => 
   assert.ok(el.shadowRoot.querySelector(".back-button"));
 });
 
+test("the header's own Load/Download buttons stay available even when the schedule fetch itself fails", async () => {
+  // They live in the shell's own header now, independent of the
+  // schedule fetch -- a person should still be able to load a fresh
+  // .mob file even if reading the current schedule off the device
+  // failed.
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleError: new Error("relay connection lost") },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector('.header-icon-button[title="Load .mob"]'));
+  assert.ok(el.shadowRoot.querySelector('.header-icon-button[title="Download .mob"]'));
+});
+
 test("edit view can still navigate back after a failed fetch", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass(
@@ -1922,7 +1940,7 @@ test("Download .mob calls export_schedule_group_mob with the right device_id", a
     return originalCallWS(msg);
   };
 
-  el.shadowRoot.querySelector(".mob-button").click();
+  el.shadowRoot.querySelector('.header-icon-button[title="Download .mob"]').click();
   await Promise.resolve();
   await Promise.resolve();
   await el.updateComplete;
@@ -1945,7 +1963,7 @@ test("Download .mob shows a clear error when the export itself fails", async () 
   el.shadowRoot.querySelector(".edit-button").click();
   await settled(el);
 
-  el.shadowRoot.querySelectorAll(".mob-button")[0].click();
+  el.shadowRoot.querySelector('.header-icon-button[title="Download .mob"]').click();
   await Promise.resolve();
   await Promise.resolve();
   await el.updateComplete;
@@ -1963,7 +1981,7 @@ test("Load .mob button triggers the hidden file input", async () => {
     clicked = true;
   });
 
-  el.shadowRoot.querySelectorAll(".mob-button")[1].click();
+  el.shadowRoot.querySelector('.header-icon-button[title="Load .mob"]').click();
   assert.ok(clicked);
 });
 
@@ -2062,7 +2080,7 @@ test("mob buttons are disabled while a point is being actively edited", async ()
   el.shadowRoot.querySelector(".point-row").click();
   await el.updateComplete;
 
-  const mobButtons = el.shadowRoot.querySelectorAll(".mob-button");
+  const mobButtons = el.shadowRoot.querySelectorAll(".header-icon-button");
   assert.ok(mobButtons[0].disabled);
   assert.ok(mobButtons[1].disabled);
 });
@@ -2355,31 +2373,35 @@ test("the back button shows an icon, not text, with an accessible label", async 
   assert.equal(backButton.getAttribute("aria-label"), "Back");
 });
 
-test("Download/Load .mob buttons show icons, not text, when idle", async () => {
+test("Upload/Download .mob buttons show icons with accessible labels, positioned in the header", async () => {
   const el = await openEditWithPoints([
     { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
   ]);
 
-  const [downloadButton, loadButton] = el.shadowRoot.querySelectorAll(".mob-button");
-  assert.equal(downloadButton.querySelector("ha-icon").getAttribute("icon"), "mdi:download");
-  assert.equal(downloadButton.getAttribute("aria-label"), "Download .mob");
+  // Mockup order: Upload (Load) first, then Download -- both live in
+  // the edit header itself, to the right of the title, not in a
+  // separate row below the point list.
+  const [loadButton, downloadButton] = el.shadowRoot.querySelectorAll(".edit-header .header-icon-button");
   assert.equal(loadButton.querySelector("ha-icon").getAttribute("icon"), "mdi:upload");
   assert.equal(loadButton.getAttribute("aria-label"), "Load .mob");
+  assert.equal(downloadButton.querySelector("ha-icon").getAttribute("icon"), "mdi:download");
+  assert.equal(downloadButton.getAttribute("aria-label"), "Download .mob");
 });
 
-test("Download .mob shows text feedback while exporting, not just an icon", async () => {
+test("Download .mob shows a spinning icon while exporting, not the plain download icon", async () => {
   const el = await openEditWithPoints([
     { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
   ]);
   // Never resolves during this test -- keeps the export "in flight".
   el.hass.callWS = () => new Promise(() => {});
 
-  el.shadowRoot.querySelector(".mob-button").click();
+  const downloadButton = el.shadowRoot.querySelector('.header-icon-button[title="Download .mob"]');
+  downloadButton.click();
   await el.updateComplete;
 
-  const downloadButton = el.shadowRoot.querySelector(".mob-button");
-  assert.equal(downloadButton.querySelector("ha-icon"), null);
-  assert.ok(downloadButton.textContent.includes("Exporting"));
+  const icon = downloadButton.querySelector("ha-icon");
+  assert.equal(icon.getAttribute("icon"), "mdi:loading");
+  assert.ok(icon.classList.contains("spin"));
 });
 
 // --------------------------------------------------------------------------

@@ -1173,8 +1173,39 @@ export class MobiusScheduleCard extends LitElement {
             <ha-icon icon="mdi:arrow-left"></ha-icon>
           </button>
           <div class="title">${localize("schedule_card.edit_schedule")}</div>
+          <button
+            class="header-icon-button"
+            ?disabled=${this._importingMob || this._editingIndex != null}
+            title=${localize("schedule_card.load_mob")}
+            aria-label=${localize("schedule_card.load_mob")}
+            @click=${() => this._triggerMobFilePicker()}
+          >
+            <ha-icon
+              icon=${this._importingMob ? "mdi:loading" : "mdi:upload"}
+              class=${this._importingMob ? "spin" : ""}
+            ></ha-icon>
+          </button>
+          <button
+            class="header-icon-button"
+            ?disabled=${this._exportingMob || this._editingIndex != null}
+            title=${localize("schedule_card.download_mob")}
+            aria-label=${localize("schedule_card.download_mob")}
+            @click=${() => this._exportMob()}
+          >
+            <ha-icon
+              icon=${this._exportingMob ? "mdi:loading" : "mdi:download"}
+              class=${this._exportingMob ? "spin" : ""}
+            ></ha-icon>
+          </button>
+          <input
+            type="file"
+            class="mob-file-input"
+            accept=".mob"
+            style="display: none"
+            @change=${(e: Event) => this._handleMobFileSelected(e)}
+          />
         </div>
-        ${content}
+        ${this._mobError ? html`<div class="save-schedule-error">${this._mobError}</div>` : nothing} ${content}
       </ha-card>
     `;
   }
@@ -1201,44 +1232,6 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // .mob download/load -- fully generic (export/parse_schedule_mob
-  // both just take/return whatever ScheduleEntry data the card
-  // already works with either way), reused unchanged by both kinds.
-  private _renderMobControls() {
-    return html`
-      ${this._mobError ? html`<div class="save-schedule-error">${this._mobError}</div>` : nothing}
-      <div class="mob-controls">
-        <button
-          class="mob-button"
-          ?disabled=${this._exportingMob || this._editingIndex != null}
-          title=${localize("schedule_card.download_mob")}
-          aria-label=${localize("schedule_card.download_mob")}
-          @click=${() => this._exportMob()}
-        >
-          ${
-            this._exportingMob ? localize("schedule_card.exporting_mob") : html`<ha-icon icon="mdi:download"></ha-icon>`
-          }
-        </button>
-        <button
-          class="mob-button"
-          ?disabled=${this._importingMob || this._editingIndex != null}
-          title=${localize("schedule_card.load_mob")}
-          aria-label=${localize("schedule_card.load_mob")}
-          @click=${() => this._triggerMobFilePicker()}
-        >
-          ${this._importingMob ? localize("schedule_card.importing_mob") : html`<ha-icon icon="mdi:upload"></ha-icon>`}
-        </button>
-        <input
-          type="file"
-          class="mob-file-input"
-          accept=".mob"
-          style="display: none"
-          @change=${(e: Event) => this._handleMobFileSelected(e)}
-        />
-      </div>
-    `;
-  }
-
   // Fully generic across both kinds -- error/loading states, the
   // point list, and the save controls are identical either way; the
   // only thing that differs is what a single point's own edit form
@@ -1260,7 +1253,7 @@ export class MobiusScheduleCard extends LitElement {
       <button class="add-point-button" ?disabled=${this._editingIndex != null} @click=${onAddPoint}>
         ${localize("schedule_card.add_point")}
       </button>
-      ${this._renderMobControls()} ${this._renderSaveScheduleControls()}
+      ${this._renderSaveScheduleControls()}
     `);
   }
 
@@ -1714,8 +1707,47 @@ export class MobiusScheduleCard extends LitElement {
     .edit-header {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 4px;
       margin-bottom: 14px;
+    }
+    .edit-header .title {
+      flex: 1;
+      margin: 0 8px;
+    }
+    .header-icon-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      color: var(--primary-text-color);
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 50%;
+    }
+    .header-icon-button:last-of-type {
+      margin-right: -6px;
+    }
+    .header-icon-button:hover {
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.08);
+    }
+    .header-icon-button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .header-icon-button ha-icon {
+      --mdc-icon-size: 20px;
+    }
+    .header-icon-button ha-icon.spin {
+      animation: mobius-spin 1s linear infinite;
+    }
+    @keyframes mobius-spin {
+      from {
+        transform: rotate(0deg);
+      }
+      to {
+        transform: rotate(360deg);
+      }
     }
     .back-button {
       display: flex;
@@ -1851,33 +1883,6 @@ export class MobiusScheduleCard extends LitElement {
     .add-point-button:disabled {
       opacity: 0.5;
       cursor: default;
-    }
-    .mob-controls {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-    }
-    .mob-button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex: 1;
-      padding: 8px 0;
-      border-radius: 10px;
-      border: 1px solid var(--divider-color);
-      background: none;
-      color: var(--primary-text-color);
-      font-family: inherit;
-      font-size: 0.85em;
-      font-weight: 500;
-      cursor: pointer;
-    }
-    .mob-button:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-    .mob-button ha-icon {
-      --mdc-icon-size: 20px;
     }
     .save-schedule-button {
       width: 100%;
