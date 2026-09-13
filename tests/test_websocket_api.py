@@ -966,3 +966,65 @@ async def test_scene_entity_id_is_the_same_across_every_group_on_the_tank(hass):
     groups = _resolve_tank_groups(hass, tank_device_id)
     assert len(groups) == 2
     assert all(g.as_dict()["scene_entity_id"] == "select.reef_tank_scene_selection" for g in groups)
+
+
+# --------------------------------------------------------------------------
+# True end-to-end: real config entry setup (real sensor.py creates the
+# real CurrentPumpModeSensor), not a manually-constructed entity
+# registry entry -- confirms the full, real pipeline actually wires
+# mode_entity_id correctly, not just _sensor_entity_id() in isolation.
+# --------------------------------------------------------------------------
+
+
+async def test_real_pump_setup_resolves_mode_entity_id_end_to_end(hass):
+    """Every other test in this file manually constructs the entity
+    registry entry (entity_registry.async_get_or_create(unique_id=...))
+    rather than letting the real sensor.py create it -- this is the
+    one test that goes through the genuine, full pipeline: a real
+    config entry setup (sensor.py's own async_setup_entry creates the
+    real CurrentPumpModeSensor), then the real _resolve_tank_groups()
+    against that real registry state. Confirms the two independently-
+    correct pieces (the sensor's own unique_id construction, and
+    _sensor_entity_id()'s own lookup of it) are actually wired
+    together correctly end to end, not just each individually."""
+    from unittest.mock import patch
+    from mobius import Tank
+    from homeassistant.const import CONF_ADDRESS
+    from custom_components.mobius.const import CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
+    from tests.test_sensor import _fake_pump_device, PUMP_SERIAL, PUMP_ADDRESS
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_PAN_ID: PAN_ID,
+            CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}],
+        },
+        unique_id=PUMP_SERIAL,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial",
+        AsyncMock(return_value=Tank(prefix=None, peers=[])),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address",
+        AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        tank_identifier = tank_device_identifier(None, PAN_ID)
+        matching = [
+            d for d in dr.async_entries_for_config_entry(device_registry, entry.entry_id)
+            if tank_identifier in d.identifiers
+        ]
+        tank_device = matching[0]
+
+        groups = _resolve_tank_groups(hass, tank_device.id)
+        member = groups[0].as_dict()["members"][0]
+
+        assert member["mode_entity_id"] == "sensor.mp40qd_right_current_mode"
