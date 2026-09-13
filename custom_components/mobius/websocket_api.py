@@ -83,6 +83,7 @@ class ScheduleGroupMember:
     schedule_intensity_entity_id: str | None = None  # light only
     speed_entity_id: str | None = None  # pump only
     flow_entity_id: str | None = None  # pump only
+    mode_entity_id: str | None = None  # pump only -- CurrentPumpModeSensor
 
 
 @dataclass
@@ -106,6 +107,7 @@ class ScheduleGroup:
             else:
                 d["speed_entity_id"] = m.speed_entity_id
                 d["flow_entity_id"] = m.flow_entity_id
+                d["mode_entity_id"] = m.mode_entity_id
             return d
 
         result: dict[str, Any] = {
@@ -353,6 +355,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
                 serial=serial, name=_member_name(serial, coordinator),
                 speed_entity_id=_sensor_entity_id(hass, serial, "motor_speed"),
                 flow_entity_id=_sensor_entity_id(hass, serial, "flow_rate"),
+                mode_entity_id=_sensor_entity_id(hass, serial, "current_pump_mode"),
             )],
         ))
 
