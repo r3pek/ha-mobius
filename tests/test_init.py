@@ -615,7 +615,7 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
 
     async def flaky_fetch_all(
         device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
-        cached_primitive_type=None, cached_model=None,
+        cached_primitive_type=None, cached_model=None, group=None,
     ):
         # PUMP_SERIAL (the gateway) always succeeds; LIGHT_SERIAL's own
         # relayed fetch fails on its first call, then succeeds on retry.

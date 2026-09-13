@@ -186,6 +186,21 @@ class PanGroup:
             if serial not in exclude_serials
         ]
 
+    def serial_for_mesh_suffix(self, suffix: bytes) -> Optional[str]:
+        """The serial of whichever member's own mesh_address ends with
+        this suffix, if any is currently known. Shared home for the
+        resolution websocket_api.py's own _serial_for_master_hex() and
+        coordinator.py's own current_pump_params translation both need --
+        Sync/EcoSmartBack's own "Master" param is the last 8 bytes of
+        the parent pump's own mesh address (see python-mobius's own
+        07-pump-schedule.md), meaningless on its own without this
+        lookup. None if no currently-known member's own mesh_address
+        matches (not cached yet, or genuinely not part of this tank)."""
+        for serial, member in self.members.items():
+            if member.mesh_address is not None and member.mesh_address[-len(suffix):] == suffix:
+                return serial
+        return None
+
 
 class GatewayRegistry:
     """

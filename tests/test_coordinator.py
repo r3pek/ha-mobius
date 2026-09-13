@@ -22,11 +22,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
-    discover_mesh_address, discover_tank_for_serial,
+    discover_mesh_address, discover_tank_for_serial, _fetch_all,
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
-from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID, VectraInfo
+from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID, VectraInfo, PumpParam
 from mobius.relay import RelayedMobiusDevice
 
 PUMP_SERIAL = "00000000000001"
@@ -928,6 +928,88 @@ class TestVectraClosedLoopCaching:
         assert coordinator.last_update_success
         assert coordinator._closed_loop is None
         assert coordinator.data["closed_loop"] is None
+
+
+class TestCurrentPumpModeMasterTranslation:
+    """current_pump_params' own "Master" param (Sync/EcoSmartBack's
+    raw mesh-address suffix identifying the parent pump) gets
+    translated to "ParentSerial" the same way
+    websocket_api.py's own _translate_master_to_parent_serial()
+    already does for the schedule editor -- confirms _fetch_all()
+    itself does this translation correctly, via the shared
+    PanGroup.serial_for_mesh_suffix(), with no extra device reads:
+    the mesh_address values used here are already-cached registry
+    state from prior polls, not fetched fresh for this."""
+
+    async def test_master_resolves_to_the_known_parent_serial(self, hass):
+        registry = _make_registry(hass)
+        parent_serial = "00000000000099"
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        await registry.join(PAN_ID, parent_serial, rssi=-55)
+        parent_address = bytes.fromhex("fdaaaaaaaaaaaaaa00000000aabbccdd")
+        registry.update_mesh_address(PAN_ID, parent_serial, parent_address)
+        group = registry.group(PAN_ID)
+
+        device = _make_fake_pump_device()
+        fake_point = MagicMock()
+        fake_point.pump.mode.name = "Sync"
+        fake_point.pump.params = {PumpParam.Master: parent_address[-8:], PumpParam.MaxSpeed: 300}
+        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+
+        info, *_ = await _fetch_all(device, group=group)
+
+        assert info["current_pump_mode"] == "Sync"
+        assert info["current_pump_params"]["ParentSerial"] == parent_serial
+        assert "Master" not in info["current_pump_params"]
+        assert info["current_pump_params"]["MaxSpeed"] == 300
+
+    async def test_master_resolves_to_none_when_the_parent_is_not_yet_known(self, hass):
+        """The parent's own mesh_address might not be cached yet (never
+        reached directly), or it could genuinely belong to a different
+        tank -- either way, this must fail soft (None), never raise,
+        since a live sensor reading shouldn't break over this."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        group = registry.group(PAN_ID)
+
+        device = _make_fake_pump_device()
+        fake_point = MagicMock()
+        fake_point.pump.mode.name = "Sync"
+        fake_point.pump.params = {PumpParam.Master: bytes.fromhex("aabbccdd11223344")}
+        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+
+        info, *_ = await _fetch_all(device, group=group)
+
+        assert info["current_pump_params"]["ParentSerial"] is None
+
+    async def test_no_group_leaves_master_unresolved_rather_than_erroring(self, hass):
+        """_fetch_all() deliberately takes no coordinator state of its
+        own (see its own docstring) -- group=None (the default) must
+        never raise, just skip this one translation."""
+        device = _make_fake_pump_device()
+        fake_point = MagicMock()
+        fake_point.pump.mode.name = "Sync"
+        fake_point.pump.params = {PumpParam.Master: bytes.fromhex("aabbccdd11223344")}
+        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+
+        info, *_ = await _fetch_all(device)
+
+        assert "ParentSerial" not in info["current_pump_params"]
+
+    async def test_non_master_params_are_unaffected(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        group = registry.group(PAN_ID)
+
+        device = _make_fake_pump_device()
+        fake_point = MagicMock()
+        fake_point.pump.mode.name = "ConstantSpeed"
+        fake_point.pump.params = {PumpParam.MaxSpeed: 450}
+        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+
+        info, *_ = await _fetch_all(device, group=group)
+
+        assert info["current_pump_params"] == {"MaxSpeed": 450}
 
 
 

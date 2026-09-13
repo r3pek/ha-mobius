@@ -391,21 +391,15 @@ def _serial_for_master_hex(master_hex: str, coordinator: MobiusDeviceCoordinator
     parent pump's own mesh address (see python-mobius's own
     07-pump-schedule.md), hex-encoded by pump_schedule_to_dict() --
     meaningless to a person editing a schedule. Translates it back to
-    whichever known device in this same tank it refers to, using
-    GatewayRegistry's own per-device mesh_address tracking (already
-    populated for every device that's been reached at least once --
-    see gateway_registry.py's own update_mesh_address()). None if no
-    currently-known device matches (the parent's own mesh address
-    isn't cached yet, or it's genuinely not part of this tank).
+    whichever known device in this same tank it refers to, via
+    GatewayRegistry's own shared serial_for_mesh_suffix() (also used by
+    coordinator.py for the same resolution, so both sides of this
+    translation stay in sync with each other automatically).
     """
     group = coordinator.registry.group(coordinator.pan_id)
     if group is None:
         return None
-    target = bytes.fromhex(master_hex)
-    for serial, member in group.members.items():
-        if member.mesh_address is not None and member.mesh_address[-8:] == target:
-            return serial
-    return None
+    return group.serial_for_mesh_suffix(bytes.fromhex(master_hex))
 
 
 def _master_hex_for_serial(serial: str, coordinator: MobiusDeviceCoordinator) -> str | None:

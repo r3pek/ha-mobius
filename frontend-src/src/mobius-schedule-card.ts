@@ -779,6 +779,28 @@ export class MobiusScheduleCard extends LitElement {
     this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
   }
 
+  // Scene-running check matches _renderSceneBanner()'s own live
+  // entity read exactly, not this._group's own active_scene snapshot
+  // (only current as of whenever resolve_schedule_groups last ran) --
+  // the two must never disagree about whether a scene is active right
+  // now.
+  private _currentModeText(group: ScheduleGroup, modeState?: { state: string; attributes: Record<string, unknown> }) {
+    const sceneState = group.scene_entity_id ? this.hass.states[group.scene_entity_id] : undefined;
+    if (sceneState && sceneState.state !== "None" && sceneState.state !== "unavailable") {
+      return sceneState.state;
+    }
+    if (!modeState) return undefined;
+
+    const params = (modeState.attributes.current_pump_params as Record<string, unknown>) ?? {};
+    const label = displayModeLabel(displayModeFor(modeState.state, params.PhaseShift));
+    const parentSerial = params.ParentSerial as string | null | undefined;
+    if (parentSerial) {
+      const parent = this._otherPumps.find((p) => p.serial === parentSerial);
+      if (parent) return `${label} (${parent.name})`;
+    }
+    return label;
+  }
+
   private _renderPumpGlance() {
     const group = this._group!;
     const member = group.members[0];
@@ -843,7 +865,8 @@ export class MobiusScheduleCard extends LitElement {
           modeState
             ? html`
                 <div class="current-mode">
-                  ${localize("schedule_card.currently_running")} <strong>${modeState.state}</strong>
+                  ${localize("schedule_card.currently_running")}
+                  <strong>${this._currentModeText(group, modeState)}</strong>
                 </div>
               `
             : nothing

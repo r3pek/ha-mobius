@@ -2536,3 +2536,123 @@ test("a channel that DID just report a value at the current moment isn't given a
   // which would draw the line backwards.
   assert.equal(points.length, 2);
 });
+
+// --------------------------------------------------------------------------
+// Pump glance -- current mode display (plain name, scene override,
+// Anti-Sync distinction, parent name for child modes)
+// --------------------------------------------------------------------------
+
+test("pump glance shows the plain mode name when it isn't a child mode and no scene is running", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_mode": { state: "TidalSwell", attributes: { current_pump_params: { MaxSpeed: 300 } } },
+  });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector(".current-mode").textContent.includes("TidalSwell"));
+});
+
+test("pump glance shows the scene name instead of the mode when a scene is currently running", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_mode": { state: "ConstantSpeed", attributes: { current_pump_params: {} } },
+    "select.reef_tank_scene_selection": { state: "Feed Time", attributes: {} },
+  });
+  await settled(el);
+
+  const text = el.shadowRoot.querySelector(".current-mode").textContent;
+  assert.ok(text.includes("Feed Time"));
+  assert.ok(!text.includes("ConstantSpeed"));
+});
+
+test("pump glance shows Sync as plain Sync when PhaseShift is not 180", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_mode": { state: "Sync", attributes: { current_pump_params: { PhaseShift: 0 } } },
+  });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector(".current-mode").textContent.includes("Sync"));
+  assert.ok(!el.shadowRoot.querySelector(".current-mode").textContent.includes("Anti-Sync"));
+});
+
+test("pump glance shows Anti-Sync (not plain Sync) when PhaseShift is 180", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_mode": { state: "Sync", attributes: { current_pump_params: { PhaseShift: 180 } } },
+  });
+  await settled(el);
+
+  assert.ok(el.shadowRoot.querySelector(".current-mode").textContent.includes("Anti-Sync"));
+});
+
+test("pump glance shows the parent pump's own name in parentheses for a child mode", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    {
+      "sensor.pump_mode": {
+        state: "Sync",
+        attributes: { current_pump_params: { PhaseShift: 0, ParentSerial: "SN4" } },
+      },
+    },
+    { wsResponse: { groups: [PUMP_GROUP, OTHER_PUMP_GROUP] } },
+  );
+  await settled(el);
+
+  const text = el.shadowRoot.querySelector(".current-mode").textContent;
+  assert.ok(text.includes("Sync"));
+  assert.ok(text.includes("Left Return Pump"));
+});
+
+test("pump glance shows EcoSmart Back with the parent name too, not just Sync/Anti-Sync", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    {
+      "sensor.pump_mode": {
+        state: "EcoSmartBack",
+        attributes: { current_pump_params: { ParentSerial: "SN4" } },
+      },
+    },
+    { wsResponse: { groups: [PUMP_GROUP, OTHER_PUMP_GROUP] } },
+  );
+  await settled(el);
+
+  const text = el.shadowRoot.querySelector(".current-mode").textContent;
+  assert.ok(text.includes("EcoSmart Back"));
+  assert.ok(text.includes("Left Return Pump"));
+});
+
+test("pump glance falls back gracefully when the parent serial isn't a currently-known pump", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({
+    "sensor.pump_mode": {
+      state: "Sync",
+      attributes: { current_pump_params: { ParentSerial: "SN_UNKNOWN" } },
+    },
+  });
+  await settled(el);
+
+  // No crash, no bogus "(undefined)" -- just the mode name on its own.
+  const text = el.shadowRoot.querySelector(".current-mode").textContent;
+  assert.ok(text.includes("Sync"));
+  assert.ok(!text.includes("undefined"));
+});
+
+test("a scene running takes priority over showing the parent name, even in a child mode", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    {
+      "sensor.pump_mode": {
+        state: "Sync",
+        attributes: { current_pump_params: { ParentSerial: "SN4" } },
+      },
+      "select.reef_tank_scene_selection": { state: "Water Change", attributes: {} },
+    },
+    { wsResponse: { groups: [PUMP_GROUP, OTHER_PUMP_GROUP] } },
+  );
+  await settled(el);
+
+  const text = el.shadowRoot.querySelector(".current-mode").textContent;
+  assert.ok(text.includes("Water Change"));
+  assert.ok(!text.includes("Left Return Pump"));
+});

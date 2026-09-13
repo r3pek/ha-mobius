@@ -84,7 +84,7 @@ from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
     MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE, extract_short_address, C2Attribute,
+    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam,
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
@@ -374,7 +374,7 @@ def derive_hw_version(hardware_info: dict) -> Optional[str]:
 
 async def _fetch_all(
     device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
-    cached_primitive_type=None, cached_model=None,
+    cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
 ) -> tuple[dict[str, Any], set[int], bool, Optional[PrimitiveType], Optional[Model]]:
     """
     The actual read logic, covering both status (identity + live
@@ -422,6 +422,15 @@ async def _fetch_all(
     than the equivalent separate calls. Only the very first poll (when
     both are still None) pays for get_device_info() directly, purely
     to learn them for every poll after.
+
+    group -- this device's own PanGroup (mesh-wide state shared across
+    every coordinator on the same pan_id), if known. Only used to
+    resolve a pump's own live Sync/EcoSmartBack "Master" param (a raw
+    mesh-address suffix) to a serial, for current_pump_params. None
+    (safe; that resolution is simply skipped) if the caller doesn't
+    have one yet -- this function otherwise deliberately takes no
+    coordinator state at all, so a missing group never blocks any of
+    the rest of what it fetches.
     """
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
@@ -612,10 +621,19 @@ async def _fetch_all(
         )
         if block:
             info["current_pump_mode"] = block.pump.mode.name
-            info["current_pump_params"] = {
-                p.name: (v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v))
-                for p, v in block.pump.params.items()
-            }
+            params: dict[str, object] = {}
+            for p, v in block.pump.params.items():
+                # Same translation as websocket_api.py's own
+                # _translate_master_to_parent_serial() -- a raw mesh-
+                # address suffix is meaningless to anything reading this
+                # sensor's own attributes; the schedule card's pump
+                # glance view resolves this serial to a display name
+                # itself (see its own current-mode display logic).
+                if p == PumpParam.Master and isinstance(v, bytes) and group is not None:
+                    params["ParentSerial"] = group.serial_for_mesh_suffix(v)
+                else:
+                    params[p.name] = v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v)
+            info["current_pump_params"] = params
 
     # Deliberately unconditional -- NOT gated to LIGHT_PRIMITIVES/
     # PUMP_PRIMITIVES the way most of the above is. The app's own
@@ -943,7 +961,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
                     batch_disabled=self._batch_disabled,
-                    cached_primitive_type=self._primitive_type, cached_model=self._model,
+                    cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
                 )
                 self._record_batch_result(used_batch)
                 self.registry.record_gateway_success(self.pan_id)
@@ -952,7 +970,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
                     device, cached_supported_attribute_ids=self._supported_attribute_ids,
                     batch_disabled=self._batch_disabled,
-                    cached_primitive_type=self._primitive_type, cached_model=self._model,
+                    cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
                 )
                 self._record_batch_result(used_batch)
                 self.registry.record_relay_success(self.pan_id, self.serial)

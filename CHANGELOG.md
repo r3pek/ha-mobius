@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The pump glance view shows the pump's own current mode -- the
+  active scene's name if one is running, Anti-Sync (not just Sync)
+  when that's actually in effect, and the parent pump's own name in
+  parentheses for a child mode (Sync/Anti-Sync/EcoSmart Back).
+- Moved the schedule editor's Load/Download buttons into the header,
+  next to Back, matching the mockup's own layout.
+
 ## 0.8.0-beta2
 
 - Added a "Restart all devices" button on the tank device, matching
