@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The light channel intensity chart is taller, its hour labels are
+  larger and properly centered, the hover tooltip no longer covers
+  the point you're pointing at, and hovering now shows a small time
+  label at the bottom of the hover line.
+
 ## 0.8.0-beta3
 
 - The light channel intensity chart now shows a rolling last-24h

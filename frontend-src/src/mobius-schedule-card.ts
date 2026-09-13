@@ -35,7 +35,7 @@ function joinNaturally(names: string[]): string {
 }
 
 const CHART_WIDTH = 600;
-const CHART_HEIGHT = 140;
+const CHART_HEIGHT = 200;
 
 // Best-effort visual match to a channel's own real-world color --
 // purely cosmetic (channel identity itself comes entirely from the
@@ -1007,8 +1007,15 @@ export class MobiusScheduleCard extends LitElement {
 
     if (readings.length === 0) return nothing;
 
+    const lang = this.hass?.locale;
+    const hoverDate = new Date(hoverTimeMs);
+    const hoverTimeLabel = lang
+      ? formatTime(hoverDate, lang)
+      : `${hoverDate.getHours()}:${String(hoverDate.getMinutes()).padStart(2, "0")}`;
+
     return html`
       <div class="chart-hover-line" style="left: ${this._chartHoverFraction * 100}%"></div>
+      <div class="chart-hover-time" style="left: ${this._chartHoverFraction * 100}%">${hoverTimeLabel}</div>
       <div class="chart-tooltip" style="left: ${this._chartHoverFraction * 100}%">
         ${readings.map(
           (r) => html`
@@ -1104,14 +1111,10 @@ export class MobiusScheduleCard extends LitElement {
     }
 
     const lang = this.hass?.locale;
-    const hourLabel = (t: number) => {
-      const d = new Date(t);
-      return lang ? formatTime(d, lang) : `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
-    };
     const hourMarks = niceHourMarks(windowStartMs, nowMs, 6);
 
     return html`
-      <svg class="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT + 16}" preserveAspectRatio="none">
+      <svg class="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT}" preserveAspectRatio="none">
         ${[0, 50, 100].map(
           (percent) => svg`
             <line x1="0" x2=${CHART_WIDTH} y1=${toY(percent)} y2=${toY(percent)} class="chart-gridline-h" />
@@ -1120,11 +1123,17 @@ export class MobiusScheduleCard extends LitElement {
         ${hourMarks.map(
           (t) => svg`
             <line x1=${toX(t)} x2=${toX(t)} y1="0" y2=${CHART_HEIGHT} class="chart-gridline" />
-            <text x=${toX(t)} y=${CHART_HEIGHT + 12} class="chart-label">${hourLabel(t)}</text>
           `,
         )}
         ${lines}
       </svg>
+      <div class="chart-hour-labels">
+        ${hourMarks.map((t) => {
+          const d = new Date(t);
+          const label = lang ? formatTime(d, lang) : `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+          return html`<span class="chart-hour-label" style="left: ${(toX(t) / CHART_WIDTH) * 100}%">${label}</span>`;
+        })}
+      </div>
     `;
   }
 
@@ -2061,11 +2070,11 @@ export class MobiusScheduleCard extends LitElement {
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      padding: 0 0 16px 0;
-      font-size: 9px;
+      padding: 0 0 18px 0;
+      font-size: 11px;
       color: var(--secondary-text-color);
       text-align: right;
-      min-width: 26px;
+      min-width: 30px;
     }
     .chart-container {
       position: relative;
@@ -2075,16 +2084,32 @@ export class MobiusScheduleCard extends LitElement {
     .chart-hover-line {
       position: absolute;
       top: 0;
-      bottom: 16px;
+      bottom: 0;
       width: 1px;
       background: var(--primary-text-color);
       opacity: 0.3;
       pointer-events: none;
       transform: translateX(-50%);
     }
+    .chart-hover-time {
+      position: absolute;
+      bottom: -18px;
+      transform: translateX(-50%);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--primary-text-color);
+      background: var(--card-background-color);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--divider-color);
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 1;
+    }
     .chart-tooltip {
       position: absolute;
-      top: 0;
+      bottom: 100%;
+      margin-bottom: 6px;
       transform: translateX(-50%);
       background: var(--card-background-color);
       border: 1px solid var(--divider-color);
@@ -2094,7 +2119,7 @@ export class MobiusScheduleCard extends LitElement {
       pointer-events: none;
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
       white-space: nowrap;
-      z-index: 1;
+      z-index: 2;
     }
     .chart-tooltip-row {
       display: flex;
@@ -2142,10 +2167,17 @@ export class MobiusScheduleCard extends LitElement {
       stroke-width: 1;
       opacity: 0.5;
     }
-    .chart-label {
-      font-size: 9px;
-      fill: var(--secondary-text-color);
-      text-anchor: middle;
+    .chart-hour-labels {
+      position: relative;
+      height: 16px;
+      margin-top: 2px;
+    }
+    .chart-hour-label {
+      position: absolute;
+      transform: translateX(-50%);
+      font-size: 11px;
+      color: var(--secondary-text-color);
+      white-space: nowrap;
     }
     .chart-status {
       padding: 24px 0;

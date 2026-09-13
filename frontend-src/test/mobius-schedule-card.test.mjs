@@ -715,7 +715,7 @@ test("chart shows hour gridline labels", async () => {
   );
   await settled(el);
 
-  assert.equal(el.shadowRoot.querySelectorAll(".chart-label").length, 4);
+  assert.equal(el.shadowRoot.querySelectorAll(".chart-hour-label").length, 4);
 });
 
 // --------------------------------------------------------------------------
@@ -2684,8 +2684,8 @@ test("the chart shows three horizontal gridlines matching the Y-axis scale", asy
   // range the Y-axis labels claim, not just three arbitrary lines.
   const ys = [...gridlines].map((g) => Number(g.getAttribute("y1"))).sort((a, b) => a - b);
   assert.equal(ys[0], 0);
-  assert.equal(ys[2], 140); // CHART_HEIGHT
-  assert.equal(ys[1], 70); // the midpoint
+  assert.equal(ys[2], 200); // CHART_HEIGHT
+  assert.equal(ys[1], 100); // the midpoint
 });
 
 test("horizontal gridlines span the full chart width", async () => {
@@ -2799,7 +2799,7 @@ test("hour labels show nice, clean clock hours -- never a raw, awkward offset fr
   );
   await settled(el);
 
-  const labels = [...el.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  const labels = [...el.shadowRoot.querySelectorAll(".chart-hour-label")].map((l) => l.textContent.trim());
   assert.equal(labels.length, 4);
   // Nice marks within the window: 18:00 (Sep 12), 0:00, 6:00, 12:00
   // (Sep 13) -- never "14:37"-style raw offsets from "now" itself.
@@ -2817,7 +2817,7 @@ test("as time advances past a nice hour, an old mark scrolls off the left and a 
     { "sensor.left_royalblue": [historyEntry(50, 0)] },
   );
   await settled(elBefore);
-  const labelsBefore = [...elBefore.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  const labelsBefore = [...elBefore.shadowRoot.querySelectorAll(".chart-hour-label")].map((l) => l.textContent.trim());
   assert.deepEqual(labelsBefore, ["18:00", "0:00", "6:00", "12:00"]);
 
   // 90 minutes later -- now just past 18:00. The 18:00 (Sep 12) mark
@@ -2831,6 +2831,58 @@ test("as time advances past a nice hour, an old mark scrolls off the left and a 
     { "sensor.left_royalblue": [historyEntry(50, 0)] },
   );
   await settled(elAfter);
-  const labelsAfter = [...elAfter.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  const labelsAfter = [...elAfter.shadowRoot.querySelectorAll(".chart-hour-label")].map((l) => l.textContent.trim());
   assert.deepEqual(labelsAfter, ["0:00", "6:00", "12:00", "18:00"]);
+});
+
+// --------------------------------------------------------------------------
+// Hover time label (shows exactly where you're pointing, independent
+// of the value tooltip)
+// --------------------------------------------------------------------------
+
+test("hovering shows a time label at the bottom of the hover line", async (t) => {
+  const fixedNow = new Date("2026-09-13T14:37:22").getTime();
+  t.mock.timers.enable({ apis: ["Date"], now: fixedNow });
+
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0; // left edge -- windowStart = fixedNow - 24h
+  await el.updateComplete;
+
+  const timeLabel = el.shadowRoot.querySelector(".chart-hover-time");
+  assert.ok(timeLabel);
+  assert.equal(timeLabel.textContent.trim(), "14:37");
+});
+
+test("the hover time label tracks the same fraction as the hover line itself", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0.3;
+  await el.updateComplete;
+
+  const line = el.shadowRoot.querySelector(".chart-hover-line");
+  const timeLabel = el.shadowRoot.querySelector(".chart-hover-time");
+  assert.ok(line.getAttribute("style").includes("30%"));
+  assert.ok(timeLabel.getAttribute("style").includes("30%"));
+});
+
+test("no hover time label is shown until the chart is actually hovered", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".chart-hover-time"), null);
 });
