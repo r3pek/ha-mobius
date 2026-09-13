@@ -2772,3 +2772,23 @@ test("hover at the left edge resolves to a point in time roughly 24h ago, not mi
   const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
   assert.ok(tooltip.textContent.includes("42"));
 });
+
+test("hour labels show the actual clock time, including minutes -- never a misleading :00", async (t) => {
+  // 2:37:22 PM on a fixed date -- deliberately not on the hour, so a
+  // fallback label hardcoding ":00" would be caught immediately.
+  const fixedNow = new Date("2026-09-13T14:37:22").getTime();
+  t.mock.timers.enable({ apis: ["Date"], now: fixedNow });
+
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const labels = [...el.shadowRoot.querySelectorAll(".chart-label")].map((l) => l.textContent.trim());
+  assert.equal(labels.length, 4);
+  // windowStartMs = fixedNow - 24h = 2026-09-12T14:37:22 -- 0/6/12/18h
+  // into the window land at 14:37, 20:37, 2:37, 8:37 respectively.
+  assert.deepEqual(labels, ["14:37", "20:37", "2:37", "8:37"]);
+});

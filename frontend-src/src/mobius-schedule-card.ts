@@ -1087,7 +1087,13 @@ export class MobiusScheduleCard extends LitElement {
     // that hour 0 of the window is midnight.
     const hourLabel = (hoursIntoWindow: number) => {
       const d = new Date(windowStartMs + hoursIntoWindow * 3600000);
-      return lang ? formatTime(d, lang) : `${d.getHours()}:00`;
+      // windowStartMs is "now minus exactly 24h", so it carries the
+      // same minute-of-hour "now" itself has -- almost never :00.
+      // formatTime() (the real, locale-aware path) already handles
+      // this correctly; the fallback needs to show the actual minutes
+      // too, not hardcode ":00" and silently mislead by up to 59
+      // minutes.
+      return lang ? formatTime(d, lang) : `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
     };
 
     return html`
