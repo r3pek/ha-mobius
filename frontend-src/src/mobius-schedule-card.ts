@@ -2142,8 +2142,9 @@ export class MobiusScheduleCard extends LitElement {
     .chart-legend {
       display: flex;
       flex-wrap: wrap;
+      justify-content: center;
       gap: 10px;
-      margin: -6px 0 12px;
+      margin: 10px 0 12px;
       font-size: 0.78em;
       color: var(--secondary-text-color);
     }

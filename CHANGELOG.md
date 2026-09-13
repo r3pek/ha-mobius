@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the light schedule chart's own channel legend being cramped
+  against the hour labels above it (a leftover negative margin), and
+  centered the legend on the card's own width.
+
 ## 0.8.0-beta4
 
 - Fixed the gateway role trading forever between the two best-RSSI
