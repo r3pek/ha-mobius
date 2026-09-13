@@ -2656,3 +2656,53 @@ test("a scene running takes priority over showing the parent name, even in a chi
   assert.ok(text.includes("Water Change"));
   assert.ok(!text.includes("Left Return Pump"));
 });
+
+// --------------------------------------------------------------------------
+// Chart vertical scale (Y-axis labels and horizontal gridlines)
+// --------------------------------------------------------------------------
+
+test("the light channel chart shows a 0/50/100% Y-axis scale", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const labels = [...el.shadowRoot.querySelectorAll(".chart-y-axis span")].map((s) => s.textContent);
+  assert.deepEqual(labels, ["100%", "50%", "0%"]);
+});
+
+test("the chart shows three horizontal gridlines matching the Y-axis scale", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const gridlines = el.shadowRoot.querySelectorAll(".chart-gridline-h");
+  assert.equal(gridlines.length, 3);
+  // Top (100%), middle (50%), and bottom (0%) of the chart's own
+  // height -- confirms the gridlines actually span the same value
+  // range the Y-axis labels claim, not just three arbitrary lines.
+  const ys = [...gridlines].map((g) => Number(g.getAttribute("y1"))).sort((a, b) => a - b);
+  assert.equal(ys[0], 0);
+  assert.equal(ys[2], 140); // CHART_HEIGHT
+  assert.equal(ys[1], 70); // the midpoint
+});
+
+test("horizontal gridlines span the full chart width", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    { "sensor.left_royalblue": [historyEntry(50, 0)] },
+  );
+  await settled(el);
+
+  const gridlines = [...el.shadowRoot.querySelectorAll(".chart-gridline-h")];
+  for (const line of gridlines) {
+    assert.equal(line.getAttribute("x1"), "0");
+    assert.equal(line.getAttribute("x2"), "600"); // CHART_WIDTH
+  }
+});

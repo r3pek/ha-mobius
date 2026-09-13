@@ -1087,6 +1087,11 @@ export class MobiusScheduleCard extends LitElement {
 
     return html`
       <svg class="chart" viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT + 16}" preserveAspectRatio="none">
+        ${[0, 50, 100].map(
+          (percent) => svg`
+            <line x1="0" x2=${CHART_WIDTH} y1=${toY(percent)} y2=${toY(percent)} class="chart-gridline-h" />
+          `,
+        )}
         ${[0, 6, 12, 18].map(
           (hour) => svg`
             <line
@@ -1140,12 +1145,19 @@ export class MobiusScheduleCard extends LitElement {
         ${
           sourceMember
             ? html`
-                <div
-                  class="chart-container"
-                  @mousemove=${this._handleChartMouseMove}
-                  @mouseleave=${this._handleChartMouseLeave}
-                >
-                  ${this._renderChannelChart(sourceMember)} ${this._renderChartHoverOverlay(sourceMember)}
+                <div class="chart-wrapper">
+                  <div class="chart-y-axis">
+                    <span>100%</span>
+                    <span>50%</span>
+                    <span>0%</span>
+                  </div>
+                  <div
+                    class="chart-container"
+                    @mousemove=${this._handleChartMouseMove}
+                    @mouseleave=${this._handleChartMouseLeave}
+                  >
+                    ${this._renderChannelChart(sourceMember)} ${this._renderChartHoverOverlay(sourceMember)}
+                  </div>
                 </div>
                 ${this._renderChartLegend(sourceMember)}
               `
@@ -2025,8 +2037,24 @@ export class MobiusScheduleCard extends LitElement {
       height: auto;
       margin-bottom: 12px;
     }
+    .chart-wrapper {
+      display: flex;
+      gap: 6px;
+    }
+    .chart-y-axis {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 0 0 16px 0;
+      font-size: 9px;
+      color: var(--secondary-text-color);
+      text-align: right;
+      min-width: 26px;
+    }
     .chart-container {
       position: relative;
+      flex: 1;
+      min-width: 0;
     }
     .chart-hover-line {
       position: absolute;
@@ -2092,6 +2120,11 @@ export class MobiusScheduleCard extends LitElement {
     .chart-gridline {
       stroke: var(--divider-color);
       stroke-width: 1;
+    }
+    .chart-gridline-h {
+      stroke: var(--divider-color);
+      stroke-width: 1;
+      opacity: 0.5;
     }
     .chart-now-line {
       stroke: var(--primary-color);

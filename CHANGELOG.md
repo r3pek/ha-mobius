@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The light channel intensity chart shows a 0/50/100% Y-axis scale
+  with matching horizontal gridlines.
 - The pump glance view shows the pump's own current mode -- the
   active scene's name if one is running, Anti-Sync (not just Sync)
   when that's actually in effect, and the parent pump's own name in
