@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta4
 
 - Fixed the gateway role trading forever between the two best-RSSI
   devices on a tank, never giving any other device a real turn -- a
