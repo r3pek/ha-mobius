@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta3
 
 - The light channel intensity chart now shows a rolling last-24h
   window ending at now, matching Home Assistant's own history chart,

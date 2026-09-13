@@ -15,5 +15,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://code.r3pek.org/r3pek/ha-mobius/issues",
   "requirements": ["python-mobius~=0.8.1", "bleak-retry-connector>=3.0"],
-  "version": "0.8.0-beta2"
+  "version": "0.8.0-beta3"
 }
