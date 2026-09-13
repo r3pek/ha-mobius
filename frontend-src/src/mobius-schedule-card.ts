@@ -821,7 +821,13 @@ export class MobiusScheduleCard extends LitElement {
     }
     if (!modeState) return undefined;
 
-    const params = (modeState.attributes.current_pump_params as Record<string, unknown>) ?? {};
+    // CurrentPumpModeSensor's own extra_state_attributes (sensor.py)
+    // returns current_pump_params' own contents directly as this
+    // sensor's attributes -- MaxSpeed/PhaseShift/ParentSerial etc. are
+    // top-level attribute keys themselves, not nested under a
+    // "current_pump_params" key. Confirmed directly against a real
+    // sensor's own attributes panel.
+    const params = modeState.attributes;
     const label = displayModeLabel(displayModeFor(modeState.state, params.PhaseShift));
     const parentSerial = params.ParentSerial as string | null | undefined;
     if (parentSerial) {

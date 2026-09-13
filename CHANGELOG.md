@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed the pump glance view's own current-mode display never
+  actually reading MaxSpeed/PhaseShift/ParentSerial correctly --
+  Anti-Sync now shows instead of plain Sync when that's actually in
+  effect, and a child mode's parent pump name shows again.
 - Fixed the light schedule chart's own channel legend being cramped
   against the hour labels above it (a leftover negative margin), and
   centered the legend on the card's own width.

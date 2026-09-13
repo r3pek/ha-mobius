@@ -2541,7 +2541,7 @@ test("a channel that DID just report a value at the current moment isn't given a
 test("pump glance shows the plain mode name when it isn't a child mode and no scene is running", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
-    "sensor.pump_mode": { state: "TidalSwell", attributes: { current_pump_params: { MaxSpeed: 300 } } },
+    "sensor.pump_mode": { state: "TidalSwell", attributes: { MaxSpeed: 300 } },
   });
   await settled(el);
 
@@ -2551,7 +2551,7 @@ test("pump glance shows the plain mode name when it isn't a child mode and no sc
 test("pump glance shows the scene name instead of the mode when a scene is currently running", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
-    "sensor.pump_mode": { state: "ConstantSpeed", attributes: { current_pump_params: {} } },
+    "sensor.pump_mode": { state: "ConstantSpeed", attributes: {} },
     "select.reef_tank_scene_selection": { state: "Feed Time", attributes: {} },
   });
   await settled(el);
@@ -2564,7 +2564,7 @@ test("pump glance shows the scene name instead of the mode when a scene is curre
 test("pump glance shows Sync as plain Sync when PhaseShift is not 180", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
-    "sensor.pump_mode": { state: "Sync", attributes: { current_pump_params: { PhaseShift: 0 } } },
+    "sensor.pump_mode": { state: "Sync", attributes: { PhaseShift: 0 } },
   });
   await settled(el);
 
@@ -2575,7 +2575,7 @@ test("pump glance shows Sync as plain Sync when PhaseShift is not 180", async ()
 test("pump glance shows Anti-Sync (not plain Sync) when PhaseShift is 180", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass({
-    "sensor.pump_mode": { state: "Sync", attributes: { current_pump_params: { PhaseShift: 180 } } },
+    "sensor.pump_mode": { state: "Sync", attributes: { PhaseShift: 180 } },
   });
   await settled(el);
 
@@ -2588,7 +2588,7 @@ test("pump glance shows the parent pump's own name in parentheses for a child mo
     {
       "sensor.pump_mode": {
         state: "Sync",
-        attributes: { current_pump_params: { PhaseShift: 0, ParentSerial: "SN4" } },
+        attributes: { PhaseShift: 0, ParentSerial: "SN4" },
       },
     },
     { wsResponse: { groups: [PUMP_GROUP, OTHER_PUMP_GROUP] } },
@@ -2606,7 +2606,7 @@ test("pump glance shows EcoSmart Back with the parent name too, not just Sync/An
     {
       "sensor.pump_mode": {
         state: "EcoSmartBack",
-        attributes: { current_pump_params: { ParentSerial: "SN4" } },
+        attributes: { ParentSerial: "SN4" },
       },
     },
     { wsResponse: { groups: [PUMP_GROUP, OTHER_PUMP_GROUP] } },
@@ -2623,7 +2623,7 @@ test("pump glance falls back gracefully when the parent serial isn't a currently
   el.hass = makePumpHass({
     "sensor.pump_mode": {
       state: "Sync",
-      attributes: { current_pump_params: { ParentSerial: "SN_UNKNOWN" } },
+      attributes: { ParentSerial: "SN_UNKNOWN" },
     },
   });
   await settled(el);
@@ -2640,7 +2640,7 @@ test("a scene running takes priority over showing the parent name, even in a chi
     {
       "sensor.pump_mode": {
         state: "Sync",
-        attributes: { current_pump_params: { ParentSerial: "SN4" } },
+        attributes: { ParentSerial: "SN4" },
       },
       "select.reef_tank_scene_selection": { state: "Water Change", attributes: {} },
     },
