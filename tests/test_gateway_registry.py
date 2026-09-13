@@ -218,10 +218,16 @@ class TestGatewayFailover:
         assert seen_as_gateway == {"a", "b", "c", "d"}
 
     @pytest.mark.asyncio
-    async def test_success_clears_recently_failed_gateways(self, registry):
-        """A real, successful read means the tank is healthy again --
-        confirms a device that failed earlier gets a clean slate rather
-        than being permanently excluded from ever being promoted again."""
+    async def test_success_does_not_clear_recently_failed_gateways(self, registry):
+        """A real, confirmed production bug lived in the opposite of
+        this test: clearing recently_failed_gateways on the very next
+        success let a promoted gateway's own first successful self-poll
+        immediately make the device it just replaced eligible again --
+        see test_two_best_rssi_members_no_longer_ping_pong_forever below
+        for the full scenario this caused. The only correct reset is a
+        full round (every member having failed since the last one),
+        confirmed separately by test_round_robin_resets_rather_than_
+        getting_stuck_when_everyone_has_failed."""
         await registry.join(PAN_A, "a", rssi=-30)
         await registry.join(PAN_A, "b", rssi=-35)
 
@@ -231,17 +237,44 @@ class TestGatewayFailover:
         assert "a" in registry.group(PAN_A).recently_failed_gateways
 
         registry.record_gateway_success(PAN_A)
-        assert registry.group(PAN_A).recently_failed_gateways == set()
+        assert "a" in registry.group(PAN_A).recently_failed_gateways
 
-        for _ in range(GATEWAY_FAILURE_THRESHOLD):
-            await _fail_gateway(registry, PAN_A)
-        # "a" is eligible again -- it's the only other member, so if it
-        # weren't, this would have to fall back to gatewayless instead.
-        assert registry.group(PAN_A).gateway_serial == "a"
+    @pytest.mark.asyncio
+    async def test_two_best_rssi_members_no_longer_ping_pong_forever(self, registry):
+        """The real, confirmed production incident this fixes: two
+        pumps with far better RSSI than two lights on the same tank,
+        each pump's own weak link being the OTHER pump specifically
+        (not either light) -- so every promotion succeeds at least once
+        (a real self-poll, or a successful relay to either light) before
+        eventually failing again to relay to the other pump. Before the
+        fix, that one intervening success was enough to immediately
+        re-open the door to whichever pump had just failed, so the
+        gateway role traded between the two pumps forever and neither
+        light was ever promoted -- confirmed here by running well past
+        the point where that would have to happen, and seeing a light
+        finally get a real turn."""
+        await registry.join(PAN_A, "pump_a", rssi=-40)
+        await registry.join(PAN_A, "pump_b", rssi=-42)
+        await registry.join(PAN_A, "light_1", rssi=-70)
+        await registry.join(PAN_A, "light_2", rssi=-75)
+
+        seen_as_gateway = set()
+        for _ in range(8):  # comfortably more than one full round of 4
+            for _ in range(GATEWAY_FAILURE_THRESHOLD):
+                await _fail_gateway(registry, PAN_A)
+            seen_as_gateway.add(registry.group(PAN_A).gateway_serial)
+            # A real intervening success -- the exact condition that
+            # triggered the pre-fix bug, since it's what used to clear
+            # the exclusion prematurely.
+            registry.record_gateway_success(PAN_A)
+
+        assert "light_1" in seen_as_gateway or "light_2" in seen_as_gateway, (
+            f"a light was never promoted -- stuck ping-ponging between: {seen_as_gateway}"
+        )
 
     @pytest.mark.asyncio
     async def test_round_robin_resets_rather_than_getting_stuck_when_everyone_has_failed(self, registry):
-        """If every member has failed since the last success (no
+        """If every member has failed since the last reset (no
         candidates left to exclude-and-pick-from), the whole tank
         keeps cycling rather than getting permanently stuck -- confirmed
         by running well past one full cycle and seeing every member

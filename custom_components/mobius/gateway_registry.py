@@ -144,9 +144,9 @@ class PanGroup:
     consecutive_gateway_failures: int = 0
     # Every serial that's been promoted to gateway and then itself gone
     # on to fail GATEWAY_FAILURE_THRESHOLD times, since the last time
-    # ANY gateway actually succeeded (see record_gateway_success(), which
-    # clears this) or since this set grew to cover every member (see
-    # _best_candidate()'s own handling of that case). This set is what
+    # this set grew to cover every member (see _best_candidate()'s own
+    # handling of that case, in _promote_away_from_current_gateway()
+    # below -- the only place this is ever reset). This set is what
     # prevents promotion from just picking the single best-RSSI member
     # excluding only the one CURRENTLY failing -- for a tank where two
     # devices both have much better RSSI than the other two, that would
@@ -157,6 +157,17 @@ class PanGroup:
     # the other two members never getting tried at all. This set breaks
     # that cycle: every member gets a real turn before anyone is
     # reconsidered.
+    #
+    # Deliberately NOT reset on an ordinary gateway success (a real,
+    # confirmed production bug lived here before this comment existed):
+    # a promoted gateway's own first successful self-poll would
+    # otherwise immediately clear this, making the device it just
+    # replaced eligible again right away -- which is exactly what let
+    # the two best-RSSI members above keep trading the gateway role
+    # back and forth forever, since each one's own brief run of success
+    # kept re-opening the door for the other before either worse-RSSI
+    # member ever got a look in. The only correct reset is a full round:
+    # every member has failed at least once since the last reset.
     recently_failed_gateways: set[str] = field(default_factory=set)
     # Bumped every time _assign_gateway() runs (initial election, any
     # promotion, or leave()'s own reassignment) -- lets a fetch that
@@ -375,12 +386,19 @@ class GatewayRegistry:
 
     def record_gateway_success(self, pan_id: int) -> None:
         """Call on every successful gateway read -- resets the
-        consecutive-failure counter, and clears recently_failed_gateways
-        (see PanGroup's own docstring for why that set exists at all):
-        a real, successful read means the tank's back to healthy, so
-        there's no reason to keep excluding devices that failed during
-        whatever earlier trouble just ended -- they get a clean slate to
-        be considered again if this gateway ever fails in the future."""
+        consecutive-failure counter only. Does NOT clear
+        recently_failed_gateways (a real, confirmed production bug lived
+        here before this comment existed): clearing it on the very next
+        success meant a promoted gateway's own first successful
+        self-poll immediately made the device it just replaced eligible
+        again, so whenever the two best-RSSI members in a group were
+        each other's own weak link, they traded the gateway role back
+        and forth forever -- neither worse-RSSI member ever got a turn,
+        since the exclusion never survived long enough to force the
+        election past both of them. See PanGroup's own docstring for
+        where the actual reset now happens instead: only once every
+        member has failed at least once since the last full round, not
+        on any single success."""
         group = self._groups.get(pan_id)
         if group is not None:
             if group.consecutive_gateway_failures > 0:
@@ -394,7 +412,6 @@ class GatewayRegistry:
                     group.gateway_serial, pan_id, group.consecutive_gateway_failures,
                 )
             group.consecutive_gateway_failures = 0
-            group.recently_failed_gateways.clear()
 
     async def _promote_away_from_current_gateway(self, group: PanGroup, reason: str) -> Optional[str]:
         """Shared promotion logic: excludes the current gateway (and

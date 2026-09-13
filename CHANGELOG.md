@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed the gateway role trading forever between the two best-RSSI
+  devices on a tank, never giving any other device a real turn -- a
+  successful read no longer prematurely re-opens the door to whichever
+  device most recently failed.
 - The light channel intensity chart is taller, its hour labels are
   larger and properly centered, the hover tooltip no longer covers
   the point you're pointing at, and hovering now shows a small time
