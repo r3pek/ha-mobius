@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta5
 
 - Fixed the pump glance view's own current-mode display never
   actually reading MaxSpeed/PhaseShift/ParentSerial correctly --
