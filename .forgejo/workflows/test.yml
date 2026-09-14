@@ -47,15 +47,32 @@ jobs:
 
       # manifest.json's own "requirements" are what Home Assistant
       # installs at runtime -- read from there rather than duplicated
-      # here, so they can't drift out of sync. python-mobius itself is
-      # deliberately excluded from this file and installed separately,
-      # from its own git repo, in the next step below -- see that
-      # step's own comment for why.
+      # here, so they can't drift out of sync. On a tag (a release
+      # build), python-mobius is installed from here too, exactly as
+      # published -- the same PyPI version pin (python-mobius~=X.Y.Z)
+      # a real end-user install gets, so a release only ever gets
+      # tagged against what's actually publicly installable right now,
+      # not whatever happens to be sitting on python-mobius's own
+      # unreleased default branch at the moment this runs. On any
+      # other ref, python-mobius is deliberately excluded here and
+      # installed separately from its own git repo instead -- see that
+      # step's own comment below for why.
+      - name: Install integration runtime requirements (from manifest.json)
+        if: github.ref_type == 'tag'
+        run: |
+          python3 -c "import json,sys; sys.stdout.write('\n'.join(json.load(open('custom_components/mobius/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
+          pip install -r /tmp/manifest_requirements.txt
+
       - name: Install integration runtime requirements (from manifest.json, except python-mobius)
+        if: github.ref_type != 'tag'
         run: |
           python3 -c "import json,sys; sys.stdout.write('\n'.join(r for r in json.load(open('custom_components/mobius/manifest.json'))['requirements'] if not r.startswith('python-mobius')))" > /tmp/manifest_requirements.txt
           pip install -r /tmp/manifest_requirements.txt
 
+      # Only on a non-tag ref -- see the step above for the tag case,
+      # which installs python-mobius from manifest.json's own PyPI pin
+      # instead, deliberately skipping this one entirely.
+      #
       # manifest.json's own python-mobius requirement is a PyPI version
       # pin (python-mobius~=X.Y.Z) -- necessary for real end-user Home
       # Assistant installs, which can only pull from PyPI, but that
@@ -71,6 +88,7 @@ jobs:
       # be), so this genuinely tracks that branch's current HEAD on
       # every run, not a stale clone from an earlier one.
       - name: Install python-mobius from its own git repo (not PyPI)
+        if: github.ref_type != 'tag'
         run: pip install "git+https://code.r3pek.org/r3pek/python-mobius.git"
 
       # `python -m pytest`, not bare `pytest` -- the former puts the
