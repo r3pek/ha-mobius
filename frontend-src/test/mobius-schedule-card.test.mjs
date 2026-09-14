@@ -2886,3 +2886,55 @@ test("no hover time label is shown until the chart is actually hovered", async (
 
   assert.equal(el.shadowRoot.querySelector(".chart-hover-time"), null);
 });
+
+// --------------------------------------------------------------------------
+// getGridOptions -- sections-view sizing, per group kind, with explicit
+// min/max bounds on both axes (not just a single preferred size) so a
+// too-narrow section always has a defined, sane range to shrink into.
+// --------------------------------------------------------------------------
+
+test("getGridOptions returns the light card's own empirically-sized defaults with explicit bounds", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
+  await settled(el);
+
+  assert.deepEqual(el.getGridOptions(), {
+    columns: 12,
+    rows: 7,
+    min_columns: 4,
+    max_columns: 12,
+    min_rows: 5,
+    max_rows: 10,
+  });
+});
+
+test("getGridOptions returns the pump card's own smaller defaults with explicit bounds", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } });
+  await settled(el);
+
+  assert.deepEqual(el.getGridOptions(), {
+    columns: 6,
+    rows: 4,
+    min_columns: 3,
+    max_columns: 12,
+    min_rows: 3,
+    max_rows: 6,
+  });
+});
+
+test("getGridOptions falls back to the pump-sized defaults before the group has resolved", () => {
+  // Matches getCardSize()'s own existing fallback (4, the pump size)
+  // for the same not-yet-resolved case -- never throws regardless of
+  // _group's own state, so a card that hasn't finished loading yet
+  // never itself becomes the cause of a sections-view layout failure.
+  const el = makeCard(PUMP_DEVICE_ID);
+  assert.deepEqual(el.getGridOptions(), {
+    columns: 6,
+    rows: 4,
+    min_columns: 3,
+    max_columns: 12,
+    min_rows: 3,
+    max_rows: 6,
+  });
+});

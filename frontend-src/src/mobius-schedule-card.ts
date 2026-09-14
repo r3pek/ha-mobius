@@ -411,7 +411,22 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   public getGridOptions() {
-    return { rows: 6, columns: 6, min_rows: 4 };
+    // Confirmed empirically: 7 rows x 12 columns (full section width) is
+    // where the light card's own chart has enough room to be genuinely
+    // readable; 4x6 is the pump card's own comfortable minimum, since
+    // it has far less content (a single reading, mode line, and
+    // button). Explicit min/max on both axes -- not just a single
+    // preferred size -- so the sections view's own layout engine
+    // always has a bounded range to shrink into on a narrower
+    // viewport (e.g. mobile, or a dashboard using max_columns) rather
+    // than only a fixed preference with no defined floor, which is
+    // what let a too-wide desktop-configured card produce an "Invalid
+    // configuration" error once squeezed onto a screen with too few
+    // section-columns to honor it.
+    if (this._group?.kind === "light") {
+      return { columns: 12, rows: 7, min_columns: 4, max_columns: 12, min_rows: 5, max_rows: 10 };
+    }
+    return { columns: 6, rows: 4, min_columns: 3, max_columns: 12, min_rows: 3, max_rows: 6 };
   }
 
   public static getStubConfig(): Partial<MobiusScheduleCardConfig> {

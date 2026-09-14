@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the card only offering a single fixed size in sections view,
+  with no defined minimum/maximum to fall back to on a narrower
+  screen -- could produce an "Invalid configuration" error once
+  squeezed onto a section with too few columns to honor a
+  desktop-configured width. The light and pump cards now each have
+  their own sane default size (7x12 and 4x6, confirmed to look good)
+  with an explicit, bounded range on both axes to shrink into instead.
+
 ## 0.8.0-beta5
 
 - Fixed the pump glance view's own current-mode display never
