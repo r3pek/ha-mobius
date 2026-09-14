@@ -807,7 +807,11 @@ export class MobiusScheduleCard extends LitElement {
         <ha-icon icon="mdi:auto-mode"></ha-icon>
         <span>
           <strong>${stateObj.state}</strong> ${localize("schedule_card.scene_running_instead")}
-          ${duration != null ? html`(${formatDuration(duration)} ${localize("schedule_card.remaining_suffix")})` : nothing}
+          ${
+            duration != null && duration > 0
+              ? html`(${formatDuration(duration)} ${localize("schedule_card.remaining_suffix")})`
+              : nothing
+          }
         </span>
       </div>
     `;

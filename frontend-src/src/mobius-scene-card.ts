@@ -63,6 +63,8 @@ export class MobiusSceneCard extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
 
   @state() private _config?: MobiusSceneCardConfig;
+  @state() private _pendingOption?: string;
+  @state() private _activationError?: string;
 
   public setConfig(config: MobiusSceneCardConfig): void {
     if (!config || !config.entity) {
@@ -106,23 +108,37 @@ export class MobiusSceneCard extends LitElement {
     return this.hass && this._config ? this.hass.states[this._config.entity] : undefined;
   }
 
-  private _selectOption(option: string): void {
+  private async _selectOption(option: string): Promise<void> {
     const stateObj = this._stateObj;
-    if (!stateObj) return;
-    this.hass.callService("select", "select_option", {
-      entity_id: stateObj.entity_id,
-      option,
-    });
+    if (!stateObj || this._pendingOption != null) return;
+    this._pendingOption = option;
+    this._activationError = undefined;
+    try {
+      await this.hass.callService("select", "select_option", {
+        entity_id: stateObj.entity_id,
+        option,
+      });
+    } catch (err) {
+      this._activationError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this._pendingOption = undefined;
+    }
   }
 
   private _renderTile(name: string, isActive: boolean) {
+    const isPending = name === this._pendingOption;
     const icon = name === NONE_OPTION ? "mdi:calendar-clock" : iconFor(name);
     const label =
       name === NONE_OPTION ? localize("scene_card.normal_schedule_tile", this.hass?.locale?.language) : name;
     return html`
-      <button class="tile ${isActive ? "active" : ""}" @click=${() => this._selectOption(name)} title=${label}>
-        ${isActive ? html`<ha-icon class="check" icon="mdi:check-circle"></ha-icon>` : nothing}
-        <ha-icon icon=${icon}></ha-icon>
+      <button
+        class="tile ${isActive ? "active" : ""}"
+        ?disabled=${this._pendingOption != null}
+        @click=${() => this._selectOption(name)}
+        title=${label}
+      >
+        ${isActive && !isPending ? html`<ha-icon class="check" icon="mdi:check-circle"></ha-icon>` : nothing}
+        <ha-icon icon=${isPending ? "mdi:loading" : icon} class=${isPending ? "spin" : ""}></ha-icon>
         <span>${label}</span>
       </button>
     `;
@@ -161,7 +177,7 @@ export class MobiusSceneCard extends LitElement {
                   <div class="status-text">
                     <div class="status-main">${activeSceneName} ${localize("scene_card.active_suffix", lang)}</div>
                     ${
-                      duration != null
+                      duration != null && duration > 0
                         ? html`<div class="status-sub">
                             ${formatDuration(duration)} ${localize("scene_card.remaining_suffix", lang)}
                           </div>`
@@ -172,6 +188,7 @@ export class MobiusSceneCard extends LitElement {
               `
             : html`<div class="status">${localize("scene_card.running_normal_schedule", lang)}</div>`
         }
+        ${this._activationError ? html`<div class="activation-error">${this._activationError}</div>` : nothing}
         <div class="tiles">${options.map((name) => this._renderTile(name, name === current))}</div>
       </ha-card>
     `;
@@ -254,6 +271,29 @@ export class MobiusSceneCard extends LitElement {
     }
     .tile ha-icon {
       --mdc-icon-size: 22px;
+    }
+    .tile:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .tile ha-icon.spin {
+      animation: mobius-scene-spin 1s linear infinite;
+    }
+    @keyframes mobius-scene-spin {
+      from {
+        transform: rotate(0deg);
+      }
+      to {
+        transform: rotate(360deg);
+      }
+    }
+    .activation-error {
+      margin: -4px 0 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(219, 68, 55, 0.1);
+      color: var(--error-color, #db4437);
+      font-size: 0.85em;
     }
     .tile .check {
       position: absolute;

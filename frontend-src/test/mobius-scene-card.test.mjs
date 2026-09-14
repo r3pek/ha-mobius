@@ -43,7 +43,7 @@ before(async () => {
   ctor = customElements.get("mobius-scene-card");
 });
 
-function makeHass(state, options, durationRemaining) {
+function makeHass(state, options, durationRemaining, callServiceImpl) {
   const calls = [];
   return {
     states: {
@@ -53,7 +53,10 @@ function makeHass(state, options, durationRemaining) {
         attributes: { friendly_name: "Reef Tank Scene", options, duration_remaining_seconds: durationRemaining },
       },
     },
-    callService: (domain, service, data) => calls.push({ domain, service, data }),
+    callService: async (domain, service, data) => {
+      calls.push({ domain, service, data });
+      if (callServiceImpl) return callServiceImpl(domain, service, data);
+    },
     _calls: calls,
   };
 }
@@ -190,4 +193,108 @@ test("localized strings respond to hass.locale.language (falls back to English f
   el.hass = hass;
   await el.updateComplete;
   assert.ok(el.shadowRoot.textContent.includes("Running the normal schedule"));
+});
+
+// --------------------------------------------------------------------------
+// Remaining-time display: never a misleading "0:00 remaining" for a
+// scene with no actual timer (e.g. Feed Mode, confirmed via the app's
+// own "Exit Feed Mode" manual-exit string -- it runs until manually
+// stopped, not on a countdown).
+// --------------------------------------------------------------------------
+
+test("shows remaining time when duration is genuinely positive", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("Feed", ["None", "Feed"], 90);
+  await el.updateComplete;
+  assert.ok(el.shadowRoot.textContent.includes("remaining"));
+});
+
+test("does not show a misleading '0:00 remaining' when duration is exactly 0", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("Feed", ["None", "Feed"], 0);
+  await el.updateComplete;
+  assert.ok(!el.shadowRoot.textContent.includes("remaining"));
+});
+
+// --------------------------------------------------------------------------
+// Activation feedback -- a pending scene selection shows a spinner on
+// the specific tile, disables every tile until it resolves, and a
+// failure surfaces an actual error message rather than disappearing
+// silently.
+// --------------------------------------------------------------------------
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test("clicking a tile shows a spinner on that tile and disables every tile while pending", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  const { promise, resolve } = deferred();
+  el.hass = makeHass("None", ["None", "Feed"], undefined, () => promise);
+  await el.updateComplete;
+
+  const tiles = [...el.shadowRoot.querySelectorAll(".tile")];
+  const feedTile = tiles.find((t) => t.title === "Feed");
+  feedTile.click();
+  await el.updateComplete;
+
+  assert.ok(feedTile.querySelector("ha-icon.spin"));
+  for (const tile of el.shadowRoot.querySelectorAll(".tile")) {
+    assert.ok(tile.disabled);
+  }
+
+  resolve();
+  await promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector("ha-icon.spin"), null);
+  for (const tile of el.shadowRoot.querySelectorAll(".tile")) {
+    assert.ok(!tile.disabled);
+  }
+});
+
+test("clicking a second tile while one is already pending does nothing", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  const { promise } = deferred();
+  el.hass = makeHass("None", ["None", "Feed", "Sunset"], undefined, () => promise);
+  await el.updateComplete;
+
+  const tiles = () => [...el.shadowRoot.querySelectorAll(".tile")];
+  tiles()
+    .find((t) => t.title === "Feed")
+    .click();
+  await el.updateComplete;
+  tiles()
+    .find((t) => t.title === "Sunset")
+    .click();
+  await el.updateComplete;
+
+  assert.equal(el.hass._calls.length, 1);
+  assert.equal(el.hass._calls[0].data.option, "Feed");
+});
+
+test("a failed activation shows an error message and clears the pending state", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("None", ["None", "Feed"], undefined, () => {
+    throw new Error("device returned FSCI status Failed");
+  });
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".tile[title='Feed']").click();
+  await el.updateComplete;
+  // Let the rejected promise's own microtask settle.
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".activation-error"));
+  assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed"));
+  assert.equal(el.shadowRoot.querySelector("ha-icon.spin"), null);
 });

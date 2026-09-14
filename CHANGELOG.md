@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Activating a scene now shows a spinner on the tile being activated
+  and disables the others until it resolves, instead of giving no
+  feedback at all while the command is in flight -- a failure now
+  shows an actual error message too.
+- Fixed a misleading "0:00 remaining" shown for a scene with no real
+  timer at all (e.g. Feed Mode, which runs until manually stopped),
+  as if it were a countdown about to expire.
 - Fixed the card only offering a single fixed size in sections view,
   with no defined minimum/maximum to fall back to on a narrower
   screen -- could produce an "Invalid configuration" error once
