@@ -195,3 +195,67 @@ async def test_device_rejected_write_raises_home_assistant_error(hass):
                 {"entity_id": "switch.mp40qd_right_local_control"},
                 blocking=True,
             )
+
+
+# --------------------------------------------------------------------------
+# LunarPhasesEnabledSwitch -- confirmed against the app's own "Lunar"
+# chip on the light schedule editor. Direct-instantiation tests (same
+# approach as test_sensor.py's own TestScheduleIntensitySensor) rather
+# than a full config-entry setup, since these only need to confirm
+# is_on/turn_on/turn_off, not entity registration.
+# --------------------------------------------------------------------------
+
+class TestLunarPhasesEnabledSwitch:
+    def _make_switch(self, lunar_enabled):
+        from custom_components.mobius.switch import LunarPhasesEnabledSwitch
+
+        switch = object.__new__(LunarPhasesEnabledSwitch)
+        switch._serial = "SN1"
+        switch.coordinator = MagicMock()
+        switch.coordinator.data = {"lunar_enabled": lunar_enabled}
+        switch.coordinator.async_get_connected_device = AsyncMock()
+        switch.coordinator.async_request_refresh = AsyncMock()
+        return switch
+
+    def test_is_on_reflects_coordinator_data(self):
+        assert self._make_switch(True).is_on is True
+        assert self._make_switch(False).is_on is False
+
+    def test_is_on_none_when_not_yet_known(self):
+        from custom_components.mobius.switch import LunarPhasesEnabledSwitch
+
+        switch = object.__new__(LunarPhasesEnabledSwitch)
+        switch.coordinator = MagicMock()
+        switch.coordinator.data = {}
+        assert switch.is_on is None
+
+    @pytest.mark.asyncio
+    async def test_turn_on_calls_set_lunar_enabled_true(self):
+        switch = self._make_switch(False)
+        device = AsyncMock()
+        switch.coordinator.async_get_connected_device.return_value = device
+
+        await switch.async_turn_on()
+
+        device.set_lunar_enabled.assert_awaited_once_with(True)
+        switch.coordinator.async_request_refresh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_turn_off_calls_set_lunar_enabled_false(self):
+        switch = self._make_switch(True)
+        device = AsyncMock()
+        switch.coordinator.async_get_connected_device.return_value = device
+
+        await switch.async_turn_off()
+
+        device.set_lunar_enabled.assert_awaited_once_with(False)
+
+    @pytest.mark.asyncio
+    async def test_write_failure_raises_home_assistant_error(self):
+        switch = self._make_switch(False)
+        device = AsyncMock()
+        device.set_lunar_enabled.side_effect = IOError("device returned FSCI status Failed")
+        switch.coordinator.async_get_connected_device.return_value = device
+
+        with pytest.raises(HomeAssistantError):
+            await switch.async_turn_on()

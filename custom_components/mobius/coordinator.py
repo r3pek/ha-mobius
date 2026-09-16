@@ -84,13 +84,35 @@ from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
     MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam,
+    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam, lunar_days_into_phase,
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
 from .gateway_registry import GatewayRegistry, PanGroup
 
 _LOGGER = logging.getLogger(__name__)
+
+# The 8 standard MDI moon-phase icons, in cycle order starting at new
+# moon -- matches lunar_days_into_phase()'s own 0=new-moon convention.
+def moon_phase_icon(current_day: int) -> str:
+    """current_day is lunar_days_into_phase()'s own 0-29 "days since new
+    moon" index. Thresholds traced directly from the app's own compiled
+    bytecode (LightingFragment.smali's own lunarPhase() method) rather
+    than assumed -- the app uses exactly 6 phases (no separate quarter
+    phases at all), with these precise, confirmed boundaries:
+    <=0 or >=29 -> new, 1-7 -> waxing crescent, 8-13 -> waxing gibbous,
+    14-15 -> full, 16-21 -> waning gibbous, 22-28 -> waning crescent."""
+    if current_day <= 0 or current_day >= 29:
+        return "mdi:moon-new"
+    if current_day <= 7:
+        return "mdi:moon-waxing-crescent"
+    if current_day <= 13:
+        return "mdi:moon-waxing-gibbous"
+    if current_day <= 15:
+        return "mdi:moon-full"
+    if current_day <= 21:
+        return "mdi:moon-waning-gibbous"
+    return "mdi:moon-waning-crescent"
 
 
 def parsed_advertisement(manufacturer_data: dict) -> Optional[MobiusAdvertisement]:
@@ -621,6 +643,15 @@ async def _fetch_all(
         # all), always the device's own raw setting regardless of
         # which branch is currently in effect.
         info["schedule_intensity"] = light_poll.schedule_intensity
+        # Confirmed directly against the app: the "Lunar" chip at the
+        # top of the light schedule editor both toggles this and, while
+        # on, displays the current moon phase -- so both the on/off
+        # state and a phase icon (from lunar_days_into_phase(), using
+        # the same lunar_date diagnostics already compute) are stored
+        # here for the switch and the schedule card to read.
+        info["lunar_enabled"] = current.diagnostics.get("lunar_enabled")
+        lunar_date = current.diagnostics.get("lunar_date")
+        info["moon_phase_icon"] = moon_phase_icon(lunar_days_into_phase(lunar_date)) if lunar_date else None
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).

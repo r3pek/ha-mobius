@@ -478,6 +478,11 @@ class ScheduleIntensitySensor(MobiusEntity):
         )
 
     @property
+    def extra_state_attributes(self):
+        data = self.coordinator.data or {}
+        return {"lunar_enabled": data.get("lunar_enabled"), "moon_phase_icon": data.get("moon_phase_icon")}
+
+    @property
     def native_value(self):
         fraction = (self.coordinator.data or {}).get("schedule_intensity")
         return round(fraction * 100) if fraction is not None else None

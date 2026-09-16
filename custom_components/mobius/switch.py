@@ -194,6 +194,64 @@ class TimeSyncSwitch(SwitchEntity, RestoreEntity):
         self.async_write_ha_state()
 
 
+class LunarPhasesEnabledSwitch(CoordinatorEntity[MobiusDeviceCoordinator], SwitchEntity):
+    """Light devices only. Confirmed byte-for-byte against the app's
+    own compiled bytecode (LunarInfo.smali's own save() method): the
+    app's "Lunar" chip at the top of the light schedule editor writes
+    exactly LunarPhasesEnabled (907) as a single 0/1 byte when toggled.
+    While on, that same chip also displays the current moon phase (see
+    coordinator.py's own moon_phase_icon(), which the schedule editor
+    card reads from ScheduleIntensitySensor's own attributes).
+
+    A UX difference from the app worth knowing about: the app's own
+    "Lunar" chip toggles every light on the tank at once with one tap
+    (confirmed: LightingFragment's own saveLunar() loops over every
+    light device and writes the same new value to each individually --
+    still one ordinary, ungrouped write per device, not a mesh
+    broadcast). This entity is per-light instead, matching Home
+    Assistant's own per-entity norm -- a tank with multiple lights gets
+    one independent switch each, so toggling all of them together (to
+    match the app's own one-tap behavior) would need a script or
+    automation targeting all of them at once.
+
+    Not a MobiusAdvancedFeatureSwitch -- LunarPhasesEnabled isn't part
+    of set_advanced_features()'s own attribute group at all, it has
+    its own dedicated get_lunar_enabled()/set_lunar_enabled() pair."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "lunar_phases_enabled"
+    _attr_icon = "mdi:moon-waning-crescent"
+
+    def __init__(self, coordinator: MobiusDeviceCoordinator, serial: str, device_info: DeviceInfo) -> None:
+        super().__init__(coordinator)
+        self._serial = serial
+        self._attr_unique_id = f"{serial}_lunar_phases_enabled"
+        self._attr_device_info = device_info
+
+    @property
+    def is_on(self) -> bool | None:
+        return (self.coordinator.data or {}).get("lunar_enabled")
+
+    async def _async_set(self, value: bool) -> None:
+        try:
+            device = await self.coordinator.async_get_connected_device()
+            await device.set_lunar_enabled(value)
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                f"Failed to set lunar_phases_enabled on {self._serial}: {err}"
+            ) from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._async_set(False)
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -226,5 +284,9 @@ async def async_setup_entry(
         )
 
         entities += _build_advanced_feature_switches(coordinator, serial, device_info, data)
+        # Light-only -- matches sensor.py's own support == "light" gating
+        # for its light-specific entities.
+        if data.get("support") == "light":
+            entities.append(LunarPhasesEnabledSwitch(coordinator, serial, device_info))
 
     async_add_entities(entities)

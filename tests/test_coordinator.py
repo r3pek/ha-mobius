@@ -22,7 +22,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
-    discover_mesh_address, discover_tank_for_serial, _fetch_all,
+    discover_mesh_address, discover_tank_for_serial, _fetch_all, moon_phase_icon,
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
@@ -2399,3 +2399,39 @@ async def test_mesh_last_seen_refresh_failure_is_non_fatal(hass):
     assert coordinator.data["support"] == "pump"
     # Just no mesh_last_seen_at this cycle.
     assert coordinator.data["mesh_last_seen_at"] is None
+
+
+# --------------------------------------------------------------------------
+# moon_phase_icon -- every boundary confirmed directly against the
+# app's own compiled bytecode (LightingFragment.smali's own
+# lunarPhase() method), not assumed.
+# --------------------------------------------------------------------------
+
+class TestMoonPhaseIcon:
+    def test_zero_and_below_is_new_moon(self):
+        assert moon_phase_icon(0) == "mdi:moon-new"
+        assert moon_phase_icon(-1) == "mdi:moon-new"
+
+    def test_29_and_above_is_new_moon(self):
+        assert moon_phase_icon(29) == "mdi:moon-new"
+        assert moon_phase_icon(30) == "mdi:moon-new"
+
+    def test_1_through_7_is_waxing_crescent(self):
+        assert moon_phase_icon(1) == "mdi:moon-waxing-crescent"
+        assert moon_phase_icon(7) == "mdi:moon-waxing-crescent"
+
+    def test_8_through_13_is_waxing_gibbous(self):
+        assert moon_phase_icon(8) == "mdi:moon-waxing-gibbous"
+        assert moon_phase_icon(13) == "mdi:moon-waxing-gibbous"
+
+    def test_14_through_15_is_full_moon(self):
+        assert moon_phase_icon(14) == "mdi:moon-full"
+        assert moon_phase_icon(15) == "mdi:moon-full"
+
+    def test_16_through_21_is_waning_gibbous(self):
+        assert moon_phase_icon(16) == "mdi:moon-waning-gibbous"
+        assert moon_phase_icon(21) == "mdi:moon-waning-gibbous"
+
+    def test_22_through_28_is_waning_crescent(self):
+        assert moon_phase_icon(22) == "mdi:moon-waning-crescent"
+        assert moon_phase_icon(28) == "mdi:moon-waning-crescent"

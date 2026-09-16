@@ -1205,8 +1205,19 @@ export class MobiusScheduleCard extends LitElement {
     return html`
       <ha-card>
         <div class="header">
-          <div class="title">${localize("schedule_card.light_title")}</div>
-          <div class="subtitle">${group.members.map((m) => m.name).join(" + ")}</div>
+          <div>
+            <div class="title">${localize("schedule_card.light_title")}</div>
+            <div class="subtitle">${group.members.map((m) => m.name).join(" + ")}</div>
+          </div>
+          ${
+            intensityState?.attributes.lunar_enabled === true && intensityState.attributes.moon_phase_icon
+              ? html`<ha-icon
+                  class="moon-phase-icon"
+                  icon=${intensityState.attributes.moon_phase_icon}
+                  title=${localize("schedule_card.lunar_phases_active")}
+                ></ha-icon>`
+              : nothing
+          }
         </div>
         ${this._renderSceneBanner()}
         ${
@@ -1801,6 +1812,15 @@ export class MobiusScheduleCard extends LitElement {
     }
     .header {
       margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .moon-phase-icon {
+      color: var(--secondary-text-color);
+      --mdc-icon-size: 22px;
+      flex-shrink: 0;
     }
     .title {
       font-size: 1.2em;

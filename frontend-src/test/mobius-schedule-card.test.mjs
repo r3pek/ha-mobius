@@ -3217,3 +3217,63 @@ test("light point's own time field shows plain 24-hour with no AM/PM select when
   assert.equal(el.shadowRoot.querySelector(".time-hour").value, "14");
   assert.equal(el.shadowRoot.querySelector(".time-ampm"), null);
 });
+
+// --------------------------------------------------------------------------
+// Moon phase icon on the light glance view -- shown top-right of the
+// header, only when lunar tracking is genuinely enabled on this
+// light. Reads lunar_enabled/moon_phase_icon straight off the
+// schedule_intensity sensor's own attributes (added specifically for
+// this).
+// --------------------------------------------------------------------------
+
+test("shows the moon phase icon when lunar phases are enabled", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": {
+      state: "59",
+      attributes: { lunar_enabled: true, moon_phase_icon: "mdi:moon-waning-gibbous" },
+    },
+  });
+  await settled(el);
+
+  const icon = el.shadowRoot.querySelector(".moon-phase-icon");
+  assert.ok(icon);
+  assert.equal(icon.getAttribute("icon"), "mdi:moon-waning-gibbous");
+});
+
+test("no moon phase icon when lunar phases are disabled", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": {
+      state: "59",
+      attributes: { lunar_enabled: false, moon_phase_icon: "mdi:moon-waning-gibbous" },
+    },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+});
+
+test("no moon phase icon when lunar_enabled isn't known yet", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": { state: "59", attributes: {} },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+});
+
+test("no moon phase icon when enabled but the phase icon itself is missing", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({
+    "sensor.left_royalblue": { state: "60", attributes: {} },
+    "sensor.left_schedule_intensity": { state: "59", attributes: { lunar_enabled: true } },
+  });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+});

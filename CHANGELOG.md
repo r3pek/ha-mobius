@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a "Lunar phases" switch (light devices) and a moon-phase icon
+  on the light glance view's own header, shown only while lunar
+  tracking is enabled. Requires python-mobius 0.8.3+.
 - Fixed the pump schedule editor's own time field showing AM/PM even
   with Home Assistant's own Time Format set to 24-hour -- a native
   time input follows the browser/OS locale, not Home Assistant's own

@@ -91,6 +91,9 @@
       },
       "time_sync_enabled": {
         "name": "Time sync"
+      },
+      "lunar_phases_enabled": {
+        "name": "Lunar phases"
       }
     },
     "number": {

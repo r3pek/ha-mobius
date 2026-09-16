@@ -941,3 +941,15 @@ class TestScheduleIntensitySensor:
         sensor = self._make_sensor(None)
         assert sensor.native_value is None
 
+    def test_extra_state_attributes_exposes_lunar_enabled_and_moon_phase(self):
+        sensor = self._make_sensor(0.897)
+        sensor.coordinator.data["lunar_enabled"] = True
+        sensor.coordinator.data["moon_phase_icon"] = "mdi:moon-waning-gibbous"
+        assert sensor.extra_state_attributes == {
+            "lunar_enabled": True, "moon_phase_icon": "mdi:moon-waning-gibbous",
+        }
+
+    def test_extra_state_attributes_when_lunar_data_not_yet_known(self):
+        sensor = self._make_sensor(0.897)
+        assert sensor.extra_state_attributes == {"lunar_enabled": None, "moon_phase_icon": None}
+
