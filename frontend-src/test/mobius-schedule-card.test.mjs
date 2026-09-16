@@ -3185,3 +3185,35 @@ test("saving a light schedule leaves each point's own flags untouched", async ()
 
   assert.equal(calls[0].data.points[0].flags, 6);
 });
+
+// --------------------------------------------------------------------------
+// The locale-aware time field is shared code (_renderTimeField), used
+// by both the pump and light edit forms -- confirming it explicitly
+// for light points too, not just pumps.
+// --------------------------------------------------------------------------
+
+test("light point's own time field is also locale-aware (12-hour with AM/PM select)", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 870, flags: 1, channels: { RoyalBlue: 500 } }]); // 14:30
+  el.hass = { ...el.hass, locale: { time_format: "12hour" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "2");
+  assert.equal(el.shadowRoot.querySelector(".time-minute").value, "30");
+  assert.equal(el.shadowRoot.querySelector(".time-ampm").value, "PM");
+  // Still has its own period select too -- lights, unlike pumps, do
+  // have that notion.
+  assert.ok(el.shadowRoot.querySelector(".period-select"));
+});
+
+test("light point's own time field shows plain 24-hour with no AM/PM select when Time Format is 24-hour", async () => {
+  const el = await openLightEditWithPoints([{ time_minutes: 870, flags: 1, channels: { RoyalBlue: 500 } }]);
+  el.hass = { ...el.hass, locale: { time_format: "24" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "14");
+  assert.equal(el.shadowRoot.querySelector(".time-ampm"), null);
+});
