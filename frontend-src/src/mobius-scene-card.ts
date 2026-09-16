@@ -47,6 +47,17 @@ const SCENE_ICON_GUESSES: Record<string, string> = {
   moonlit: "mdi:weather-night",
   clean: "mdi:broom",
   "water change": "mdi:water-sync",
+  // The remaining built-in scenes (see python-mobius's own SceneID) --
+  // confirmed against the app's own scene icon assets where they
+  // exist (CloudCover's own is a plain cloud shape, matching
+  // mdi:weather-cloudy directly; the app's own "Disco" asset is
+  // oddly a globe/world icon, not an actual disco ball -- likely a
+  // mismatched asset on the app's own side, not worth replicating
+  // here in place of something that actually reads as "disco" to a
+  // person looking at it).
+  cloud: "mdi:weather-cloudy",
+  "color cycle": "mdi:palette",
+  disco: "mdi:party-popper",
 };
 const PLACEHOLDER_ICON = "mdi:bookmark-outline";
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added icons for Cloud Cover, Color Cycle, and Disco, the remaining
+  built-in scene types that fell through to the generic bookmark
+  placeholder before.
+
 ## 0.8.0-beta6
 
 - **Critical fix**: the schedule intensity sensor could show the

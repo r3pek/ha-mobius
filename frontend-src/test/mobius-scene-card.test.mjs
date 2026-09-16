@@ -298,3 +298,45 @@ test("a failed activation shows an error message and clears the pending state", 
   assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed"));
   assert.equal(el.shadowRoot.querySelector("ha-icon.spin"), null);
 });
+
+// --------------------------------------------------------------------------
+// Scene icons for the built-in scene types (per python-mobius's own
+// SceneID) that previously fell through to the generic bookmark
+// placeholder.
+// --------------------------------------------------------------------------
+
+test("Cloud Cover gets a cloud icon, not the generic placeholder", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("None", ["None", "Cloud Cover"]);
+  await el.updateComplete;
+
+  const tile = [...el.shadowRoot.querySelectorAll(".tile")].find((t) => t.title === "Cloud Cover");
+  assert.equal(tile.querySelector("ha-icon").getAttribute("icon"), "mdi:weather-cloudy");
+});
+
+test("Color Cycle gets a palette icon, not the generic placeholder", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("None", ["None", "Color Cycle"]);
+  await el.updateComplete;
+
+  const tile = [...el.shadowRoot.querySelectorAll(".tile")].find((t) => t.title === "Color Cycle");
+  assert.equal(tile.querySelector("ha-icon").getAttribute("icon"), "mdi:palette");
+});
+
+test("Disco gets a party-popper icon, not the generic placeholder", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("None", ["None", "Disco"]);
+  await el.updateComplete;
+
+  const tile = [...el.shadowRoot.querySelectorAll(".tile")].find((t) => t.title === "Disco");
+  assert.equal(tile.querySelector("ha-icon").getAttribute("icon"), "mdi:party-popper");
+});
+
+test("a genuinely unrecognized custom scene still falls back to the generic placeholder", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  el.hass = makeHass("None", ["None", "Photo Mode"]);
+  await el.updateComplete;
+
+  const tile = [...el.shadowRoot.querySelectorAll(".tile")].find((t) => t.title === "Photo Mode");
+  assert.equal(tile.querySelector("ha-icon").getAttribute("icon"), "mdi:bookmark-outline");
+});
