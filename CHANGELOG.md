@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fixed the pump schedule editor's own time field showing AM/PM even
+  with Home Assistant's own Time Format set to 24-hour -- a native
+  time input follows the browser/OS locale, not Home Assistant's own
+  setting. Now built from locale-aware hour/minute fields instead.
+- Removed the day/night/sunrise/sunset period option from pump
+  schedule points entirely -- pumps only have an enabled/disabled
+  notion, never that one.
+- The MaxSpeed/MinSpeed reverse-rotation hint now only shows on a pump
+  that actually supports it (AlpacaV1); a negative value is clamped
+  rather than silently accepted on pumps that don't.
 - Added icons for Cloud Cover, Color Cycle, and Disco, the remaining
   built-in scene types that fell through to the generic bookmark
   placeholder before.

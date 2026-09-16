@@ -84,6 +84,12 @@ class ScheduleGroupMember:
     speed_entity_id: str | None = None  # pump only
     flow_entity_id: str | None = None  # pump only
     mode_entity_id: str | None = None  # pump only -- CurrentPumpModeSensor
+    # pump only -- matches get_pump_reverse()'s own logic exactly
+    # (primitive_type == AlpacaV1): whether a negative MaxSpeed/MinSpeed
+    # value on THIS pump actually encodes reverse rotation at all.
+    # None only if primitive_type itself isn't known yet (before the
+    # first successful poll).
+    supports_reverse: bool | None = None
 
 
 @dataclass
@@ -108,6 +114,7 @@ class ScheduleGroup:
                 d["speed_entity_id"] = m.speed_entity_id
                 d["flow_entity_id"] = m.flow_entity_id
                 d["mode_entity_id"] = m.mode_entity_id
+                d["supports_reverse"] = m.supports_reverse
             return d
 
         result: dict[str, Any] = {
@@ -356,6 +363,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
                 speed_entity_id=_sensor_entity_id(hass, serial, "motor_speed"),
                 flow_entity_id=_sensor_entity_id(hass, serial, "flow_rate"),
                 mode_entity_id=_sensor_entity_id(hass, serial, "current_pump_mode"),
+                supports_reverse=(primitive == PrimitiveType.AlpacaV1) if primitive else None,
             )],
         ))
 

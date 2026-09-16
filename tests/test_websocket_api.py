@@ -944,6 +944,10 @@ async def test_pump_group_members_include_resolved_entity_ids(hass):
         "sensor", DOMAIN, "SN1_motor_speed", config_entry=entry,
         suggested_object_id="pump_speed",
     )
+    entity_registry.async_get_or_create(
+        "sensor", DOMAIN, "SN1_current_pump_mode", config_entry=entry,
+        suggested_object_id="pump_mode",
+    )
     # flow_rate deliberately left unregistered (matches a real pump
     # whose gph_reliable hasn't been confirmed true yet).
 
@@ -951,6 +955,29 @@ async def test_pump_group_members_include_resolved_entity_ids(hass):
     member = groups[0].as_dict()["members"][0]
     assert member["speed_entity_id"] == "sensor.pump_speed"
     assert member["flow_entity_id"] is None
+    assert member["mode_entity_id"] == "sensor.pump_mode"
+    # VorTechV1 -- confirmed in get_pump_reverse()'s own logic that
+    # only AlpacaV1 pumps support reverse rotation at all.
+    assert member["supports_reverse"] is False
+
+
+async def test_alpaca_pump_reports_supports_reverse_true(hass):
+    entry, tank_device_id = _setup_tank(hass, {"SN1": {**_pump_data("Pump"), "primitive_type": "AlpacaV1"}})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    member = groups[0].as_dict()["members"][0]
+    assert member["supports_reverse"] is True
+
+
+async def test_pump_with_unknown_primitive_type_reports_supports_reverse_none(hass):
+    # Before the first successful poll, primitive_type itself isn't
+    # known yet -- supports_reverse should reflect that honestly
+    # (None) rather than defaulting to either True or False.
+    entry, tank_device_id = _setup_tank(hass, {"SN1": {"support": "pump", "name": "Pump"}})
+
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    member = groups[0].as_dict()["members"][0]
+    assert member["supports_reverse"] is None
 
 
 async def test_scene_entity_id_is_the_same_across_every_group_on_the_tank(hass):

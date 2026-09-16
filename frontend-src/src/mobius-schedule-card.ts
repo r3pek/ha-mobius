@@ -116,6 +116,7 @@ interface ScheduleGroupMember {
   speed_entity_id?: string | null;
   flow_entity_id?: string | null;
   mode_entity_id?: string | null;
+  supports_reverse?: boolean | null;
 }
 
 interface ScheduleGroup {
@@ -208,6 +209,27 @@ function formatMinutes(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return `${h}:${String(m).padStart(2, "0")}`;
+}
+
+// Mirrors Home Assistant's own useAmPm()/TimeFormat logic (frontend's
+// src/common/datetime/use_am_pm.ts). A real, confirmed bug lived here
+// before this existed: the edit form's own time field used a plain
+// native <input type="time">, whose AM/PM-vs-24h display is entirely
+// controlled by the BROWSER/OS locale -- completely independent of
+// Home Assistant's own configured Time Format setting. A person with
+// their OS set to a 12-hour locale would see AM/PM here even with
+// Home Assistant's own Time Format explicitly set to 24 hour. This is
+// why the time field is built from plain number inputs below instead
+// of a native time input, which can't be made to honor this setting.
+function shouldUseAmPm(hass: HomeAssistant): boolean {
+  const timeFormat = hass.locale?.time_format as string | undefined;
+  if (timeFormat === "12hour" || timeFormat === "am_pm" || timeFormat === "12") return true;
+  if (timeFormat === "24hour" || timeFormat === "24") return false;
+  // "language" or "system" (or unset) -- follow what the browser's own
+  // Intl would use for that locale, same as Home Assistant's own
+  // useAmPm() does for these two cases.
+  const locale = timeFormat === "language" ? hass.locale?.language : undefined;
+  return new Intl.DateTimeFormat(locale, { hour: "numeric" }).resolvedOptions().hour12 ?? false;
 }
 
 // hass.states[...].state is always the raw, unrounded string --
@@ -696,14 +718,23 @@ export class MobiusScheduleCard extends LitElement {
     this._saveScheduleError = undefined;
     this._saveScheduleSucceeded = false;
     try {
-      // Sent exactly as-is -- read_schedule_group already handed the
-      // card this same shape (ParentSerial, not Master; already
-      // decoded params), and the write service expects that same
-      // shape back, translating ParentSerial to Master internally
-      // itself. No transformation needed on this end at all.
+      // Sent as-is for light points (read_schedule_group already
+      // handed the card this same shape -- ParentSerial, not Master;
+      // already decoded params -- and the write service expects that
+      // same shape back, translating ParentSerial to Master internally
+      // itself). Pump points get their own flags normalized to just
+      // FLAG_ACTIVE (1) here first -- pumps only have an
+      // enabled/disabled notion at the wire level, never the
+      // day/night/sunrise/sunset one lights have (confirmed directly
+      // against the app's own Point.java: FLAG_NIGHT/SUNRISE/SUNSET
+      // are defined there but never actually read or written anywhere
+      // else in the app), so a pump point saved from here is always
+      // simply "enabled" regardless of whatever flags value it
+      // happened to be loaded with.
+      const points = this._schedulePoints.map((p) => (isPumpEntry(p) ? { ...p, flags: 1 } : p));
       await this.hass.callService("mobius", "write_schedule_group", {
         device_id: this._config!.device_id,
-        points: this._schedulePoints,
+        points,
       });
       this._saveScheduleSucceeded = true;
       setTimeout(() => {
@@ -1359,9 +1390,11 @@ export class MobiusScheduleCard extends LitElement {
       <button class="point-row" @click=${() => this._startEditingPoint(index)}>
         <span class="point-time">${formatMinutes(point.time_minutes)}</span>
         ${
-          isPumpEntry(point) ? html`<span class="point-mode">${point.mode}</span>` : this._renderLightChannelBars(point)
+          isPumpEntry(point)
+            ? html`<span class="point-mode">${point.mode}</span>`
+            : html`${this._renderLightChannelBars(point)}
+                <span class="point-period period-${period}">${periodLabel(period)}</span>`
         }
-        <span class="point-period period-${period}">${periodLabel(period)}</span>
       </button>
     `;
   }
@@ -1391,25 +1424,81 @@ export class MobiusScheduleCard extends LitElement {
   // The time + period inputs -- fully generic (both operate on
   // time_minutes/flags, present on every ScheduleEntry regardless of
   // kind), reused as-is inside light's own point edit form.
+  // Time only -- pumps don't have a day/night/sunrise/sunset notion at
+  // all (confirmed directly), so this is used bare for pump points and
+  // wrapped together with the period select below for light points.
+  private _renderTimeField(point: ScheduleEntry) {
+    const hours24 = Math.floor(point.time_minutes / 60);
+    const minutes = point.time_minutes % 60;
+    const useAmPm = shouldUseAmPm(this.hass);
+    const hourDisplay = useAmPm ? (hours24 % 12 === 0 ? 12 : hours24 % 12) : hours24;
+    const amPm = hours24 < 12 ? "AM" : "PM";
+
+    const onTimePartChanged = (e: Event) => {
+      const container = (e.target as HTMLElement).closest(".time-fields") as HTMLElement;
+      const hourInput = container.querySelector<HTMLInputElement>(".time-hour")!;
+      const minInput = container.querySelector<HTMLInputElement>(".time-minute")!;
+      const ampmSelect = container.querySelector<HTMLSelectElement>(".time-ampm");
+      let h = Number(hourInput.value);
+      const m = Number(minInput.value);
+      if (useAmPm) {
+        // 12 -> 0 (the 12-hour clock's own base for both 12am and
+        // 12pm), then +12 only for PM -- 12am -> 0, 12pm -> 12.
+        h = h % 12;
+        if (ampmSelect?.value === "PM") h += 12;
+      }
+      this._updateWorkingPointTime(h * 60 + m);
+    };
+
+    return html`
+      <label>
+        ${localize("schedule_card.time")}
+        <span class="time-fields">
+          <input
+            class="time-hour"
+            type="number"
+            min=${useAmPm ? 1 : 0}
+            max=${useAmPm ? 12 : 23}
+            .value=${String(hourDisplay)}
+            @change=${onTimePartChanged}
+          />
+          <span class="time-colon">:</span>
+          <input
+            class="time-minute"
+            type="number"
+            min="0"
+            max="59"
+            .value=${String(minutes).padStart(2, "0")}
+            @change=${onTimePartChanged}
+          />
+          ${
+            useAmPm
+              ? html`<select class="time-ampm" .value=${amPm} @change=${onTimePartChanged}>
+                  <option value="AM" ?selected=${amPm === "AM"}>AM</option>
+                  <option value="PM" ?selected=${amPm === "PM"}>PM</option>
+                </select>`
+              : nothing
+          }
+        </span>
+      </label>
+    `;
+  }
+
+  // Time-only edit row -- pump points, which have no period notion.
+  private _renderTimeOnlyField(point: ScheduleEntry) {
+    return html` <div class="edit-row">${this._renderTimeField(point)}</div> `;
+  }
+
+  // Time + period edit row -- light points only.
   private _renderTimeAndPeriodFields(point: ScheduleEntry) {
     const period = periodForFlags(point.flags);
-    const [hours, minutes] = [Math.floor(point.time_minutes / 60), point.time_minutes % 60];
     return html`
       <div class="edit-row">
-        <label>
-          ${localize("schedule_card.time")}
-          <input
-            type="time"
-            .value=${`${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`}
-            @change=${(e: Event) => {
-              const [h, m] = (e.target as HTMLInputElement).value.split(":").map(Number);
-              this._updateWorkingPointTime(h * 60 + m);
-            }}
-          />
-        </label>
+        ${this._renderTimeField(point)}
         <label>
           ${localize("schedule_card.period")}
           <select
+            class="period-select"
             .value=${period}
             @change=${(e: Event) => this._updateWorkingPointPeriod((e.target as HTMLSelectElement).value as Period)}
           >
@@ -1472,7 +1561,7 @@ export class MobiusScheduleCard extends LitElement {
 
     return html`
       <div class="point-edit-form">
-        ${this._renderTimeAndPeriodFields(point)}
+        ${this._renderTimeOnlyField(point)}
         <label class="mode-label">
           ${localize("schedule_card.mode")}
           <select
@@ -1561,16 +1650,19 @@ export class MobiusScheduleCard extends LitElement {
       `;
     }
     // Confirmed in the app's own PumpPrimitive.getReverse(): a
-    // negative MaxSpeed/MinSpeed reverses rotation direction, on
-    // pumps whose model actually supports it (sliderSettings'
-    // supportsReverse). Which models do isn't exposed by this
-    // integration's own backend, so the hint is deliberately phrased
-    // as "on supported pumps" rather than claiming this always does
-    // something -- the value itself already round-trips correctly
-    // either way (python-mobius passes it through as-is), this is
-    // purely about not leaving a negative-number field unexplained.
+    // negative MaxSpeed/MinSpeed reverses rotation direction, but only
+    // on AlpacaV1 pumps (sliderSettings' own supportsReverse) -- every
+    // other primitive type never supports this regardless of mode or
+    // sign. supports_reverse (from resolve_schedule_groups, matching
+    // get_pump_reverse()'s own logic exactly) tells us which case
+    // we're in, so the hint only shows -- and a negative value is only
+    // actually accepted -- on a pump that genuinely supports it,
+    // instead of leaving every pump with an unconditional hint and no
+    // guard against typing a negative value that silently does
+    // nothing on hardware that doesn't support it.
     const isSpeedParam = name === "MaxSpeed" || name === "MinSpeed";
     if (isSpeedParam) {
+      const supportsReverse = this._group?.members?.[0]?.supports_reverse === true;
       // Confirmed from the app's own formatter:
       // String.format("%d%%", Math.round(raw / 10.0)) -- the raw
       // wire value is tenths of a percent, never shown to a person
@@ -1583,14 +1675,20 @@ export class MobiusScheduleCard extends LitElement {
           ${name} (%)
           <input
             type="number"
+            min=${supportsReverse ? nothing : 0}
             .value=${String(displayPercent)}
-            title=${localize("schedule_card.reverse_hint")}
+            title=${supportsReverse ? localize("schedule_card.reverse_hint") : nothing}
             @change=${(e: Event) => {
-              const percent = Number((e.target as HTMLInputElement).value);
+              let percent = Number((e.target as HTMLInputElement).value);
+              // Reverse isn't a thing this pump supports -- a
+              // negative value here would just be silently ignored by
+              // the device, so clamp it here instead of letting
+              // someone type one and wonder why it did nothing.
+              if (!supportsReverse && percent < 0) percent = Math.abs(percent);
               this._updateWorkingPumpParam(name, Math.sign(percent) * Math.round(Math.abs(percent) * 10));
             }}
           />
-          <span class="field-hint">${localize("schedule_card.reverse_hint")}</span>
+          ${supportsReverse ? html`<span class="field-hint">${localize("schedule_card.reverse_hint")}</span>` : nothing}
         </label>
       `;
     }
@@ -1920,6 +2018,19 @@ export class MobiusScheduleCard extends LitElement {
       color: var(--primary-text-color);
       font-family: inherit;
       font-size: 1em;
+    }
+    .time-fields {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .time-fields .time-hour,
+    .time-fields .time-minute {
+      width: 3em;
+      text-align: center;
+    }
+    .time-colon {
+      color: var(--secondary-text-color);
     }
     .edit-actions {
       display: flex;

@@ -102,6 +102,7 @@ const PUMP_GROUP = {
       flow_entity_id: "sensor.pump_flow",
       speed_entity_id: "sensor.pump_speed",
       mode_entity_id: "sensor.pump_mode",
+      supports_reverse: true,
     },
   ],
 };
@@ -118,10 +119,12 @@ function makeHass({
   exportMobError,
   parseMobResponse,
   parseMobError,
+  locale,
 } = {}) {
   return {
     devices: devices ?? { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
     states: states ?? {},
+    locale,
     callWS: async (msg) => {
       if (wsError) throw wsError;
       if (msg.type === "mobius/resolve_schedule_groups") {
@@ -950,7 +953,7 @@ test("clicking Edit schedule fetches the real schedule and switches to the edit 
   assert.ok(el.shadowRoot.querySelector(".back-button"));
 });
 
-test("edit view shows each point's own time, decoded period, and mode", async () => {
+test("edit view shows each pump point's own time and mode, but never a period (pumps have no such notion)", async () => {
   const el = makeCard(PUMP_DEVICE_ID);
   el.hass = makePumpHass(
     { "sensor.pump_flow": { state: "300", attributes: {} } },
@@ -964,17 +967,23 @@ test("edit view shows each point's own time, decoded period, and mode", async ()
   const text = rows.map((r) => r.textContent);
 
   assert.ok(text[0].includes("0:00"));
-  assert.ok(text[0].includes("Day"));
   assert.ok(text[0].includes("ConstantSpeed"));
+  assert.equal(el.shadowRoot.querySelector(".point-period"), null);
 
   assert.ok(text[1].includes("8:00"));
-  assert.ok(text[1].includes("Night"));
-
   assert.ok(text[2].includes("6:00"));
-  assert.ok(text[2].includes("Sunrise"));
-
   assert.ok(text[3].includes("20:00"));
-  assert.ok(text[3].includes("Sunset"));
+});
+
+test("pump point edit form has no period select at all", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".time-hour"));
+  assert.equal(el.shadowRoot.querySelector(".period-select"), null);
 });
 
 test("the back button returns to the glance view without losing state", async () => {
@@ -1066,7 +1075,8 @@ test("clicking a point row opens an edit form pre-filled with its own values", a
 
   const form = el.shadowRoot.querySelector(".point-edit-form");
   assert.ok(form);
-  assert.equal(el.shadowRoot.querySelector('input[type="time"]').value, "01:30");
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "1");
+  assert.equal(el.shadowRoot.querySelector(".time-minute").value, "30");
   assert.equal(el.shadowRoot.querySelector(".mode-label select").value, "ConstantSpeed");
   assert.equal(el.shadowRoot.querySelector(".param-label input").value, "30");
 });
@@ -1190,13 +1200,11 @@ test("cancel discards changes and leaves the original point untouched", async ()
 });
 
 test("period dropdown edits the point's own flags correctly", async () => {
-  const el = await openEditWithPoints([
-    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
-  ]);
+  const el = await openLightEditWithPoints([{ time_minutes: 0, flags: 1, channels: { RoyalBlue: 500 } }]);
   el.shadowRoot.querySelector(".point-row").click();
   await el.updateComplete;
 
-  const periodSelect = el.shadowRoot.querySelectorAll(".edit-row select")[0];
+  const periodSelect = el.shadowRoot.querySelector(".period-select");
   periodSelect.value = "sunset";
   periodSelect.dispatchEvent(new window.Event("change"));
   await el.updateComplete;
@@ -1703,7 +1711,8 @@ test("clicking a light point opens one slider per real channel, pre-filled with 
   assert.equal(violetSlider.querySelector('input[type="range"]').value, "10");
 
   // Reuses the exact same time/period fields the pump form uses.
-  assert.equal(el.shadowRoot.querySelector('input[type="time"]').value, "01:30");
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "1");
+  assert.equal(el.shadowRoot.querySelector(".time-minute").value, "30");
 });
 
 test("adjusting a channel slider and saving updates that point's own channels", async () => {
@@ -2937,4 +2946,242 @@ test("getGridOptions falls back to the pump-sized defaults before the group has 
     min_rows: 3,
     max_rows: 6,
   });
+});
+
+// --------------------------------------------------------------------------
+// Locale-aware time field -- a real, confirmed bug: the edit form's
+// own time field used a native <input type="time">, whose AM/PM-vs-24h
+// display is controlled by the BROWSER/OS locale, completely
+// independent of Home Assistant's own configured Time Format setting.
+// --------------------------------------------------------------------------
+
+test("time field shows plain 24-hour hour/minute with no AM/PM select when Time Format is 24-hour", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 870, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }, // 14:30
+  ]);
+  el.hass = { ...el.hass, locale: { time_format: "24" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "14");
+  assert.equal(el.shadowRoot.querySelector(".time-minute").value, "30");
+  assert.equal(el.shadowRoot.querySelector(".time-ampm"), null);
+});
+
+test("time field shows hour/minute plus an AM/PM select when Time Format is 12-hour", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 870, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }, // 14:30 -> 2:30 PM
+  ]);
+  el.hass = { ...el.hass, locale: { time_format: "12hour" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  assert.equal(el.shadowRoot.querySelector(".time-hour").value, "2");
+  assert.equal(el.shadowRoot.querySelector(".time-minute").value, "30");
+  assert.equal(el.shadowRoot.querySelector(".time-ampm").value, "PM");
+});
+
+test("midnight and noon show as 12 AM / 12 PM in 12-hour format, not 0", async () => {
+  const midnight = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  midnight.hass = { ...midnight.hass, locale: { time_format: "12hour" } };
+  await midnight.updateComplete;
+  midnight.shadowRoot.querySelector(".point-row").click();
+  await midnight.updateComplete;
+  assert.equal(midnight.shadowRoot.querySelector(".time-hour").value, "12");
+  assert.equal(midnight.shadowRoot.querySelector(".time-ampm").value, "AM");
+
+  const noon = await openEditWithPoints([
+    { time_minutes: 720, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  noon.hass = { ...noon.hass, locale: { time_format: "12hour" } };
+  await noon.updateComplete;
+  noon.shadowRoot.querySelector(".point-row").click();
+  await noon.updateComplete;
+  assert.equal(noon.shadowRoot.querySelector(".time-hour").value, "12");
+  assert.equal(noon.shadowRoot.querySelector(".time-ampm").value, "PM");
+});
+
+test("editing hour/minute/AM-PM in 12-hour format correctly updates the point's own time_minutes", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.hass = { ...el.hass, locale: { time_format: "12hour" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const hourInput = el.shadowRoot.querySelector(".time-hour");
+  const minInput = el.shadowRoot.querySelector(".time-minute");
+  const ampmSelect = el.shadowRoot.querySelector(".time-ampm");
+
+  hourInput.value = "9";
+  minInput.value = "15";
+  ampmSelect.value = "PM";
+  hourInput.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  // 9:15 PM -> 21*60 + 15 = 1275
+  assert.equal(el._schedulePoints[0].time_minutes, 1275);
+});
+
+test("editing hour/minute in 24-hour format correctly updates the point's own time_minutes", async () => {
+  const el = await openEditWithPoints([
+    { time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ]);
+  el.hass = { ...el.hass, locale: { time_format: "24" } };
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const hourInput = el.shadowRoot.querySelector(".time-hour");
+  const minInput = el.shadowRoot.querySelector(".time-minute");
+
+  hourInput.value = "21";
+  minInput.value = "15";
+  hourInput.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  assert.equal(el._schedulePoints[0].time_minutes, 1275);
+});
+
+// --------------------------------------------------------------------------
+// Reverse-rotation hint gated on the pump's own actual support
+// (supports_reverse, matching get_pump_reverse()'s exact logic:
+// primitive_type == AlpacaV1) -- a pump that doesn't support it gets
+// no hint at all, and a negative value typed into the field is
+// clamped rather than silently accepted and doing nothing on real
+// hardware.
+// --------------------------------------------------------------------------
+
+test("no reverse-rotation hint at all when the pump doesn't support it", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, members: [{ ...PUMP_GROUP.members[0], supports_reverse: false }] }],
+      },
+      scheduleResponse: {
+        points: [{ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const maxSpeedLabel = [...el.shadowRoot.querySelectorAll(".param-label")].find((l) =>
+    l.textContent.includes("MaxSpeed"),
+  );
+  assert.equal(maxSpeedLabel.querySelector(".field-hint"), null);
+  assert.equal(maxSpeedLabel.querySelector("input").title, "");
+});
+
+test("a negative value is clamped to positive when the pump doesn't support reverse", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, members: [{ ...PUMP_GROUP.members[0], supports_reverse: false }] }],
+      },
+      scheduleResponse: {
+        points: [{ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const input = el.shadowRoot.querySelector(".param-label input");
+  input.value = "-30";
+  input.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  el.shadowRoot.querySelector(".save-point-button").click();
+  await el.updateComplete;
+
+  // Clamped to positive -- 30% -> 300, not -300.
+  assert.equal(el._schedulePoints[0].params.MaxSpeed, 300);
+});
+
+test("no reverse-rotation hint when supports_reverse is null (primitive_type not yet known)", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    {
+      wsResponse: {
+        groups: [{ ...PUMP_GROUP, members: [{ ...PUMP_GROUP.members[0], supports_reverse: null }] }],
+      },
+      scheduleResponse: {
+        points: [{ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } }],
+      },
+    },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+
+  const maxSpeedLabel = [...el.shadowRoot.querySelectorAll(".param-label")].find((l) =>
+    l.textContent.includes("MaxSpeed"),
+  );
+  assert.equal(maxSpeedLabel.querySelector(".field-hint"), null);
+});
+
+// --------------------------------------------------------------------------
+// Pump points' own flags are always normalized to just FLAG_ACTIVE (1)
+// on save -- pumps only have an enabled/disabled notion, never
+// day/night/sunrise/sunset (confirmed against the app's own
+// Point.java).
+// --------------------------------------------------------------------------
+
+test("saving a pump schedule normalizes every point's own flags to 1, regardless of what was loaded", async () => {
+  const points = [
+    { time_minutes: 0, flags: 7, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+    { time_minutes: 480, flags: 0, mode: "ConstantSpeed", params: { MaxSpeed: 300 } },
+  ];
+  const el = await openEditWithPoints(points);
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => {
+    calls.push({ domain, service, data });
+  };
+
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await el.updateComplete;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    calls[0].data.points.map((p) => p.flags),
+    [1, 1],
+  );
+});
+
+test("saving a light schedule leaves each point's own flags untouched", async () => {
+  const points = [{ time_minutes: 0, flags: 6, channels: { RoyalBlue: 500 } }];
+  const el = await openLightEditWithPoints(points);
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => {
+    calls.push({ domain, service, data });
+  };
+
+  el.shadowRoot.querySelector(".save-schedule-button").click();
+  await el.updateComplete;
+
+  assert.equal(calls[0].data.points[0].flags, 6);
 });
