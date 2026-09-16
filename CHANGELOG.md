@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta6
 
 - **Critical fix**: the schedule intensity sensor could show the
   lunar reduction factor instead of the light's own actual schedule
