@@ -599,11 +599,28 @@ async def _fetch_all(
         # get_schedule_intensity()'s own return range) for anything
         # that wants the raw scalar itself (e.g. a schedule editor
         # card's own global-intensity control), not just this specific
-        # moment's fully-modified per-channel output. .get() rather
-        # than a direct index -- "scalar" is a diagnostics key
-        # python-mobius documents but doesn't contractually guarantee
-        # will always be present.
-        info["schedule_intensity"] = current.diagnostics.get("scalar")
+        # moment's fully-modified per-channel output.
+        #
+        # A real, confirmed production bug lived here before this
+        # comment existed: this used to read current.diagnostics.get(
+        # "scalar") instead, which is NOT the same thing -- "scalar" is
+        # whichever value is CURRENTLY driving the effective per-channel
+        # output (during a lunar-reduced night segment, that's the
+        # lunar reduction factor itself, completely unrelated to the
+        # schedule intensity setting), not the device's own raw
+        # schedule-level intensity. That bug showed the lunar reduction
+        # factor (e.g. 0.08) as if it were the schedule intensity
+        # slider's own value (e.g. 0.897), specifically whenever the
+        # device happened to be in its own lunar-reduced night segment
+        # at poll time -- exactly the condition under which the two
+        # values differ, so it was never caught by simply checking the
+        # value during the day. light_poll.schedule_intensity is
+        # python-mobius's own dedicated field for this (added
+        # specifically to fix this bug -- previously computed
+        # internally but never actually propagated to the caller at
+        # all), always the device's own raw setting regardless of
+        # which branch is currently in effect.
+        info["schedule_intensity"] = light_poll.schedule_intensity
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).

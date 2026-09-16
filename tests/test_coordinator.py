@@ -1054,12 +1054,44 @@ class TestLightPollBatchWiring:
                 "insolation_active": False, "is_night_segment": False,
                 "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 0.588,
             }),
+            schedule_intensity=0.588,
         ))
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
             await coordinator.async_refresh()
 
         assert coordinator.data["schedule_intensity"] == 0.588
+
+    async def test_schedule_intensity_is_not_conflated_with_the_lunar_reduction_factor(self, hass):
+        """A real, confirmed production bug: this used to read
+        current.diagnostics["scalar"] instead of the device's own raw
+        schedule_intensity setting. "scalar" is whichever value is
+        CURRENTLY driving the effective per-channel output -- during a
+        lunar-reduced night segment, that's the lunar reduction factor
+        itself, not the schedule intensity slider's own value. That
+        bug showed the lunar reduction factor (e.g. 0.08) as the
+        schedule intensity sensor's own reading, instead of the
+        device's actual schedule-level setting (e.g. 0.897) -- exactly
+        the scenario reproduced here."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={
+                "insolation_active": False, "is_night_segment": True,
+                "lunar_enabled": True, "scalar_source": "lunar", "scalar": 0.08,
+            }),
+            schedule_intensity=0.897,
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.data["schedule_intensity"] == 0.897
 
     async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
         """metadata batch succeeds, but the light-poll batch specifically

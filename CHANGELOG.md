@@ -2,20 +2,18 @@
 
 ## Unreleased
 
-- Activating a scene now shows a spinner on the tile being activated
-  and disables the others until it resolves, instead of giving no
-  feedback at all while the command is in flight -- a failure now
-  shows an actual error message too.
-- Fixed a misleading "0:00 remaining" shown for a scene with no real
-  timer at all (e.g. Feed Mode, which runs until manually stopped),
-  as if it were a countdown about to expire.
-- Fixed the card only offering a single fixed size in sections view,
-  with no defined minimum/maximum to fall back to on a narrower
-  screen -- could produce an "Invalid configuration" error once
-  squeezed onto a section with too few columns to honor a
-  desktop-configured width. The light and pump cards now each have
-  their own sane default size (7x12 and 4x6, confirmed to look good)
-  with an explicit, bounded range on both axes to shrink into instead.
+- **Critical fix**: the schedule intensity sensor could show the
+  lunar reduction factor instead of the light's own actual schedule
+  intensity setting. Requires python-mobius 0.8.2+.
+- Activating a scene now shows a loading spinner and disables the
+  other tiles until it resolves, with a real error message on
+  failure, instead of no feedback at all.
+- Fixed a misleading "0:00 remaining" shown for scenes with no real
+  timer (e.g. Feed Mode).
+- Fixed the card offering only a single fixed size in sections view,
+  which could cause an "Invalid configuration" error on a narrower
+  screen. The light and pump cards now have their own sane default
+  sizes with proper min/max bounds.
 
 ## 0.8.0-beta5
 
