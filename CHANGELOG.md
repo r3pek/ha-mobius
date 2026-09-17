@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta7
 
 - Added a "Lunar phases" switch (light devices), plus a clickable
   moon toggle directly on the light glance view's own header --
