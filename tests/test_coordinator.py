@@ -9,7 +9,7 @@ failure handling.
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import pytest
@@ -1092,6 +1092,42 @@ class TestLightPollBatchWiring:
             await coordinator.async_refresh()
 
         assert coordinator.data["schedule_intensity"] == 0.897
+
+    async def test_lunar_enabled_is_not_conflated_with_diagnostics_own_wiped_copy(self, hass):
+        """A real, confirmed production bug, reported directly by a
+        real user: the schedule_intensity sensor's own lunar_enabled/
+        moon_phase_icon attributes showed Unknown during the day, even
+        though the device's own Lunar toggle was genuinely on.
+
+        This used to read current.diagnostics["lunar_enabled"] instead
+        of light_poll's own dedicated field. process_light_intensities()
+        unconditionally wipes diagnostics["lunar_enabled"] to None
+        outside the night segment (correct for its OWN reduction-factor
+        calculation, since the toggle only affects anything at night --
+        not correct for a caller wanting the device's own current
+        setting at any time of day). Reproduced exactly here: the
+        device's own toggle is genuinely on (light_poll.lunar_enabled),
+        but this is a daytime poll, so diagnostics itself shows None."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={
+                "insolation_active": False, "is_night_segment": False,
+                "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 0.5,
+            }),
+            schedule_intensity=0.5, lunar_enabled=True, lunar_date=date(2026, 9, 17),
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.data["lunar_enabled"] is True
+        assert coordinator.data["moon_phase_icon"] is not None
 
     async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
         """metadata batch succeeds, but the light-poll batch specifically

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Critical fix**: the schedule intensity sensor's own `lunar_enabled`/
+  `moon_phase_icon` attributes showed Unknown during the day, even when
+  the device's own Lunar toggle was genuinely on. Requires
+  python-mobius 0.8.4+.
 - The chart's own hover tooltip now also shows the current lunar
   phase, when lunar tracking is enabled.
 

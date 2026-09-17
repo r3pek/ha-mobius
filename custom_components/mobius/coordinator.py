@@ -646,12 +646,36 @@ async def _fetch_all(
         # Confirmed directly against the app: the "Lunar" chip at the
         # top of the light schedule editor both toggles this and, while
         # on, displays the current moon phase -- so both the on/off
-        # state and a phase icon (from lunar_days_into_phase(), using
-        # the same lunar_date diagnostics already compute) are stored
-        # here for the switch and the schedule card to read.
-        info["lunar_enabled"] = current.diagnostics.get("lunar_enabled")
-        lunar_date = current.diagnostics.get("lunar_date")
-        info["moon_phase_icon"] = moon_phase_icon(lunar_days_into_phase(lunar_date)) if lunar_date else None
+        # state and a phase icon (from lunar_days_into_phase()) are
+        # stored here for the switch and the schedule card to read.
+        #
+        # A real, confirmed production bug lived here before this
+        # comment existed: this used to read
+        # current.diagnostics.get("lunar_enabled")/["lunar_date"]
+        # instead of light_poll's own dedicated fields -- NOT the same
+        # thing. process_light_intensities() unconditionally wipes both
+        # of those diagnostics keys to None outside the night segment
+        # (correct for its OWN reduction-factor calculation, since the
+        # toggle only affects anything during the night segment, but
+        # not correct for a caller wanting the device's own current
+        # setting at any time of day). That bug showed this sensor as
+        # Unknown for lunar_enabled/moon_phase_icon during the day, even
+        # when the device's own Lunar toggle was genuinely on --
+        # confirmed by a real user's own report and a matching debug
+        # log showing diagnostics correctly populated only because the
+        # poll happened to land during a lunar-reduced night segment.
+        # light_poll.lunar_enabled/lunar_date are python-mobius's own
+        # dedicated fields for this (added specifically to fix this
+        # bug), always correct regardless of which branch is currently
+        # in effect.
+        info["lunar_enabled"] = light_poll.lunar_enabled
+        # Falls back to today's local date if the device itself didn't
+        # provide one (Epoch/LocalTime unavailable) -- matches
+        # process_light_intensities()'s own "local_fallback" philosophy,
+        # so the phase icon can still show even without those attributes,
+        # rather than going without a phase whenever they're absent.
+        lunar_date = light_poll.lunar_date or dt_util.now().date()
+        info["moon_phase_icon"] = moon_phase_icon(lunar_days_into_phase(lunar_date))
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).
