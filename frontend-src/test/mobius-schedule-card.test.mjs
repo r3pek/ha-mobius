@@ -3338,3 +3338,53 @@ test("a failed toggle shows an error message", async () => {
   assert.ok(el.shadowRoot.querySelector(".activation-error"));
   assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed setting attribute 907"));
 });
+
+// --------------------------------------------------------------------------
+// Chart hover tooltip also shows the current lunar phase when it's
+// active, since the person is already looking at this exact schedule
+// data.
+// --------------------------------------------------------------------------
+
+test("hover tooltip includes the current lunar phase when lunar phases are enabled", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    {
+      "sensor.left_royalblue": { state: "60", attributes: {} },
+      "sensor.left_schedule_intensity": {
+        state: "59",
+        attributes: { lunar_enabled: true, moon_phase_icon: "mdi:moon-waning-gibbous" },
+      },
+    },
+    { "sensor.left_royalblue": [historyEntry(80, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0.5;
+  await el.updateComplete;
+
+  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
+  const moonIcon = tooltip.querySelector(".chart-tooltip-moon-icon");
+  assert.ok(moonIcon);
+  assert.equal(moonIcon.getAttribute("icon"), "mdi:moon-waning-gibbous");
+});
+
+test("hover tooltip has no lunar row when lunar phases are disabled", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass(
+    {
+      "sensor.left_royalblue": { state: "60", attributes: {} },
+      "sensor.left_schedule_intensity": {
+        state: "59",
+        attributes: { lunar_enabled: false, moon_phase_icon: "mdi:moon-waning-gibbous" },
+      },
+    },
+    { "sensor.left_royalblue": [historyEntry(80, 0)] },
+  );
+  await settled(el);
+
+  el._chartHoverFraction = 0.5;
+  await el.updateComplete;
+
+  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
+  assert.equal(tooltip.querySelector(".chart-tooltip-moon-icon"), null);
+});

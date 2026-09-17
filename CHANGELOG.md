@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The chart's own hover tooltip now also shows the current lunar
+  phase, when lunar tracking is enabled.
+
 ## 0.8.0-beta7
 
 - Added a "Lunar phases" switch (light devices), plus a clickable
