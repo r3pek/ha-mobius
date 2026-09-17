@@ -3359,3 +3359,50 @@ test("a failed toggle shows an error message", async () => {
   assert.ok(el.shadowRoot.querySelector(".activation-error"));
   assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed setting attribute 907"));
 });
+
+// --------------------------------------------------------------------------
+// The header is a flex row (title/subtitle block vs. the light card's
+// own moon toggle sitting alongside it) -- confirming title/subtitle
+// are nested in their own wrapper div, not direct children of
+// .header, on BOTH cards. A real, confirmed regression: the pump
+// card's own title/subtitle were still direct .header children after
+// .header became a flex row for the light card's moon toggle, putting
+// the pump's own device name beside "Pump Schedule" instead of below
+// it.
+// --------------------------------------------------------------------------
+
+test("pump card's own title and subtitle stay stacked, not side-by-side", async () => {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass({ "sensor.pump_flow": { state: "300", attributes: {} } });
+  await settled(el);
+
+  const header = el.shadowRoot.querySelector(".header");
+  assert.equal(
+    [...header.children].some((c) => c.classList.contains("title")),
+    false,
+  );
+  assert.equal(
+    [...header.children].some((c) => c.classList.contains("subtitle")),
+    false,
+  );
+  assert.ok(header.querySelector(".title"));
+  assert.ok(header.querySelector(".subtitle"));
+});
+
+test("light card's own title and subtitle stay stacked, not side-by-side", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
+  await settled(el);
+
+  const header = el.shadowRoot.querySelector(".header");
+  assert.equal(
+    [...header.children].some((c) => c.classList.contains("title")),
+    false,
+  );
+  assert.equal(
+    [...header.children].some((c) => c.classList.contains("subtitle")),
+    false,
+  );
+  assert.ok(header.querySelector(".title"));
+  assert.ok(header.querySelector(".subtitle"));
+});

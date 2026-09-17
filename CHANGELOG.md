@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the pump card's own device name showing beside "Pump Schedule"
+  instead of below it -- a side effect of making the header a flex row
+  for the light card's own moon toggle, which the pump card's title/
+  subtitle weren't wrapped to survive.
+
 ## 0.8.0-beta8
 
 - **Critical fix**: the schedule intensity sensor's own `lunar_enabled`/

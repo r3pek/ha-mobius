@@ -927,8 +927,10 @@ export class MobiusScheduleCard extends LitElement {
     return html`
       <ha-card>
         <div class="header">
-          <div class="title">${localize("schedule_card.pump_title")}</div>
-          <div class="subtitle">${member.name}</div>
+          <div>
+            <div class="title">${localize("schedule_card.pump_title")}</div>
+            <div class="subtitle">${member.name}</div>
+          </div>
         </div>
         ${this._renderSceneBanner()}
         ${
