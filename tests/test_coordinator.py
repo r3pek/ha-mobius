@@ -22,7 +22,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
-    discover_mesh_address, discover_tank_for_serial, _fetch_all, moon_phase_icon,
+    discover_mesh_address, discover_tank_for_serial, _fetch_all, moon_phase_icon, moon_phase_name,
 )
 from custom_components.mobius.gateway_registry import GatewayRegistry
 from homeassistant.exceptions import HomeAssistantError
@@ -2504,3 +2504,38 @@ class TestMoonPhaseIcon:
     def test_22_through_28_is_waning_crescent(self):
         assert moon_phase_icon(22) == "mdi:moon-waning-crescent"
         assert moon_phase_icon(28) == "mdi:moon-waning-crescent"
+
+
+# --------------------------------------------------------------------------
+# moon_phase_name -- same boundaries as moon_phase_icon (both share the
+# same underlying bucket lookup), returning the English name instead.
+# --------------------------------------------------------------------------
+
+class TestMoonPhaseName:
+    def test_zero_and_below_is_new_moon(self):
+        assert moon_phase_name(0) == "New Moon"
+        assert moon_phase_name(-1) == "New Moon"
+
+    def test_29_and_above_is_new_moon(self):
+        assert moon_phase_name(29) == "New Moon"
+        assert moon_phase_name(30) == "New Moon"
+
+    def test_1_through_7_is_waxing_crescent(self):
+        assert moon_phase_name(1) == "Waxing Crescent"
+        assert moon_phase_name(7) == "Waxing Crescent"
+
+    def test_8_through_13_is_waxing_gibbous(self):
+        assert moon_phase_name(8) == "Waxing Gibbous"
+        assert moon_phase_name(13) == "Waxing Gibbous"
+
+    def test_14_through_15_is_full_moon(self):
+        assert moon_phase_name(14) == "Full Moon"
+        assert moon_phase_name(15) == "Full Moon"
+
+    def test_16_through_21_is_waning_gibbous(self):
+        assert moon_phase_name(16) == "Waning Gibbous"
+        assert moon_phase_name(21) == "Waning Gibbous"
+
+    def test_22_through_28_is_waning_crescent(self):
+        assert moon_phase_name(22) == "Waning Crescent"
+        assert moon_phase_name(28) == "Waning Crescent"

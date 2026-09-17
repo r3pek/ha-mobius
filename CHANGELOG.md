@@ -10,6 +10,8 @@
   own firmware actually supports it.
 - The moon toggle's own tooltip now shows the current phase name (e.g.
   "Waning Gibbous"), not just "active".
+- The Lunar switch now exposes the current phase name and phase day
+  (0-29) as its own attributes.
 
 ## 0.8.0-beta7
 

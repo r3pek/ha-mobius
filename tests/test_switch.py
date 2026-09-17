@@ -221,6 +221,15 @@ class TestLunarPhasesEnabledSwitch:
         assert self._make_switch(True).is_on is True
         assert self._make_switch(False).is_on is False
 
+    def test_extra_state_attributes_exposes_phase_and_phase_day(self):
+        switch = self._make_switch(True)
+        switch.coordinator.data.update({"moon_phase_name": "Waning Gibbous", "lunar_phase_day": 18})
+        assert switch.extra_state_attributes == {"phase": "Waning Gibbous", "phase_day": 18}
+
+    def test_extra_state_attributes_when_unsupported(self):
+        switch = self._make_switch(None)
+        assert switch.extra_state_attributes == {"phase": None, "phase_day": None}
+
     def test_is_on_none_when_not_yet_known(self):
         from custom_components.mobius.switch import LunarPhasesEnabledSwitch
 

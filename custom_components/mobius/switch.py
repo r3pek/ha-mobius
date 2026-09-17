@@ -233,6 +233,11 @@ class LunarPhasesEnabledSwitch(CoordinatorEntity[MobiusDeviceCoordinator], Switc
     def is_on(self) -> bool | None:
         return (self.coordinator.data or {}).get("lunar_enabled")
 
+    @property
+    def extra_state_attributes(self):
+        data = self.coordinator.data or {}
+        return {"phase": data.get("moon_phase_name"), "phase_day": data.get("lunar_phase_day")}
+
     async def _async_set(self, value: bool) -> None:
         try:
             device = await self.coordinator.async_get_connected_device()

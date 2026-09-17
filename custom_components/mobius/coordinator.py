@@ -94,25 +94,51 @@ _LOGGER = logging.getLogger(__name__)
 
 # The 8 standard MDI moon-phase icons, in cycle order starting at new
 # moon -- matches lunar_days_into_phase()'s own 0=new-moon convention.
-def moon_phase_icon(current_day: int) -> str:
+def _moon_phase_bucket(current_day: int) -> int:
     """current_day is lunar_days_into_phase()'s own 0-29 "days since new
     moon" index. Thresholds traced directly from the app's own compiled
     bytecode (LightingFragment.smali's own lunarPhase() method) rather
     than assumed -- the app uses exactly 6 phases (no separate quarter
     phases at all), with these precise, confirmed boundaries:
     <=0 or >=29 -> new, 1-7 -> waxing crescent, 8-13 -> waxing gibbous,
-    14-15 -> full, 16-21 -> waning gibbous, 22-28 -> waning crescent."""
+    14-15 -> full, 16-21 -> waning gibbous, 22-28 -> waning crescent.
+    Returns an index (0-5) into _MOON_PHASE_ICONS/_MOON_PHASE_NAMES,
+    shared so both stay in sync rather than duplicating these
+    boundaries in two places."""
     if current_day <= 0 or current_day >= 29:
-        return "mdi:moon-new"
+        return 0
     if current_day <= 7:
-        return "mdi:moon-waxing-crescent"
+        return 1
     if current_day <= 13:
-        return "mdi:moon-waxing-gibbous"
+        return 2
     if current_day <= 15:
-        return "mdi:moon-full"
+        return 3
     if current_day <= 21:
-        return "mdi:moon-waning-gibbous"
-    return "mdi:moon-waning-crescent"
+        return 4
+    return 5
+
+
+_MOON_PHASE_ICONS = [
+    "mdi:moon-new", "mdi:moon-waxing-crescent", "mdi:moon-waxing-gibbous",
+    "mdi:moon-full", "mdi:moon-waning-gibbous", "mdi:moon-waning-crescent",
+]
+# English names matching the app's own strings.xml exactly (full_moon,
+# new_moon, waxing_crescent, waxing_gibbous, waning_gibbous,
+# waning_crescent) -- for a diagnostic attribute value, not shown
+# through Home Assistant's own translation system (that's the
+# schedule card's own moonPhaseName(), which localizes this same
+# 6-phase set from the icon value instead).
+_MOON_PHASE_NAMES = [
+    "New Moon", "Waxing Crescent", "Waxing Gibbous", "Full Moon", "Waning Gibbous", "Waning Crescent",
+]
+
+
+def moon_phase_icon(current_day: int) -> str:
+    return _MOON_PHASE_ICONS[_moon_phase_bucket(current_day)]
+
+
+def moon_phase_name(current_day: int) -> str:
+    return _MOON_PHASE_NAMES[_moon_phase_bucket(current_day)]
 
 
 def parsed_advertisement(manufacturer_data: dict) -> Optional[MobiusAdvertisement]:
@@ -677,8 +703,12 @@ async def _fetch_all(
         # device genuinely doesn't have.
         info["lunar_supported"] = C2Attribute.LunarPhasesEnabled in supported_attribute_ids
         info["lunar_enabled"] = light_poll.lunar_enabled if info["lunar_supported"] else None
+        info["lunar_phase_day"] = light_poll.lunar_phase_day if info["lunar_supported"] else None
         info["moon_phase_icon"] = (
             moon_phase_icon(light_poll.lunar_phase_day) if info["lunar_supported"] else None
+        )
+        info["moon_phase_name"] = (
+            moon_phase_name(light_poll.lunar_phase_day) if info["lunar_supported"] else None
         )
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
