@@ -189,6 +189,30 @@ function periodForFlags(flags: number): Period {
   return "day";
 }
 
+// Maps coordinator.py's own moon_phase_icon() output back to a
+// localized, human-readable phase name for the toggle button's own
+// title -- the icon alone doesn't convey which phase it is to
+// someone who doesn't recognize MDI icon names on sight.
+function moonPhaseName(icon: string, hass: HomeAssistant): string {
+  const lang = hass?.locale?.language;
+  switch (icon) {
+    case "mdi:moon-new":
+      return localize("schedule_card.moon_phase_new", lang);
+    case "mdi:moon-waxing-crescent":
+      return localize("schedule_card.moon_phase_waxing_crescent", lang);
+    case "mdi:moon-waxing-gibbous":
+      return localize("schedule_card.moon_phase_waxing_gibbous", lang);
+    case "mdi:moon-full":
+      return localize("schedule_card.moon_phase_full", lang);
+    case "mdi:moon-waning-gibbous":
+      return localize("schedule_card.moon_phase_waning_gibbous", lang);
+    case "mdi:moon-waning-crescent":
+      return localize("schedule_card.moon_phase_waning_crescent", lang);
+    default:
+      return "";
+  }
+}
+
 function periodLabel(period: Period): string {
   switch (period) {
     case "sunrise":
@@ -1072,16 +1096,6 @@ export class MobiusScheduleCard extends LitElement {
       ? formatTime(hoverDate, lang)
       : `${hoverDate.getHours()}:${String(hoverDate.getMinutes()).padStart(2, "0")}`;
 
-    // The moon phase itself isn't a historical value we have per hover
-    // position (only the device's own current diagnostics) -- shown
-    // as-is regardless of where in the chart's own rolling 24h window
-    // the person is hovering, since the phase genuinely can't have
-    // moved meaningfully within that same window anyway.
-    const intensityEntityId = sourceMember?.schedule_intensity_entity_id;
-    const intensityState = intensityEntityId ? this.hass.states[intensityEntityId] : undefined;
-    const lunarEnabled = intensityState?.attributes.lunar_enabled === true;
-    const moonPhaseIcon = intensityState?.attributes.moon_phase_icon;
-
     return html`
       <div class="chart-hover-line" style="left: ${this._chartHoverFraction * 100}%"></div>
       <div class="chart-hover-time" style="left: ${this._chartHoverFraction * 100}%">${hoverTimeLabel}</div>
@@ -1095,16 +1109,6 @@ export class MobiusScheduleCard extends LitElement {
             </div>
           `,
         )}
-        ${
-          lunarEnabled && moonPhaseIcon
-            ? html`
-                <div class="chart-tooltip-row">
-                  <ha-icon class="chart-tooltip-moon-icon" icon=${moonPhaseIcon}></ha-icon>
-                  <span class="chart-tooltip-name">${localize("schedule_card.lunar_phases_active")}</span>
-                </div>
-              `
-            : nothing
-        }
       </div>
     `;
   }
@@ -1256,7 +1260,11 @@ export class MobiusScheduleCard extends LitElement {
                   ?disabled=${this._pendingLunarToggle}
                   @click=${() => this._toggleLunar(lunarSwitchEntityId)}
                   title=${
-                    lunarOn ? localize("schedule_card.lunar_phases_active") : localize("schedule_card.lunar_phases_off")
+                    lunarOn
+                      ? intensityState?.attributes.moon_phase_icon
+                        ? moonPhaseName(intensityState.attributes.moon_phase_icon, this.hass)
+                        : localize("schedule_card.lunar_phases_active")
+                      : localize("schedule_card.lunar_phases_off")
                   }
                 >
                   <ha-icon
@@ -2373,11 +2381,6 @@ export class MobiusScheduleCard extends LitElement {
       height: 8px;
       border-radius: 50%;
       flex-shrink: 0;
-    }
-    .chart-tooltip-moon-icon {
-      --mdc-icon-size: 14px;
-      flex-shrink: 0;
-      color: var(--secondary-text-color);
     }
     .chart-tooltip-name {
       flex: 1;

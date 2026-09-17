@@ -3262,6 +3262,9 @@ test("moon toggle shows the phase icon and 'on' styling when lunar phases are en
   assert.ok(button);
   assert.ok(button.classList.contains("on"));
   assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-waning-gibbous");
+  // The title shows the actual phase name, not just "active" -- this
+  // is the tooltip meant here, not the chart's own hover tooltip.
+  assert.equal(button.title, "Waning Gibbous");
 });
 
 test("moon toggle shows a dimmed new-moon icon when lunar phases are off", async () => {
@@ -3273,6 +3276,24 @@ test("moon toggle shows a dimmed new-moon icon when lunar phases are off", async
   assert.ok(button);
   assert.ok(!button.classList.contains("on"));
   assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-new");
+  assert.equal(button.title, "Lunar phases off -- tap to enable");
+});
+
+test("moon toggle's own title shows the correct name for every phase icon", async () => {
+  const cases = [
+    ["mdi:moon-new", "New Moon"],
+    ["mdi:moon-waxing-crescent", "Waxing Crescent"],
+    ["mdi:moon-waxing-gibbous", "Waxing Gibbous"],
+    ["mdi:moon-full", "Full Moon"],
+    ["mdi:moon-waning-gibbous", "Waning Gibbous"],
+    ["mdi:moon-waning-crescent", "Waning Crescent"],
+  ];
+  for (const [icon, name] of cases) {
+    const el = makeCard(LIGHT_DEVICE_ID);
+    el.hass = makeLightHassWithLunarSwitch("on", { moon_phase_icon: icon });
+    await settled(el);
+    assert.equal(el.shadowRoot.querySelector(".moon-toggle").title, name, `icon ${icon}`);
+  }
 });
 
 test("clicking the moon toggle calls switch.toggle with the right entity_id", async () => {
@@ -3337,54 +3358,4 @@ test("a failed toggle shows an error message", async () => {
 
   assert.ok(el.shadowRoot.querySelector(".activation-error"));
   assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed setting attribute 907"));
-});
-
-// --------------------------------------------------------------------------
-// Chart hover tooltip also shows the current lunar phase when it's
-// active, since the person is already looking at this exact schedule
-// data.
-// --------------------------------------------------------------------------
-
-test("hover tooltip includes the current lunar phase when lunar phases are enabled", async () => {
-  const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass(
-    {
-      "sensor.left_royalblue": { state: "60", attributes: {} },
-      "sensor.left_schedule_intensity": {
-        state: "59",
-        attributes: { lunar_enabled: true, moon_phase_icon: "mdi:moon-waning-gibbous" },
-      },
-    },
-    { "sensor.left_royalblue": [historyEntry(80, 0)] },
-  );
-  await settled(el);
-
-  el._chartHoverFraction = 0.5;
-  await el.updateComplete;
-
-  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
-  const moonIcon = tooltip.querySelector(".chart-tooltip-moon-icon");
-  assert.ok(moonIcon);
-  assert.equal(moonIcon.getAttribute("icon"), "mdi:moon-waning-gibbous");
-});
-
-test("hover tooltip has no lunar row when lunar phases are disabled", async () => {
-  const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass(
-    {
-      "sensor.left_royalblue": { state: "60", attributes: {} },
-      "sensor.left_schedule_intensity": {
-        state: "59",
-        attributes: { lunar_enabled: false, moon_phase_icon: "mdi:moon-waning-gibbous" },
-      },
-    },
-    { "sensor.left_royalblue": [historyEntry(80, 0)] },
-  );
-  await settled(el);
-
-  el._chartHoverFraction = 0.5;
-  await el.updateComplete;
-
-  const tooltip = el.shadowRoot.querySelector(".chart-tooltip");
-  assert.equal(tooltip.querySelector(".chart-tooltip-moon-icon"), null);
 });

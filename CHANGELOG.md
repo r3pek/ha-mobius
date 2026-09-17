@@ -8,8 +8,8 @@
   python-mobius 0.8.4+.
 - The Lunar switch and moon toggle are now only shown on lights whose
   own firmware actually supports it.
-- The chart's own hover tooltip now also shows the current lunar
-  phase, when lunar tracking is enabled.
+- The moon toggle's own tooltip now shows the current phase name (e.g.
+  "Waning Gibbous"), not just "active".
 
 ## 0.8.0-beta7
 
