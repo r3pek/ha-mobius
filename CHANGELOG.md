@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0-beta8
 
 - **Critical fix**: the schedule intensity sensor's own `lunar_enabled`/
   `moon_phase_icon` attributes showed Unknown during the day, even when
