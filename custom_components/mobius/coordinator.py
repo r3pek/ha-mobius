@@ -84,7 +84,7 @@ from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
     MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam, lunar_days_into_phase,
+    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam,
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
@@ -664,18 +664,22 @@ async def _fetch_all(
         # confirmed by a real user's own report and a matching debug
         # log showing diagnostics correctly populated only because the
         # poll happened to land during a lunar-reduced night segment.
-        # light_poll.lunar_enabled/lunar_date are python-mobius's own
-        # dedicated fields for this (added specifically to fix this
+        # light_poll.lunar_enabled/lunar_phase_day are python-mobius's
+        # own dedicated fields for this (added specifically to fix this
         # bug), always correct regardless of which branch is currently
         # in effect.
-        info["lunar_enabled"] = light_poll.lunar_enabled
-        # Falls back to today's local date if the device itself didn't
-        # provide one (Epoch/LocalTime unavailable) -- matches
-        # process_light_intensities()'s own "local_fallback" philosophy,
-        # so the phase icon can still show even without those attributes,
-        # rather than going without a phase whenever they're absent.
-        lunar_date = light_poll.lunar_date or dt_util.now().date()
-        info["moon_phase_icon"] = moon_phase_icon(lunar_days_into_phase(lunar_date))
+        #
+        # lunar_supported: whether this light's own firmware even
+        # exposes LunarPhasesEnabled at all -- some models may not.
+        # Gates whether the switch entity and the schedule card's own
+        # moon toggle get created for this device at all, rather than
+        # showing a control (or a fake "off" reading) for a feature the
+        # device genuinely doesn't have.
+        info["lunar_supported"] = C2Attribute.LunarPhasesEnabled in supported_attribute_ids
+        info["lunar_enabled"] = light_poll.lunar_enabled if info["lunar_supported"] else None
+        info["moon_phase_icon"] = (
+            moon_phase_icon(light_poll.lunar_phase_day) if info["lunar_supported"] else None
+        )
         # Light-only per the app's own
         # UI gating -- returns None for pumps, which is fine (the sensor
         # built on this is only added for light devices anyway).

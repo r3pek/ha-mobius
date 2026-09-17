@@ -284,9 +284,12 @@ async def async_setup_entry(
         )
 
         entities += _build_advanced_feature_switches(coordinator, serial, device_info, data)
-        # Light-only -- matches sensor.py's own support == "light" gating
-        # for its light-specific entities.
-        if data.get("support") == "light":
+        # Light-only, and only if this specific device's own firmware
+        # actually exposes LunarPhasesEnabled at all (some models may
+        # not) -- matches sensor.py's own support == "light" gating for
+        # its light-specific entities, plus coordinator.py's own
+        # lunar_supported check for this specific feature.
+        if data.get("support") == "light" and data.get("lunar_supported"):
             entities.append(LunarPhasesEnabledSwitch(coordinator, serial, device_info))
 
     async_add_entities(entities)

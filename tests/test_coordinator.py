@@ -9,7 +9,7 @@ failure handling.
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import pytest
@@ -1114,13 +1114,16 @@ class TestLightPollBatchWiring:
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
 
         fake_device = _make_fake_light_device()
+        fake_device.get_supported_attributes = AsyncMock(return_value=[
+            SupportedAttribute(attr_id=907, indexes=[0]),  # LunarPhasesEnabled
+        ])
         fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
             schedule_points=[],
             intensities=LightIntensityResult({}, diagnostics={
                 "insolation_active": False, "is_night_segment": False,
                 "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 0.5,
             }),
-            schedule_intensity=0.5, lunar_enabled=True, lunar_date=date(2026, 9, 17),
+            schedule_intensity=0.5, lunar_enabled=True, lunar_phase_day=16,
         ))
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
@@ -1128,6 +1131,36 @@ class TestLightPollBatchWiring:
 
         assert coordinator.data["lunar_enabled"] is True
         assert coordinator.data["moon_phase_icon"] is not None
+
+    async def test_lunar_data_hidden_entirely_on_a_light_that_does_not_support_it(self, hass):
+        """Some light models may not expose LunarPhasesEnabled at all --
+        confirmed via supported_attribute_ids, the same mechanism this
+        integration already uses elsewhere to know what a given device
+        actually supports. Never show a control (or a fake reading) for
+        a feature the device genuinely doesn't have, even if
+        light_poll itself somehow reported a value for it."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
+        entry = MagicMock()
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_light_device()
+        fake_device.get_supported_attributes = AsyncMock(return_value=[])  # LunarPhasesEnabled absent
+        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
+            schedule_points=[],
+            intensities=LightIntensityResult({}, diagnostics={
+                "insolation_active": False, "is_night_segment": False,
+                "lunar_enabled": None, "scalar_source": "schedule_intensity", "scalar": 0.5,
+            }),
+            schedule_intensity=0.5, lunar_enabled=True, lunar_phase_day=16,
+        ))
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()
+
+        assert coordinator.data["lunar_supported"] is False
+        assert coordinator.data["lunar_enabled"] is None
+        assert coordinator.data["moon_phase_icon"] is None
 
     async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
         """metadata batch succeeds, but the light-poll batch specifically
