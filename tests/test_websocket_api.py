@@ -925,6 +925,10 @@ async def test_light_group_members_include_resolved_entity_ids(hass):
         "sensor", DOMAIN, "SN1_schedule_intensity", config_entry=entry,
         suggested_object_id="left_schedule_intensity",
     )
+    entity_registry.async_get_or_create(
+        "switch", DOMAIN, "SN1_lunar_phases_enabled", config_entry=entry,
+        suggested_object_id="left_lunar_phases",
+    )
     # Violet's own sensor deliberately left unregistered -- confirms a
     # partially-resolved dict (one real entity_id, one None) rather
     # than an all-or-nothing failure.
@@ -935,6 +939,7 @@ async def test_light_group_members_include_resolved_entity_ids(hass):
         "RoyalBlue": "sensor.left_royalblue_intensity", "Violet": None,
     }
     assert member["schedule_intensity_entity_id"] == "sensor.left_schedule_intensity"
+    assert member["lunar_switch_entity_id"] == "switch.left_lunar_phases"
 
 
 async def test_pump_group_members_include_resolved_entity_ids(hass):

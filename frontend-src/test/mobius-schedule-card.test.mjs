@@ -3226,54 +3226,115 @@ test("light point's own time field shows plain 24-hour with no AM/PM select when
 // this).
 // --------------------------------------------------------------------------
 
-test("shows the moon phase icon when lunar phases are enabled", async () => {
-  const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass({
-    "sensor.left_royalblue": { state: "60", attributes: {} },
-    "sensor.left_schedule_intensity": {
-      state: "59",
-      attributes: { lunar_enabled: true, moon_phase_icon: "mdi:moon-waning-gibbous" },
+function makeLightHassWithLunarSwitch(switchState, intensityAttrs) {
+  const LUNAR_GROUP = {
+    ...LIGHT_GROUP,
+    members: [
+      { ...LIGHT_GROUP.members[0], lunar_switch_entity_id: "switch.left_lunar_phases" },
+      LIGHT_GROUP.members[1],
+    ],
+  };
+  return makeHass({
+    devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    wsResponse: { groups: [LUNAR_GROUP] },
+    states: {
+      "sensor.left_royalblue": { state: "60", attributes: {} },
+      "sensor.left_schedule_intensity": { state: "59", attributes: intensityAttrs ?? {} },
+      "switch.left_lunar_phases": { state: switchState, attributes: {} },
     },
   });
+}
+
+test("no moon toggle at all when this light has no lunar switch entity", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
   await settled(el);
 
-  const icon = el.shadowRoot.querySelector(".moon-phase-icon");
-  assert.ok(icon);
-  assert.equal(icon.getAttribute("icon"), "mdi:moon-waning-gibbous");
+  assert.equal(el.shadowRoot.querySelector(".moon-toggle"), null);
 });
 
-test("no moon phase icon when lunar phases are disabled", async () => {
+test("moon toggle shows the phase icon and 'on' styling when lunar phases are enabled", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass({
-    "sensor.left_royalblue": { state: "60", attributes: {} },
-    "sensor.left_schedule_intensity": {
-      state: "59",
-      attributes: { lunar_enabled: false, moon_phase_icon: "mdi:moon-waning-gibbous" },
-    },
-  });
+  el.hass = makeLightHassWithLunarSwitch("on", { moon_phase_icon: "mdi:moon-waning-gibbous" });
   await settled(el);
 
-  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+  const button = el.shadowRoot.querySelector(".moon-toggle");
+  assert.ok(button);
+  assert.ok(button.classList.contains("on"));
+  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-waning-gibbous");
 });
 
-test("no moon phase icon when lunar_enabled isn't known yet", async () => {
+test("moon toggle shows a dimmed new-moon icon when lunar phases are off", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass({
-    "sensor.left_royalblue": { state: "60", attributes: {} },
-    "sensor.left_schedule_intensity": { state: "59", attributes: {} },
-  });
+  el.hass = makeLightHassWithLunarSwitch("off", { moon_phase_icon: "mdi:moon-waning-gibbous" });
   await settled(el);
 
-  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+  const button = el.shadowRoot.querySelector(".moon-toggle");
+  assert.ok(button);
+  assert.ok(!button.classList.contains("on"));
+  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-new");
 });
 
-test("no moon phase icon when enabled but the phase icon itself is missing", async () => {
+test("clicking the moon toggle calls switch.toggle with the right entity_id", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass({
-    "sensor.left_royalblue": { state: "60", attributes: {} },
-    "sensor.left_schedule_intensity": { state: "59", attributes: { lunar_enabled: true } },
-  });
+  el.hass = makeLightHassWithLunarSwitch("off", {});
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => calls.push({ domain, service, data });
   await settled(el);
 
-  assert.equal(el.shadowRoot.querySelector(".moon-phase-icon"), null);
+  el.shadowRoot.querySelector(".moon-toggle").click();
+  await el.updateComplete;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    domain: "switch",
+    service: "toggle",
+    data: { entity_id: "switch.left_lunar_phases" },
+  });
+});
+
+test("moon toggle shows a spinner and disables itself while the toggle is pending", async () => {
+  let resolveCall;
+  const pending = new Promise((r) => {
+    resolveCall = r;
+  });
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHassWithLunarSwitch("off", {});
+  el.hass.callService = async () => pending;
+  await settled(el);
+
+  const button = el.shadowRoot.querySelector(".moon-toggle");
+  button.click();
+  await el.updateComplete;
+
+  assert.ok(button.disabled);
+  assert.ok(button.querySelector("ha-icon.spin"));
+  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:loading");
+
+  resolveCall();
+  await pending;
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(!button.disabled);
+  assert.equal(el.shadowRoot.querySelector("ha-icon.spin"), null);
+});
+
+test("a failed toggle shows an error message", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHassWithLunarSwitch("off", {});
+  el.hass.callService = async () => {
+    throw new Error("device returned FSCI status Failed setting attribute 907");
+  };
+  await settled(el);
+
+  el.shadowRoot.querySelector(".moon-toggle").click();
+  await el.updateComplete;
+  await Promise.resolve();
+  await Promise.resolve();
+  await el.updateComplete;
+
+  assert.ok(el.shadowRoot.querySelector(".activation-error"));
+  assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed setting attribute 907"));
 });

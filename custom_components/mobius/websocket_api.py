@@ -81,6 +81,12 @@ class ScheduleGroupMember:
     # yet) mean that entity doesn't exist right now, not an error.
     channel_entity_ids: dict[str, str | None] | None = None  # light only
     schedule_intensity_entity_id: str | None = None  # light only
+    # light only -- LunarPhasesEnabledSwitch, so the schedule card can
+    # both read the current on/off state (via hass.states) and toggle
+    # it directly (switch.toggle), matching the app's own "Lunar" chip
+    # on the schedule editor exactly, rather than needing a separate,
+    # standalone HA switch entity elsewhere.
+    lunar_switch_entity_id: str | None = None
     speed_entity_id: str | None = None  # pump only
     flow_entity_id: str | None = None  # pump only
     mode_entity_id: str | None = None  # pump only -- CurrentPumpModeSensor
@@ -110,6 +116,7 @@ class ScheduleGroup:
             if self.kind == "light":
                 d["channel_entity_ids"] = m.channel_entity_ids
                 d["schedule_intensity_entity_id"] = m.schedule_intensity_entity_id
+                d["lunar_switch_entity_id"] = m.lunar_switch_entity_id
             else:
                 d["speed_entity_id"] = m.speed_entity_id
                 d["flow_entity_id"] = m.flow_entity_id
@@ -150,23 +157,28 @@ def _member_device_id(hass: HomeAssistant, entry_id: str, serial: str) -> str | 
     return entry.id if entry is not None else None
 
 
-def _sensor_entity_id(hass: HomeAssistant, serial: str, key: str) -> str | None:
+def _sensor_entity_id(hass: HomeAssistant, serial: str, key: str, domain: str = "sensor") -> str | None:
     """
-    The real entity_id for a sensor.py entity, given the same
-    (serial, key) pair its own unique_id is built from there
-    (f"{serial}_{key}" -- see MobiusEntity's own __init__). A card
+    The real entity_id for an entity of this integration, given the
+    same (serial, key) pair its own unique_id is built from there
+    (f"{serial}_{key}" -- see MobiusEntity's own __init__ for sensor.py
+    entities, or the equivalent pattern in switch.py). A card
     reading live values (current channel intensity, schedule
-    intensity, pump speed/flow) needs the real entity_id to watch via
-    hass.states, not a guessed/reconstructed one -- entity_id is a
-    person-renameable, display-facing identifier, unrelated to
-    unique_id in general, so this goes through the registry rather
-    than assuming any naming relationship between the two. None if
-    this entity doesn't exist (e.g. FlowRateSensor is only created
-    once gph_reliable is confirmed true -- see sensor.py's own
-    async_setup_entry()).
+    intensity, pump speed/flow, or a switch's own on/off state) needs
+    the real entity_id to watch via hass.states, not a guessed/
+    reconstructed one -- entity_id is a person-renameable,
+    display-facing identifier, unrelated to unique_id in general, so
+    this goes through the registry rather than assuming any naming
+    relationship between the two. None if this entity doesn't exist
+    (e.g. FlowRateSensor is only created once gph_reliable is
+    confirmed true -- see sensor.py's own async_setup_entry()).
+
+    domain defaults to "sensor" (the vast majority of callers), but
+    the same (serial, key) unique_id convention holds across every
+    domain this integration creates entities in.
     """
     entity_registry = er.async_get(hass)
-    return entity_registry.async_get_entity_id("sensor", DOMAIN, f"{serial}_{key}")
+    return entity_registry.async_get_entity_id(domain, DOMAIN, f"{serial}_{key}")
 
 
 def _scene_entity_id(hass: HomeAssistant, entry_id: str) -> str | None:
@@ -341,6 +353,7 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
                         for ch in ((coordinator.data or {}).get("channels") or [])
                     },
                     schedule_intensity_entity_id=_sensor_entity_id(hass, serial, "schedule_intensity"),
+                    lunar_switch_entity_id=_sensor_entity_id(hass, serial, "lunar_phases_enabled", domain="switch"),
                 )
                 for serial, coordinator in members
             ],

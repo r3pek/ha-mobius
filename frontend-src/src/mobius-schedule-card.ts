@@ -113,6 +113,7 @@ interface ScheduleGroupMember {
   name: string;
   channel_entity_ids?: Record<string, string | null>;
   schedule_intensity_entity_id?: string | null;
+  lunar_switch_entity_id?: string | null;
   speed_entity_id?: string | null;
   flow_entity_id?: string | null;
   mode_entity_id?: string | null;
@@ -333,6 +334,8 @@ export class MobiusScheduleCard extends LitElement {
   // Cleared once the debounced write itself resolves, so the display
   // reverts to tracking the live entity normally again afterward.
   @state() private _pendingIntensityPercent?: number;
+  @state() private _pendingLunarToggle = false;
+  @state() private _lunarToggleError?: string;
 
   @state() private _channelHistoryByEntity: Record<string, HistoryPoint[]> = {};
   @state() private _historyLoading = false;
@@ -1193,6 +1196,19 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  private async _toggleLunar(entityId: string): Promise<void> {
+    if (this._pendingLunarToggle) return;
+    this._pendingLunarToggle = true;
+    this._lunarToggleError = undefined;
+    try {
+      await this.hass.callService("switch", "toggle", { entity_id: entityId });
+    } catch (err) {
+      this._lunarToggleError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this._pendingLunarToggle = false;
+    }
+  }
+
   private _renderLightGlance() {
     const group = this._group!;
     const { member: sourceMember, unavailableNames } = this._pickAvailableLightMember();
@@ -1202,6 +1218,10 @@ export class MobiusScheduleCard extends LitElement {
     const liveIntensityPercent = intensityState ? Math.round(Number(intensityState.state)) : undefined;
     const displayedIntensityPercent = this._pendingIntensityPercent ?? liveIntensityPercent;
 
+    const lunarSwitchEntityId = sourceMember?.lunar_switch_entity_id;
+    const lunarSwitchState = lunarSwitchEntityId ? this.hass.states[lunarSwitchEntityId] : undefined;
+    const lunarOn = lunarSwitchState?.state === "on";
+
     return html`
       <ha-card>
         <div class="header">
@@ -1210,15 +1230,30 @@ export class MobiusScheduleCard extends LitElement {
             <div class="subtitle">${group.members.map((m) => m.name).join(" + ")}</div>
           </div>
           ${
-            intensityState?.attributes.lunar_enabled === true && intensityState.attributes.moon_phase_icon
-              ? html`<ha-icon
-                  class="moon-phase-icon"
-                  icon=${intensityState.attributes.moon_phase_icon}
-                  title=${localize("schedule_card.lunar_phases_active")}
-                ></ha-icon>`
+            lunarSwitchEntityId
+              ? html`<button
+                  class="moon-toggle ${lunarOn ? "on" : ""}"
+                  ?disabled=${this._pendingLunarToggle}
+                  @click=${() => this._toggleLunar(lunarSwitchEntityId)}
+                  title=${
+                    lunarOn ? localize("schedule_card.lunar_phases_active") : localize("schedule_card.lunar_phases_off")
+                  }
+                >
+                  <ha-icon
+                    icon=${
+                      this._pendingLunarToggle
+                        ? "mdi:loading"
+                        : lunarOn && intensityState?.attributes.moon_phase_icon
+                          ? intensityState.attributes.moon_phase_icon
+                          : "mdi:moon-new"
+                    }
+                    class=${this._pendingLunarToggle ? "spin" : ""}
+                  ></ha-icon>
+                </button>`
               : nothing
           }
         </div>
+        ${this._lunarToggleError ? html`<div class="activation-error">${this._lunarToggleError}</div>` : nothing}
         ${this._renderSceneBanner()}
         ${
           unavailableNames.length > 0
@@ -1817,10 +1852,41 @@ export class MobiusScheduleCard extends LitElement {
       align-items: flex-start;
       gap: 8px;
     }
-    .moon-phase-icon {
-      color: var(--secondary-text-color);
-      --mdc-icon-size: 22px;
+    .moon-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       flex-shrink: 0;
+      border: none;
+      background: none;
+      cursor: pointer;
+      padding: 4px;
+      color: var(--secondary-text-color);
+      border-radius: 50%;
+    }
+    .moon-toggle:hover {
+      background: rgba(0, 0, 0, 0.05);
+    }
+    .moon-toggle:disabled {
+      cursor: default;
+      opacity: 0.6;
+    }
+    .moon-toggle.on {
+      color: var(--primary-color);
+    }
+    .moon-toggle ha-icon {
+      --mdc-icon-size: 22px;
+    }
+    .moon-toggle ha-icon.spin {
+      animation: mobius-spin 1s linear infinite;
+    }
+    .activation-error {
+      margin: 4px 0 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(219, 68, 55, 0.1);
+      color: var(--error-color, #db4437);
+      font-size: 0.85em;
     }
     .title {
       font-size: 1.2em;

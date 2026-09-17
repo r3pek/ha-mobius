@@ -21,6 +21,7 @@
     "light_title": "Light Schedule",
     "pump_title": "Pump Schedule",
     "lunar_phases_active": "Lunar phases active",
+    "lunar_phases_off": "Lunar phases off -- tap to enable",
     "scene_running_instead": "is running instead of the schedule",
     "remaining_suffix": "remaining",
     "speed_not_reliable": "speed (flow reading not reliable on this device)",
