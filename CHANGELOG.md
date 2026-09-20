@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - Fixed the pump card's own device name showing beside "Pump Schedule"
   instead of below it -- a side effect of making the header a flex row
