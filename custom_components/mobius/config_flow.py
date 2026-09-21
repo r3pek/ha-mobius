@@ -32,6 +32,7 @@ from homeassistant.components.bluetooth import (
     async_clear_address_from_match_history,
     async_discovered_service_info,
     async_last_service_info,
+    async_request_active_scan,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -48,6 +49,10 @@ _LOGGER = logging.getLogger(__name__)
 
 def _parsed_info_for(discovery: BluetoothServiceInfoBleak):
     return parse_advertisement(discovery.manufacturer_data)
+
+
+def _is_mobius_named(discovery: BluetoothServiceInfoBleak) -> bool:
+    return bool(discovery.name) and "mobius" in discovery.name.lower()
 
 
 def _title_for(discovery: BluetoothServiceInfoBleak) -> str:
@@ -326,19 +331,23 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._pending_pan_id = info.pan_id
             return await self.async_step_scan_tank()
 
-        already_configured_serials = _configured_serials(self.hass)
-        self._discovered_devices = {
-            discovery.address: discovery
-            for discovery in async_discovered_service_info(self.hass)
-            if discovery.name
-            and "mobius" in discovery.name.lower()
-            # Only devices with a known serial are offered.
-            and (info := _parsed_info_for(discovery)) is not None
-            and info.serial not in already_configured_serials
-        }
+        self._discovered_devices, unreadable = self._unconfigured_devices()
+        if not self._discovered_devices and unreadable:
+            # A Mobius device was heard but none of its advertisements carried
+            # manufacturer data (the serial). The devices put it in the scan
+            # response, which passive scanning never receives, so ask for one
+            # active scan and look again.
+            _LOGGER.debug(
+                "Manual setup: %d Mobius device(s) heard without manufacturer data "
+                "-- requesting an active scan", unreadable,
+            )
+            await async_request_active_scan(self.hass)
+            self._discovered_devices, unreadable = self._unconfigured_devices()
 
         if not self._discovered_devices:
-            return self.async_abort(reason="no_devices_found")
+            # Heard but still unreadable (e.g. only passive scanners, which don't
+            # take part in active scans) is reported separately from "nothing heard".
+            return self.async_abort(reason="no_serial_yet" if unreadable else "no_devices_found")
 
         return self.async_show_form(
             step_id="user",
@@ -353,6 +362,23 @@ class MobiusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
         )
+
+    def _unconfigured_devices(self) -> tuple[dict[str, BluetoothServiceInfoBleak], int]:
+        """Mobius devices in the Bluetooth cache that can be offered for setup
+        (serial known, not configured yet), by address, and the number of
+        Mobius devices heard whose serial isn't known yet."""
+        configured = _configured_serials(self.hass)
+        devices: dict[str, BluetoothServiceInfoBleak] = {}
+        unreadable = 0
+        for discovery in async_discovered_service_info(self.hass):
+            if not _is_mobius_named(discovery):
+                continue
+            info = _parsed_info_for(discovery)
+            if info is None:
+                unreadable += 1
+            elif info.serial not in configured:
+                devices[discovery.address] = discovery
+        return devices, unreadable
 
     def _async_create_entry(self, discovery: BluetoothServiceInfoBleak) -> FlowResult:
         """Creates a single-device entry (CONF_DEVICES with one device, no

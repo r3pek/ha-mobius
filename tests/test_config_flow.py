@@ -345,6 +345,68 @@ async def test_user_step_no_devices_found(hass):
     assert result["reason"] == "no_devices_found"
 
 
+def _name_only_discovery_info(address: str) -> BluetoothServiceInfoBleak:
+    """A Mobius advertisement as received by a passive scanner: name and
+    service UUID, no manufacturer data (the serial is in the scan response)."""
+    info = _make_discovery_info(address, b"")
+    info.manufacturer_data = {}
+    return info
+
+
+async def test_user_step_requests_active_scan_when_serial_unreadable(hass):
+    """A Mobius device heard without manufacturer data triggers one active
+    scan; the device is offered once the scan brings in its serial."""
+    responses = iter([
+        [_name_only_discovery_info(LIGHT_ADDRESS)],
+        [_make_discovery_info(LIGHT_ADDRESS, REAL_LIGHT_PAYLOAD)],
+    ])
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        side_effect=lambda _hass: next(responses),
+    ), patch(
+        "custom_components.mobius.config_flow.async_request_active_scan", new=AsyncMock(),
+    ) as request_scan:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+
+    request_scan.assert_awaited_once()
+    assert result["type"] == FlowResultType.FORM
+    assert list(result["data_schema"].schema[CONF_ADDRESS].container) == [LIGHT_ADDRESS]
+
+
+async def test_user_step_reports_unreadable_serial_after_one_active_scan(hass):
+    """Still no manufacturer data after the scan: one scan only, and a
+    specific abort reason instead of "no devices found"."""
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info",
+        return_value=[_name_only_discovery_info(LIGHT_ADDRESS)],
+    ), patch(
+        "custom_components.mobius.config_flow.async_request_active_scan", new=AsyncMock(),
+    ) as request_scan:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+
+    request_scan.assert_awaited_once()
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "no_serial_yet"
+
+
+async def test_user_step_does_not_scan_when_no_mobius_device_was_heard(hass):
+    with patch(
+        "custom_components.mobius.config_flow.async_discovered_service_info", return_value=[],
+    ), patch(
+        "custom_components.mobius.config_flow.async_request_active_scan", new=AsyncMock(),
+    ) as request_scan:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+
+    request_scan.assert_not_awaited()
+    assert result["reason"] == "no_devices_found"
+
+
 async def test_stale_initial_discovery_refreshes_to_show_real_model(hass):
     """Reproduces a real reported bug: the initial BluetoothServiceInfoBleak
     passed to async_step_bluetooth can have empty/incomplete manufacturer
