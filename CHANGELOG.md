@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Manual setup now runs an active Bluetooth scan when a Mobius device is
+  nearby but its serial number can't be read yet, instead of reporting
+  that no devices were found. If the serial still can't be read, it
+  explains how to fix it.
+- Writes to a device reached through another device (a relayed device) now
+  show an error when the device rejects them.
+- Internal cleanup. Requires the matching python-mobius release.
+
 ## 0.8.0
 
 - Fixed the pump card's own device name showing beside "Pump Schedule"
