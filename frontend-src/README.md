@@ -1,41 +1,19 @@
-# Mobius Lovelace cards
+# Mobius dashboard cards
 
-This directory (`frontend-src/`, at the repo root -- deliberately
-**outside** `custom_components/mobius/`) holds everything needed to
-build the integration's own Lovelace cards. `src/` is the only thing
-anyone should ever hand-edit.
+Source of the integration's dashboard cards (schedule card and scene
+card). Only `src/` is edited by hand.
 
-## Why the build output is never committed
-
-`dist/` (under `../custom_components/mobius/frontend/`) is a generated
-build artifact, produced from `src/` by `npm run build` -- but unlike
-a typical "commit your build output" setup, **it is never checked
-into git at all**, not even alongside `src/`.
-
-This repo's own `hacs.json` sets `zip_release: true`, meaning HACS
-installs from the release's own **zip asset**, not the raw git tree.
-`.forgejo/workflows/release.yml` runs this project's own build as
-part of creating that zip -- `dist/` is produced fresh, exactly once,
-from whatever `src/` is at the tag being released, then baked
-straight into the artifact HACS downloads. Since it's never persisted
-in git between releases, there's no "forgot to rebuild before
-committing" failure mode to guard against at all -- there's nothing
-to go stale.
-
-(A manual install, or CI's own test run, produces the same `dist/`
-locally by running the build directly -- see below. Either way, the
-file that ends up in `custom_components/mobius/frontend/dist/` is
-never something a person hand-edits or commits.)
-
-## Workflow
+The build output (`../custom_components/mobius/frontend/dist/`) is not
+committed. Releases build it and include it in the zip that HACS installs
+(`hacs.json` sets `zip_release: true`; see
+`.forgejo/workflows/release.yml`). For a manual install from the
+repository or for local testing, build it yourself:
 
 ```
-npm install     # once, after cloning
-npm run build   # regenerates ../custom_components/mobius/frontend/dist/
-npm test        # builds, then runs the real card in a jsdom DOM environment
+npm install     # once
+npm run build   # writes ../custom_components/mobius/frontend/dist/
+npm test        # type check, lint, format check, build, then the card tests (jsdom)
 ```
 
-Only `src/` (and this tooling itself) needs committing after a change
--- `npm test` already runs the build first, so CI (see
-`.forgejo/workflows/test.yml`) catches a genuine compile failure the
-same way a local `npm test` would.
+Translations are in `src/localize/languages/`; to add a language, copy
+`en.json` and register it in `src/localize/localize.ts`.
