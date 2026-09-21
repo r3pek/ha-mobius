@@ -1,12 +1,13 @@
 """
-Services for the schedule editor card -- see websocket_api.py's own
-module docstring for the read side, and mobius-schedule-card-
-implementation-plan.md's own "Layer 2" section for the full design.
+Services used by the schedule editor card (the read side is in
+websocket_api.py): write a schedule, or the schedule intensity, to a
+device and every light in its schedule group.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any, Awaitable, Callable
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -14,14 +15,16 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from mobius import (
-    PrimitiveType, LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    C2Attribute, light_schedule_from_dict, pump_schedule_from_dict,
+    min_schedule_capacity, light_schedule_from_dict, pump_schedule_from_dict, primitive_type_from_name, support_tier,
 )
 
+from .const import DOMAIN
 from .coordinator import MobiusDeviceCoordinator
 from .websocket_api import _resolve_member, ScheduleGroupError, _master_hex_for_serial
 
 _LOGGER = logging.getLogger(__name__)
+
+Member = tuple[str, MobiusDeviceCoordinator, Any]
 
 SERVICE_WRITE_SCHEDULE_GROUP = "write_schedule_group"
 
@@ -30,56 +33,36 @@ WRITE_SCHEDULE_GROUP_SCHEMA = vol.Schema({
     vol.Required("points"): [dict],
 })
 
+SERVICE_SET_SCHEDULE_INTENSITY = "set_schedule_intensity"
+
+SET_SCHEDULE_INTENSITY_SCHEMA = vol.Schema({
+    vol.Required("device_id"): cv.string,
+    vol.Required("intensity"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+})
+
 
 def _support_from_primitive_type(primitive_type_name: str | None) -> str:
-    """
-    Same classification coordinator.py's own _fetch_all() already
-    applies to a poll's own primitive_type, but computed from a FRESH
-    get_device_info() read instead of (possibly stale) coordinator.data
-    -- see _live_group_members()'s own docstring for why this write
-    path can't just trust the cached value the way
-    resolve_schedule_groups (the read/metadata side) reasonably does.
-    """
-    if not primitive_type_name:
-        return "unsupported"
-    try:
-        primitive = PrimitiveType[primitive_type_name]
-    except KeyError:
-        return "unsupported"
-    if primitive in LIGHT_PRIMITIVES:
-        return "light"
-    if primitive in PUMP_PRIMITIVES_VERIFIED:
-        return "pump"
-    if primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
-        return "pump (experimental)"
-    return "unsupported"
+    """Support tier from a get_device_info() "primitive_type"."""
+    return support_tier(primitive_type_from_name(primitive_type_name))
 
 
 async def _live_group_members(
     hass: HomeAssistant, target_serial: str, target_coordinator: MobiusDeviceCoordinator,
-) -> tuple[str, list[tuple[str, MobiusDeviceCoordinator, object]]]:
+) -> tuple[str, list[Member]]:
     """
-    Validation rule #5, the hard requirement: re-verify group
-    membership immediately before writing, not just at load time (the
-    resolve_schedule_groups command, by contrast, is fine using
-    coordinator.data -- see that command's own docstring for why).
-    Every candidate light gets its own FRESH get_device_info() call
-    here, not the cached poll data, since group_mask could have
-    changed since this tank's own last poll (up to POLL_INTERVAL
-    seconds stale, or more if that device's own poll has been failing).
+    The target's support tier and the devices a write to it must reach, as
+    [(serial, coordinator, connected_device)], starting with the target.
 
-    Returns (support, members) where members is
-    [(serial, coordinator, connected_device)] for the whole group the
-    target currently belongs to -- always exactly one entry for a
-    pump (no group concept at all), one-or-more for a light. The
-    target's own connected_device is included and reused, not
-    reconnected a second time.
+    Membership is checked with fresh get_device_info() reads right before
+    writing, since group_mask may have changed since the last poll (the
+    read-only resolve_schedule_groups command uses the cached data). A pump
+    is always alone; a light includes every light of the same entry with
+    exactly the same group_mask (a None group_mask never matches another
+    light, see python-mobius 06-light-schedule.md, "Schedule groups").
+    Lights that can't be re-checked are left out.
 
-    Raises HomeAssistantError if the target itself isn't currently
-    reachable, or its own primitive has no real schedule support
-    (validation rule #3, enforced here too since a stale/incorrect
-    assumption about the target's own type would be worse in a write
-    path than in the read-only resolution command).
+    Raises HomeAssistantError if the target can't be reached or has no
+    schedule support.
     """
     target_device = await target_coordinator.async_get_connected_device()
     target_info = await target_device.get_device_info()
@@ -90,64 +73,40 @@ async def _live_group_members(
             f"{target_serial} (support={support!r}) has no confirmed schedule support"
         )
 
-    if support == "pump":
-        return support, [(target_serial, target_coordinator, target_device)]
-
-    # support == "light": find every OTHER light in the same tank
-    # (runtime.coordinators is already scoped to one config entry --
-    # see MobiusRuntimeData's own docstring -- so no separate pan_id
-    # filter is needed here) whose OWN fresh group_mask matches the
-    # target's fresh group_mask exactly. None group_mask is the
-    # target's own exclusive group -- never matched against another
-    # light's own None (see python-mobius's own 06-light-schedule.md
-    # "Schedule groups" section).
+    members: list[Member] = [(target_serial, target_coordinator, target_device)]
     target_group_mask = target_info.get("group_mask")
-    members: list[tuple[str, MobiusDeviceCoordinator, object]] = [
-        (target_serial, target_coordinator, target_device),
-    ]
+    if support == "pump" or target_group_mask is None:
+        return support, members
 
-    if target_group_mask is not None:
-        entry = target_coordinator.config_entry
-        runtime = entry.runtime_data
-        for serial, coordinator in runtime.coordinators.items():
-            if serial == target_serial:
-                continue
-            # Cached data is fine for THIS check only -- primitive_type
-            # (and therefore whether a device is a light at all) is
-            # permanent for a device's whole lifetime, unlike
-            # group_mask, which is what actually needs the fresh
-            # re-check below.
-            if (coordinator.data or {}).get("support") != "light":
-                continue
-            try:
-                candidate_device = await coordinator.async_get_connected_device()
-                candidate_info = await candidate_device.get_device_info()
-            except Exception as e:
-                _LOGGER.warning(
-                    "%s: could not re-verify group membership for %s (%s) -- "
-                    "excluding it from this write rather than risking a write "
-                    "based on stale membership",
-                    target_serial, serial, e,
-                )
-                continue
-            if candidate_info.get("group_mask") == target_group_mask:
-                members.append((serial, coordinator, candidate_device))
+    runtime = target_coordinator.config_entry.runtime_data
+    for serial, coordinator in runtime.coordinators.items():
+        # The cached support tier is enough here: it never changes.
+        if serial == target_serial or (coordinator.data or {}).get("support") != "light":
+            continue
+        try:
+            candidate_device = await coordinator.async_get_connected_device()
+            candidate_info = await candidate_device.get_device_info()
+        except Exception as e:
+            _LOGGER.warning(
+                "%s: could not re-verify group membership for %s (%s) -- "
+                "excluding it from this write rather than risking a write "
+                "based on stale membership",
+                target_serial, serial, e,
+            )
+            continue
+        if candidate_info.get("group_mask") == target_group_mask:
+            members.append((serial, coordinator, candidate_device))
 
     return support, members
 
 
 def _untranslate_parent_serial_to_master(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:
     """
-    The reverse of websocket_api.py's own
-    _translate_master_to_parent_serial() -- mutates `points_dict` in
-    place, replacing "ParentSerial" (a serial number, as read back
-    from the card) with "Master" (the raw hex string
-    pump_schedule_from_dict() itself expects), for every Sync/
-    EcoSmartBack point. Raises HomeAssistantError if a given
-    ParentSerial can't currently be resolved to a known mesh address
-    -- writing a stale/wrong Master value would silently sync this
-    pump to the wrong device (or a since-removed one), a worse
-    outcome than refusing the write outright.
+    The reverse of websocket_api.py's _translate_master_to_parent_serial():
+    replaces each point's "ParentSerial" with the "Master" hex string
+    pump_schedule_from_dict() expects, in place. Raises HomeAssistantError
+    if a parent can't be resolved to a mesh address, rather than syncing the
+    pump to the wrong device.
     """
     for point in points_dict:
         params = point.get("params", {})
@@ -162,47 +121,44 @@ def _untranslate_parent_serial_to_master(points_dict: list[dict], coordinator: M
             params["Master"] = master_hex
 
 
-async def _min_group_capacity(members: list[tuple[str, MobiusDeviceCoordinator, object]], which: int) -> int | None:
-    """
-    Same philosophy as python-mobius's own CLI _min_group_capacity()
-    (mobius.cli) -- the smallest Schedule{which} capacity across every
-    live-verified member, so a too-large schedule can be rejected
-    before writing to ANY of them, rather than partially succeeding
-    across the group. None if no member reports a capacity at all.
-    """
-    schedule_attr = C2Attribute.Schedule1 if which == 1 else C2Attribute.Schedule2
-    capacities = []
-    for serial, coordinator, device in members:
+async def _min_group_capacity(members: list[Member], which: int) -> int | None:
+    """min_schedule_capacity() of `members`."""
+    return await min_schedule_capacity([device for _serial, _coordinator, device in members], which)
+
+
+async def _resolve_group(hass: HomeAssistant, device_id: str) -> tuple[str, MobiusDeviceCoordinator, str, list[Member]]:
+    """(target_serial, target_coordinator, support, members) for a device
+    registry id."""
+    try:
+        target_serial, _runtime, target_coordinator = _resolve_member(hass, device_id)
+    except ScheduleGroupError as e:
+        raise HomeAssistantError(e.message) from e
+    support, members = await _live_group_members(hass, target_serial, target_coordinator)
+    return target_serial, target_coordinator, support, members
+
+
+async def _write_to_members(members: list[Member], write: Callable[[Any], Awaitable[None]], what: str) -> None:
+    """Runs `write` on every member; raises HomeAssistantError listing the
+    failures, if any."""
+    errors: list[str] = []
+    for serial, _coordinator, device in members:
         try:
-            supported = await device.get_supported_attributes()
-        except Exception:
-            continue
-        entry = next((s for s in supported if s.attr_id == int(schedule_attr)), None)
-        if entry is not None:
-            capacities.append(len(entry.indexes))
-    return min(capacities) if capacities else None
+            await write(device)
+        except Exception as e:
+            errors.append(f"{serial}: {e}")
+    if errors:
+        raise HomeAssistantError(
+            f"{what} {len(members) - len(errors)}/{len(members)} device(s) "
+            f"successfully; failed: {'; '.join(errors)}"
+        )
 
 
 async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCall) -> None:
-    """
-    Always Schedule1 -- see websocket_api.py's own
-    handle_read_schedule_group() docstring for why Schedule2 is out of
-    scope for now. Writes to every live-verified group member (all of
-    them for a light group, the one device for a pump) -- never a
-    single device out of a light group, matching this integration's
-    own always-whole-group write behavior (the same rule
-    python-mobius's own CLI already enforces for --load-schedule-file/
-    --load-mob-file).
-    """
-    device_id = call.data["device_id"]
+    """Writes Schedule1 to the target and, for a light, every other light
+    in its schedule group (never to only part of a group). Schedule2 isn't
+    supported yet."""
     points_dict = call.data["points"]
-
-    try:
-        target_serial, runtime, target_coordinator = _resolve_member(hass, device_id)
-    except ScheduleGroupError as e:
-        raise HomeAssistantError(e.message) from e
-
-    support, members = await _live_group_members(hass, target_serial, target_coordinator)
+    _target_serial, target_coordinator, support, members = await _resolve_group(hass, call.data["device_id"])
 
     if support == "light":
         points = light_schedule_from_dict(points_dict)
@@ -215,90 +171,38 @@ async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCa
         raise HomeAssistantError(
             f"{len(points)} point(s) given, but the smallest capacity across "
             f"{len(members)} device(s) in this group is {min_capacity} -- refusing "
-            f"to write, since some group member(s) would reject this schedule "
-            f"entirely (see python-mobius's own set_light_schedule()/"
-            f"set_pump_schedule() docstrings)."
+            f"to write, since some group member(s) would reject this schedule entirely."
         )
 
-    errors: list[str] = []
-    for serial, coordinator, device in members:
-        try:
-            if support == "light":
-                await device.set_light_schedule(points, which=1)
-            else:
-                await device.set_pump_schedule(points, which=1)
-        except Exception as e:
-            errors.append(f"{serial}: {e}")
-
-    if errors:
-        raise HomeAssistantError(
-            f"Wrote to {len(members) - len(errors)}/{len(members)} device(s) "
-            f"successfully; failed: {'; '.join(errors)}"
-        )
-
-
-SERVICE_SET_SCHEDULE_INTENSITY = "set_schedule_intensity"
-
-SET_SCHEDULE_INTENSITY_SCHEMA = vol.Schema({
-    vol.Required("device_id"): cv.string,
-    vol.Required("intensity"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
-})
+    if support == "light":
+        await _write_to_members(members, lambda d: d.set_light_schedule(points, which=1), "Wrote to")
+    else:
+        await _write_to_members(members, lambda d: d.set_pump_schedule(points, which=1), "Wrote to")
 
 
 async def async_handle_set_schedule_intensity(hass: HomeAssistant, call: ServiceCall) -> None:
     """
-    Writes Schedule1Intensity -- the schedule-level master dimmer
-    (see python-mobius's own 06-light-schedule.md), separate from the
-    schedule's own points entirely -- to every live-verified member of
-    the target light's own group (same rule #5 live re-verification
-    _live_group_members() already does for write_schedule_group; no
-    reason a stale/cached group_mask should be trusted any less here
-    than for an actual schedule write). Light-only: a pump has no such
-    concept at all, so a pump target_serial is rejected outright,
-    matching _live_group_members()'s own primitive-support check
-    rather than silently no-op'ing.
-
-    `intensity` is 0-100 (a percentage, matching what a person
-    actually turns on a slider), converted to the 0.0-1.0 fraction
-    set_schedule_intensity() itself expects.
+    Writes Schedule1Intensity (the schedule-level dimmer, see python-mobius
+    06-light-schedule.md) to the target light and every light in its
+    schedule group. `intensity` is 0-100 percent. Rejected for pumps.
     """
-    device_id = call.data["device_id"]
-    intensity_percent = call.data["intensity"]
-
-    try:
-        target_serial, runtime, target_coordinator = _resolve_member(hass, device_id)
-    except ScheduleGroupError as e:
-        raise HomeAssistantError(e.message) from e
-
-    support, members = await _live_group_members(hass, target_serial, target_coordinator)
+    target_serial, _coordinator, support, members = await _resolve_group(hass, call.data["device_id"])
     if support != "light":
         raise HomeAssistantError(
             f"{target_serial} (support={support!r}) has no schedule-level intensity control -- "
             f"this is a light-only concept."
         )
-
-    fraction = intensity_percent / 100.0
-    errors: list[str] = []
-    for serial, coordinator, device in members:
-        try:
-            await device.set_schedule_intensity(fraction, which=1)
-        except Exception as e:
-            errors.append(f"{serial}: {e}")
-
-    if errors:
-        raise HomeAssistantError(
-            f"Set intensity on {len(members) - len(errors)}/{len(members)} device(s) "
-            f"successfully; failed: {'; '.join(errors)}"
-        )
+    fraction = call.data["intensity"] / 100.0
+    await _write_to_members(members, lambda d: d.set_schedule_intensity(fraction, which=1), "Set intensity on")
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Called once from async_setup() -- see __init__.py."""
+    """Registers the services (called from async_setup())."""
     hass.services.async_register(
-        "mobius", SERVICE_WRITE_SCHEDULE_GROUP, lambda call: async_handle_write_schedule_group(hass, call),
+        DOMAIN, SERVICE_WRITE_SCHEDULE_GROUP, lambda call: async_handle_write_schedule_group(hass, call),
         schema=WRITE_SCHEDULE_GROUP_SCHEMA,
     )
     hass.services.async_register(
-        "mobius", SERVICE_SET_SCHEDULE_INTENSITY, lambda call: async_handle_set_schedule_intensity(hass, call),
+        DOMAIN, SERVICE_SET_SCHEDULE_INTENSITY, lambda call: async_handle_set_schedule_intensity(hass, call),
         schema=SET_SCHEDULE_INTENSITY_SCHEMA,
     )

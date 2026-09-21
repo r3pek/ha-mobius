@@ -1,28 +1,10 @@
 """
-Registers the two Lovelace cards designed this session (schedule
-editor, scene selection) as JavaScript modules Home Assistant serves
-and auto-loads, without requiring a person to add a Lovelace resource
-by hand -- see custom-card development guide at
-https://developers.home-assistant.io/docs/frontend/custom-ui/custom-card
-and the "embedding a card in an integration" pattern this follows.
+Serves the Lovelace cards (schedule editor, scene selection) and registers
+them as dashboard resources, so they don't have to be added by hand.
 
-"http" is declared in manifest.json's own after_dependencies (not
-dependencies) -- hassfest requires it be declared one way or the
-other for a component this module actually imports from, but
-after_dependencies only affects setup ORDER (http first, if it's
-being set up anyway), unlike dependencies, which would force http to
-be FULLY set up (including its own component-level async_setup, not
-just importable) before this integration's own setup could proceed
-at all -- and a failure there would then block this integration's
-entire setup (device control, sensors, everything) over what is, for
-this integration, a purely cosmetic, optional feature (a nicer
-Lovelace card; the same devices and data are otherwise fully usable
-through generic entities and cards without it at all). Confirmed via
-a real test run that after_dependencies doesn't reintroduce that
-failure mode the way dependencies did. async_setup_component() below
-is still called directly and defensively regardless, and every step
-here is wrapped so a failure never propagates out to block the rest
-of this integration's own setup.
+Optional: every step is wrapped so a failure never affects the rest of the
+integration. "http" is only an after_dependency in manifest.json, so a
+problem there can't block the integration's setup.
 """
 
 from __future__ import annotations
@@ -42,34 +24,24 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class JSModuleRegistration:
-    """Registers this integration's own Lovelace card JS modules."""
+    """Registers the integration's Lovelace card modules."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.lovelace = self.hass.data.get("lovelace")
 
     async def async_register(self) -> None:
-        """
-        Best-effort only -- see this module's own docstring for why a
-        failure anywhere in here must never propagate. A person who
-        hits this (e.g. "http" itself somehow unavailable, which
-        would be unusual) still gets a fully working integration,
-        just without the nicer card auto-registered; the static path
-        registered below still serves the file regardless, so a
-        manual Lovelace resource (YAML mode, or storage mode where
-        this auto-registration step itself failed) still works.
-        """
+        """Serves the card files and, for storage-mode dashboards, adds
+        them as resources. Never raises; the served files can still be
+        added as resources by hand."""
         try:
             await self._async_register_path()
         except Exception:
             _LOGGER.exception("Failed to register Mobius frontend static path")
             return
 
-        # Auto-adding the Lovelace resource itself only works in
-        # storage mode -- YAML-mode dashboards require a person to
-        # add the resource by hand (see this integration's own
-        # documentation), since YAML-mode resources live in a config
-        # file this integration has no business editing.
+        # Only storage-mode resources can be added; YAML-mode resources are
+        # configured by hand.
         if getattr(self.lovelace, "mode", getattr(self.lovelace, "resource_mode", "yaml")) == "storage":
             try:
                 await self._async_wait_for_lovelace_resources()
@@ -77,11 +49,7 @@ class JSModuleRegistration:
                 _LOGGER.exception("Failed to register Mobius Lovelace card resources")
 
     async def _async_register_path(self) -> None:
-        # "http" is a core component almost always already loaded by
-        # this point in a real HA instance (see this module's own
-        # docstring) -- async_setup_component() itself is a no-op if
-        # so, and only actually does anything on the rarer path where
-        # it genuinely isn't yet.
+        # A no-op when http is already set up.
         if not await async_setup_component(self.hass, "http", {}):
             raise RuntimeError("http component could not be set up")
         try:
@@ -90,19 +58,12 @@ class JSModuleRegistration:
             )
             _LOGGER.debug("Path registered: %s -> %s", URL_BASE, Path(__file__).parent / "dist")
         except RuntimeError:
-            # Already registered -- happens on integration reload
-            # within the same running HA instance, not an error.
+            # Already registered (integration reload).
             _LOGGER.debug("Path already registered: %s", URL_BASE)
 
     async def _async_wait_for_lovelace_resources(self) -> None:
-        """
-        Lovelace's own resource store may not have finished loading
-        yet at the point this integration's own async_setup() runs
-        (both happen early in HA's own startup, in an order this
-        integration doesn't control) -- retries every 5s rather than
-        registering against a not-yet-loaded store, which would
-        silently do nothing.
-        """
+        """Registers the modules once the Lovelace resource store has
+        loaded, checking every 5 s (registering earlier has no effect)."""
         async def _check_loaded(_now: Any) -> None:
             if self.lovelace is None:
                 return

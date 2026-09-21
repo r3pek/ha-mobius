@@ -21,12 +21,9 @@ function lookup(dict: unknown, dottedKey: string): string | undefined {
 }
 
 /**
- * Resolves a dotted key (e.g. "scene_card.title") against the
- * person's own language -- hass.locale.language when available,
- * otherwise the browser's own navigator.language, otherwise "en".
- * Falls back to the English string if the key is missing in the
- * resolved language, and to the key itself (visibly wrong, but never
- * a hard crash) if it's missing from English too.
+ * Resolves a dotted key (e.g. "scene_card.title") in `language`
+ * (hass.locale.language), else the browser language, else English.
+ * Missing keys fall back to English, then to the key itself.
  */
 export function localize(key: keyof FlatKeys, language?: string | null): string {
   const lang = (language || (typeof navigator !== "undefined" ? navigator.language : "en")).split("-")[0].toLowerCase();
@@ -34,10 +31,7 @@ export function localize(key: keyof FlatKeys, language?: string | null): string 
   return lookup(dict, key) ?? lookup(en, key) ?? key;
 }
 
-// A flattened "a.b" key type derived from en.json's own shape, purely
-// so localize()'s own `key` parameter is type-checked against real,
-// existing keys -- a typo is a compile error, not a silent runtime
-// fallback to the raw key string.
+// Every dotted key of en.json, so an unknown key is a compile error.
 type FlattenKeys<T, Prefix extends string = ""> = {
   [K in keyof T & string]: T[K] extends string
     ? `${Prefix}${K}`

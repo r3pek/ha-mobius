@@ -833,11 +833,7 @@ async def test_multi_device_tank_registers_synthetic_tank_device(hass):
 
 
 async def test_single_device_ad_hoc_entry_still_registers_synthetic_tank_device(hass):
-    """Confirmed via reverse engineering the app's own device-onboarding
-    logic: every device always belongs to a
-    real Tank object there, even a lone one -- a fresh device with no
-    existing match gets a brand-new Tank containing just itself, rather
-    than staying tankless. This integration now reflects that: a single,
+    """Like the app, every device belongs to a tank, even a lone one: a single,
     ad-hoc device (no CONF_MLPREFIX at all) still gets its own synthetic
     tank device, using tank_device_identifier()'s own pan_id-based
     fallback since there's no real mesh prefix to key on. Only checks

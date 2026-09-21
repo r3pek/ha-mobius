@@ -1,72 +1,45 @@
 """
-Shared per-pan_id gateway registry.
+Per-pan_id gateway registry.
 
-Multiple physical devices sharing the same pan_id (Thread mesh/"tank",
-matching the app's own tank-grouping model --
-see python-mobius's
-documentation/09-thread-coap-relay.md) share ONE physical BLE connection
-rather than each holding their own. One member of the group is the
-"gateway" (owns a real MobiusConnectionManager, an actual BLE
-connection); every other member relays through it via RelayedMobiusDevice
-(wired in by coordinator.py, not this module -- this module only tracks
-group membership and which serial is currently gateway).
+Devices with the same pan_id (Thread mesh, "tank") share one BLE
+connection. One member of each group is the gateway and owns the connection
+(a MobiusConnectionManager); the other members are reached through it with
+RelayedMobiusDevice (see coordinator.py). This module tracks group
+membership and which member is the gateway.
 
 ## Gateway selection
 
-Whichever device is first to register for a given pan_id becomes
-gateway -- except when a group is brand new and multiple devices are
-registering at roughly the same time (e.g. Home Assistant startup with
-several config entries for the same tank loading concurrently), in which
-case selection waits for a short settle window
-(GATEWAY_ELECTION_SETTLE_SECONDS) so it can pick the best-RSSI candidate
-among whoever showed up in that window, rather than whichever async task
-happened to run first.
-
-Selection happens once per group formation. A better-signal device
-joining an ALREADY-established group later does not displace a working
-gateway -- only GATEWAY_FAILURE_THRESHOLD consecutive gateway failures
-(see record_gateway_failure()) or the gateway leaving the group
-(leave()) triggers a change. Continuously reassigning
-gateway based on signal strength alone would cause unnecessary
-connection churn for a marginal benefit.
+A new group waits GATEWAY_ELECTION_SETTLE_SECONDS for members to join and
+then picks the one with the best RSSI. A member that joins later never
+replaces a working gateway; only GATEWAY_FAILURE_THRESHOLD consecutive
+gateway failures, RELAY_FAILURE_THRESHOLD failed relays to one target, or
+the gateway leaving the group change it.
 
 ## Failover
 
-If the gateway fails GATEWAY_FAILURE_THRESHOLD consecutive poll cycles,
-another member is promoted immediately -- much faster than the general
-per-device mark-unavailable threshold (MARK_UNAVAILABLE_AFTER, handled in
-coordinator.py, not here), since a bad gateway takes its whole group
-down with it. The demoted former gateway becomes a normal relayed member
-of the newly-promoted gateway. If there's no other member to promote to,
-the group is simply left without a gateway -- coordinator.py falls back
-to each remaining member trying its own direct connection, the same as
-if relay didn't exist.
+A failing gateway is replaced by the best-RSSI member that hasn't failed as
+gateway in the current round (recently_failed_gateways), and becomes a
+relayed member. When every member has failed once, a new round starts. A
+group with no other member is left without a gateway.
 
-## pan_id is not assumed fixed
+## Moving between tanks
 
-A device's pan_id can change -- it can be physically moved to a
-different tank. This registry itself doesn't detect that on its own;
-__init__.py's own periodic tank revalidation does (comparing what a
-tank's gateway currently reports its mesh peers to be against what
-each entry's own CONF_DEVICES list says), and handles that
-move at the CONFIG ENTRY level -- removing the device from its old entry's
-device list and merging it into the new one's, then reloading both.
-That reload is what actually moves the device between this registry's
-own groups (the old entry's own teardown calls leave(), the new
-entry's own setup calls join()), not any direct, single registry-level
-operation.
+A device's pan_id can change when it is moved to another tank.
+__init__.py's periodic tank revalidation detects this and moves the device
+between config entries; reloading those entries calls leave() and join().
 """
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from homeassistant.core import HomeAssistant
+
+from mobius import format_mesh_address
 
 from .const import GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
 
@@ -76,116 +49,44 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-def _format_mesh_address(address: Optional[bytes]) -> str:
-    """Human-readable form for log messages only -- the real sensor-
-    facing formatting lives in sensor.py's own MeshAddressSensor; this
-    is deliberately a separate, simpler copy rather than a shared import,
-    since a malformed address (wrong length -- shouldn't normally happen,
-    but this is a logging path, not a data path, so it must never itself
-    raise) should degrade to the raw hex rather than blow up the very
-    debug logging meant to help diagnose a problem."""
-    if address is None:
-        return "unknown"
-    try:
-        return str(ipaddress.IPv6Address(address))
-    except ValueError:
-        return address.hex()
+def _log_address(address: Optional[bytes]) -> str:
+    return format_mesh_address(address) or "unknown"
 
 
 @dataclass
 class MemberState:
-    """One device's membership record within a PanGroup."""
+    """One device's membership in a PanGroup."""
     serial: str
     rssi: Optional[int] = None
-    # Cached once discovered (see coordinator.py's address-discovery
-    # background task) -- this device's own Thread mesh-local IPv6
-    # address, needed to construct a RelayedMobiusDevice targeting it.
+    # Mesh-local IPv6 address, needed to relay to this device.
     mesh_address: Optional[bytes] = None
-    # Refreshed on every one of the gateway's own poll cycles (every
-    # POLL_INTERVAL -- see coordinator.py's own _fetch()), not a one-time
-    # snapshot -- matching the app's own
-    # network-troubleshooting screen: the underlying value this is
-    # computed from (each peer's own "how long since last heard from on
-    # the mesh" duration) is itself a live, continuously-changing value,
-    # not something meaningful to capture once and treat as static. An
-    # absolute, already-computed timestamp (this device was last heard
-    # from AT this moment), not the raw duration -- computed once, right
-    # when the underlying duration is freshest, rather than a raw
-    # duration paired with a separate poll timestamp for every consumer
-    # to redo that subtraction itself.
+    # When the gateway last heard from this device on the mesh, updated on
+    # every gateway poll.
     mesh_last_seen_at: Optional[datetime] = None
-    # How many consecutive RELAYED reads to this specific member have
-    # failed, through whatever gateway currently holds the group --
-    # separate from PanGroup.consecutive_gateway_failures (the
-    # gateway's own DIRECT read failing), since a real production
-    # incident showed these are genuinely different failure modes: a
-    # gateway can be perfectly healthy for its own reads, and for
-    # relaying to SOME other members, while persistently failing to
-    # relay to one specific target for 40+ minutes straight -- see
-    # GatewayRegistry.record_relay_failure()'s own docstring for the
-    # full reasoning and what this actually triggers once it reaches
-    # RELAY_FAILURE_THRESHOLD.
+    # Consecutive failed relayed reads to this device (see
+    # GatewayRegistry.record_relay_failure()).
     consecutive_relay_failures: int = 0
 
 
 @dataclass
 class PanGroup:
-    """One pan_id's worth of shared gateway state."""
+    """Gateway state of one pan_id."""
     pan_id: int
     gateway_serial: Optional[str] = None
     gateway_connection: Optional["MobiusConnectionManager"] = None
     members: dict[str, MemberState] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Only meaningful while non-zero; reset whenever gateway_serial
-    # changes (a fresh gateway starts with a clean slate). Tracked here
-    # rather than on MemberState since it's specifically about the
-    # CURRENT gateway's connection health, not a property of any device
-    # in the abstract.
+    # Consecutive failed reads of the current gateway; reset when the
+    # gateway changes.
     consecutive_gateway_failures: int = 0
-    # Every serial that's been promoted to gateway and then itself gone
-    # on to fail GATEWAY_FAILURE_THRESHOLD times, since the last time
-    # this set grew to cover every member (see _best_candidate()'s own
-    # handling of that case, in _promote_away_from_current_gateway()
-    # below -- the only place this is ever reset). This set is what
-    # prevents promotion from just picking the single best-RSSI member
-    # excluding only the one CURRENTLY failing -- for a tank where two
-    # devices both have much better RSSI than the other two, that would
-    # mean failures ping-pong forever between exactly those two
-    # best-RSSI devices (fail, promote the other; it fails too, promote
-    # back to the first one, since excluding only "the one failing
-    # right now" doesn't stop it being immediately re-eligible), with
-    # the other two members never getting tried at all. This set breaks
-    # that cycle: every member gets a real turn before anyone is
-    # reconsidered.
-    #
-    # Deliberately NOT reset on an ordinary gateway success (a real,
-    # confirmed production bug lived here before this comment existed):
-    # a promoted gateway's own first successful self-poll would
-    # otherwise immediately clear this, making the device it just
-    # replaced eligible again right away -- which is exactly what let
-    # the two best-RSSI members above keep trading the gateway role
-    # back and forth forever, since each one's own brief run of success
-    # kept re-opening the door for the other before either worse-RSSI
-    # member ever got a look in. The only correct reset is a full round:
-    # every member has failed at least once since the last reset.
+    # Members that failed as gateway in the current round. Excluded from
+    # promotion so every member gets a turn instead of the two best-RSSI
+    # members alternating. Only reset once every member has failed (see
+    # _promote_away_from_current_gateway()), not on a success.
     recently_failed_gateways: set[str] = field(default_factory=set)
-    # Bumped every time _assign_gateway() runs (initial election, any
-    # promotion, or leave()'s own reassignment) -- lets a fetch that
-    # started under an OLDER generation recognize, when it eventually
-    # fails, that the gateway state it was acting on has since been
-    # superseded by a concurrent change. See record_gateway_failure()/
-    # record_relay_failure()'s own docstrings for why this matters: a
-    # fetch's failure can arrive well after the promotion that actually
-    # made it meaningless (a relay attempt through a gateway that's
-    # since been torn down doesn't fail instantly just because the
-    # connection died -- it keeps waiting for a response that will
-    # never come until its own, separate timeout elapses), and without
-    # this, that late failure gets misattributed against whatever the
-    # CURRENT gateway happens to be by the time it's finally recorded --
-    # a production incident where the resulting log
-    # line read "gateway X failed to relay to X", and where each such
-    # misattributed failure could itself trigger another promotion,
-    # compounding into a loop that never settles.
+    # Incremented on every gateway assignment. A fetch records the value
+    # when it starts; a failure reported under an older generation belongs
+    # to a gateway that has already been replaced and is ignored.
     generation: int = 0
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
@@ -198,15 +99,9 @@ class PanGroup:
         ]
 
     def serial_for_mesh_suffix(self, suffix: bytes) -> Optional[str]:
-        """The serial of whichever member's own mesh_address ends with
-        this suffix, if any is currently known. Shared home for the
-        resolution websocket_api.py's own _serial_for_master_hex() and
-        coordinator.py's own current_pump_params translation both need --
-        Sync/EcoSmartBack's own "Master" param is the last 8 bytes of
-        the parent pump's own mesh address (see python-mobius's own
-        07-pump-schedule.md), meaningless on its own without this
-        lookup. None if no currently-known member's own mesh_address
-        matches (not cached yet, or genuinely not part of this tank)."""
+        """The member whose mesh_address ends with `suffix` (the
+        Sync/EcoSmartBack Master parameter holds the last 8 bytes of the
+        parent pump's mesh address), or None if unknown."""
         for serial, member in self.members.items():
             if member.mesh_address is not None and member.mesh_address[-len(suffix):] == suffix:
                 return serial
@@ -214,10 +109,8 @@ class PanGroup:
 
 
 class GatewayRegistry:
-    """
-    hass.data-stored singleton (one per Home Assistant instance, not per
-    config entry) tracking every PanGroup. See this module's docstring
-    for the full design.
+    """One instance per Home Assistant instance (in hass.data), tracking every
+    PanGroup. See the module docstring.
     """
 
     def __init__(
@@ -233,53 +126,30 @@ class GatewayRegistry:
         return self._groups.setdefault(pan_id, PanGroup(pan_id=pan_id))
 
     def group(self, pan_id: int) -> Optional[PanGroup]:
-        """Read-only lookup -- returns None if no group exists for this
-        pan_id (nobody has called join() for it yet, or the group was
-        removed after its last member left)."""
+        """The group for `pan_id`, or None if nobody joined it (or its last
+        member left).
+        """
         return self._groups.get(pan_id)
 
     async def join(
         self, pan_id: int, serial: str, rssi: Optional[int] = None,
         prefer_as_gateway: bool = False,
     ) -> PanGroup:
-        """
-        Registers `serial` as a member of `pan_id`'s group, creating the
-        group if it doesn't exist yet. Always returns a group with
-        gateway_serial/gateway_connection populated -- waits for
-        election to complete if this call triggered (or arrived during)
-        a brand-new group's settle window.
+        """Adds `serial` to the group of `pan_id`, creating the group if needed, and
+        returns it once it has a gateway (waiting for the election of a new
+        group).
 
-        `prefer_as_gateway`: set when the caller already has direct,
-        recent proof this specific device is reachable (e.g. the config
-        flow just connected to it to run discover_tank()) -- skips the
-        normal RSSI-based settle-window election entirely for a
-        brand-new group and assigns this serial gateway immediately,
-        rather than waiting GATEWAY_ELECTION_SETTLE_SECONDS to maybe
-        pick a different, equally-untested member by RSSI alone. Only
-        has any effect on a genuinely brand-new group (gateway_serial is
-        still None and no election is already in flight) -- a join()
-        for an already-established group ignores this, since an
-        existing working gateway is never displaced just because a
-        later joiner asks to be preferred (same reasoning
-        GATEWAY_FAILURE_THRESHOLD's own docstring gives for why
-        signal-strength alone doesn't churn an established gateway).
+        prefer_as_gateway: the caller just connected to this device (e.g. the
+        config flow ran discover_tank() on it), so a new group makes it gateway
+        right away instead of running the RSSI election. Ignored for a group that
+        already has a gateway or an election in progress.
         """
         group = self._group_for(pan_id)
         async with group.lock:
             existing = group.members.get(serial)
             if existing is not None:
-                # Update rssi in place rather than replacing the whole
-                # MemberState -- a fresh MemberState() would silently
-                # reset mesh_address back to None on every join(),
-                # including a normal Home Assistant restart (which
-                # re-joins every already-known device), forcing a
-                # redundant rediscovery connection for something that
-                # was almost certainly still accurate. A test
-                # exposed this: the "skip rediscovery if
-                # already cached" optimization in __init__.py's own
-                # async_setup_entry() never actually took effect,
-                # because join() itself had already thrown the cached
-                # value away by the time that check ran.
+                # Keep the existing MemberState (and its cached mesh address) across
+                # rejoins, e.g. after a restart.
                 existing.rssi = rssi
             else:
                 group.members[serial] = MemberState(serial=serial, rssi=rssi)
@@ -308,7 +178,7 @@ class GatewayRegistry:
         await asyncio.sleep(self._election_settle_seconds)
         async with group.lock:
             if group.gateway_serial is not None:
-                return  # shouldn't happen (only one election runs per group), but defensive
+                return
             winner = self._best_candidate(group)
             _LOGGER.debug(
                 "Gateway election for pan_id %#06x settled: %r elected from %s",
@@ -318,9 +188,9 @@ class GatewayRegistry:
             group._gateway_elected.set()
 
     def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:
-        """Highest known RSSI among current members (excluding
-        exclude_serials); falls back to "first available" (dict insertion
-        order) if no member has RSSI info at all."""
+        """The member with the highest known RSSI (excluding exclude_serials), or
+        the first member if none has an RSSI.
+        """
         candidates = group.member_rssi_items(exclude_serials=exclude_serials)
         if not candidates:
             return None
@@ -330,19 +200,11 @@ class GatewayRegistry:
         return candidates[0][0]
 
     def _assign_gateway(self, group: PanGroup, serial: Optional[str]) -> None:
-        """Internal: must be called with group.lock held. Sets up (or
-        clears, if serial is None) group.gateway_serial/gateway_connection
-        and resets the failure counter for the new gateway. Also bumps
-        group.generation unconditionally -- even a "reassignment" to
-        the SAME serial (e.g. leave() re-picking the current gateway
-        because it's still the best candidate) counts as a fresh
-        generation, since the point isn't tracking WHO the gateway is,
-        it's giving every already-in-flight fetch elsewhere a clear,
-        unambiguous signal that whatever they're doing predates this
-        decision -- unconditional is simpler to reason about than
-        trying to special-case "did anything actually change."""
-        # Local import to avoid a circular import -- coordinator.py
-        # imports GatewayRegistry.
+        """Makes `serial` the gateway (None clears it), with a new connection
+        manager and a reset failure counter, and increments group.generation even
+        if the serial didn't change. Must be called with group.lock held.
+        """
+        # Imported here: coordinator.py imports this module.
         from .coordinator import MobiusConnectionManager
 
         group.gateway_serial = serial
@@ -354,12 +216,9 @@ class GatewayRegistry:
         )
 
     async def leave(self, pan_id: int, serial: str) -> None:
-        """
-        Removes `serial` from its group. If it was the gateway, promotes
-        another member (see _best_candidate()) -- if no other member
-        exists, the group's gateway is cleared (nothing left to be
-        gateway of). If the group ends up with no members at all, it's
-        removed entirely.
+        """Removes `serial` from its group. If it was the gateway, the best
+        remaining candidate becomes gateway (or none if no member is left). An
+        empty group is removed.
         """
         group = self._groups.get(pan_id)
         if group is None:
@@ -385,28 +244,12 @@ class GatewayRegistry:
                 self._groups.pop(pan_id, None)
 
     def record_gateway_success(self, pan_id: int) -> None:
-        """Call on every successful gateway read -- resets the
-        consecutive-failure counter only. Does NOT clear
-        recently_failed_gateways (a real, confirmed production bug lived
-        here before this comment existed): clearing it on the very next
-        success meant a promoted gateway's own first successful
-        self-poll immediately made the device it just replaced eligible
-        again, so whenever the two best-RSSI members in a group were
-        each other's own weak link, they traded the gateway role back
-        and forth forever -- neither worse-RSSI member ever got a turn,
-        since the exclusion never survived long enough to force the
-        election past both of them. See PanGroup's own docstring for
-        where the actual reset now happens instead: only once every
-        member has failed at least once since the last full round, not
-        on any single success."""
+        """Resets the gateway's consecutive-failure counter.
+        recently_failed_gateways is kept (see PanGroup).
+        """
         group = self._groups.get(pan_id)
         if group is not None:
             if group.consecutive_gateway_failures > 0:
-                # Only logged when this actually resets a real streak,
-                # not on every single ordinary success -- that happens
-                # every poll cycle for a healthy gateway and would be
-                # pure noise. A recovery after N failures is exactly the
-                # kind of intermittent-trouble signal worth keeping.
                 _LOGGER.debug(
                     "Gateway %r for pan_id %#06x recovered after %d consecutive failure(s)",
                     group.gateway_serial, pan_id, group.consecutive_gateway_failures,
@@ -414,16 +257,12 @@ class GatewayRegistry:
             group.consecutive_gateway_failures = 0
 
     async def _promote_away_from_current_gateway(self, group: PanGroup, reason: str) -> Optional[str]:
-        """Shared promotion logic: excludes the current gateway (and
-        every other recently-failed one) from consideration, assigns
-        the next-best candidate, and disconnects the old connection.
-        Called with group.lock already held by the caller -- both
-        record_gateway_failure() and record_relay_failure() below reuse
-        this exact same machinery, since "route around a bad gateway"
-        is the same operation either way, just triggered by two
-        genuinely different symptoms (see RELAY_FAILURE_THRESHOLD's own
-        docstring for why those are kept as separate counters upstream
-        of this shared call)."""
+        """Replaces the current gateway (adding it to recently_failed_gateways) with
+        the best candidate that hasn't failed this round, and disconnects the old
+        connection. When every member has failed, a new round starts that
+        excludes only the gateway that just failed. Must be called with
+        group.lock held.
+        """
         failing_serial = group.gateway_serial
         old_connection = group.gateway_connection
         if failing_serial is not None:
@@ -431,13 +270,6 @@ class GatewayRegistry:
 
         new_gateway = self._best_candidate(group, exclude_serials=group.recently_failed_gateways)
         if new_gateway is None:
-            # Every member has now failed at least once since the last
-            # success (see PanGroup's own docstring) -- rather than
-            # getting stuck with nothing left to promote at all, give
-            # everyone a clean slate and try again, excluding only the
-            # one that JUST failed (no sense immediately re-picking that
-            # one specifically, but everyone else deserves a fresh look
-            # after a full round).
             _LOGGER.debug(
                 "Every member of pan_id %#06x has now failed since the last success -- "
                 "giving everyone a clean slate (excluding only %r, which just failed)",
@@ -456,34 +288,13 @@ class GatewayRegistry:
         return new_gateway
 
     async def record_gateway_failure(self, pan_id: int, expected_generation: int) -> bool:
-        """
-        Call when the CURRENT gateway's OWN connection/read fails. Returns
-        True if this triggered a promotion (the GATEWAY_FAILURE_THRESHOLDth
-        consecutive failure), False otherwise -- mainly useful for
-        logging/tests; the promotion itself already updates
-        group.gateway_serial/gateway_connection, so callers don't need to
-        branch on the return value to behave correctly.
+        """Records a failed read of the gateway itself. After
+        GATEWAY_FAILURE_THRESHOLD consecutive failures another member is promoted
+        and True is returned.
 
-        expected_generation is the group.generation the caller's own
-        fetch captured back when it STARTED (see coordinator.py's own
-        _fetch()) -- required, not optional, since silently skipping
-        this check is exactly the bug this parameter exists to prevent.
-        If the group has already moved on to a newer generation by the
-        time this failure is finally being recorded (a real
-        production case: a fetch that started before a promotion can
-        still be sitting in its own timeout well after that promotion
-        already happened, since a torn-down connection doesn't make an
-        in-flight read fail instantly), this failure no longer means
-        anything about the group's CURRENT gateway and is dropped
-        entirely -- not counted toward any threshold, and specifically
-        never allowed to trigger a second promotion on top of one
-        that's already superseded it. Returns False in that case, same
-        as an ordinary sub-threshold failure.
-
-        For a RELAYED read to some other member failing, through a
-        gateway whose own reads are still succeeding, see
-        record_relay_failure() below instead -- a genuinely different
-        symptom, deliberately not funneled through this same counter.
+        expected_generation is the group.generation captured when the failing
+        fetch started; if the gateway has changed since, the failure is ignored
+        (returns False).
         """
         group = self._groups.get(pan_id)
         if group is None:
@@ -499,13 +310,6 @@ class GatewayRegistry:
                 return False
             group.consecutive_gateway_failures += 1
             if group.consecutive_gateway_failures < GATEWAY_FAILURE_THRESHOLD:
-                # Every individual failure logged, not just the one that
-                # eventually triggers promotion -- a real gap
-                # in earlier debugging this session: without this, only
-                # the FINAL failure in a run is ever visible, making it
-                # impossible to tell from the logs alone how long trouble
-                # had actually been building, or how often it happens
-                # without quite reaching the threshold.
                 _LOGGER.debug(
                     "Gateway %r for pan_id %#06x failed (%d/%d consecutive)",
                     group.gateway_serial, pan_id,
@@ -519,26 +323,11 @@ class GatewayRegistry:
             return True
 
     async def record_relay_failure(self, pan_id: int, target_serial: str, expected_generation: int) -> bool:
-        """
-        Call when a RELAYED read to target_serial fails, through a
-        gateway whose OWN reads are still succeeding -- see
-        RELAY_FAILURE_THRESHOLD's own docstring in const.py for the full
-        reasoning behind why this exists as a separate mechanism from
-        record_gateway_failure() above, and why forcing a different
-        gateway is genuinely the best recovery lever available here, not
-        just the easiest one.
-
-        expected_generation -- see record_gateway_failure()'s own
-        docstring above for the full reasoning; same staleness check,
-        same reason it's required rather than optional. This is
-        specifically what prevents the production case where
-        a relay attempt that started through the OLD gateway, before a
-        promotion, finally times out and reports a failure -- which by
-        then can read as the (already promoted) NEW gateway "failing to
-        relay to" a target that, confusingly, might even be itself.
-
-        Returns True if this triggered a promotion, matching
-        record_gateway_failure()'s own return-value convention.
+        """Records a failed relayed read to `target_serial` through a gateway whose
+        own reads succeed. After RELAY_FAILURE_THRESHOLD consecutive failures for
+        the same target, another gateway is promoted (it may have a working route)
+        and every member's relay failure count is reset. Returns True when a
+        promotion happened. `expected_generation` as in record_gateway_failure().
         """
         group = self._groups.get(pan_id)
         if group is None:
@@ -567,20 +356,12 @@ class GatewayRegistry:
             await self._promote_away_from_current_gateway(
                 group, f"failed to relay to {target_serial!r} {RELAY_FAILURE_THRESHOLD} consecutive times",
             )
-            # A fresh start for every member's own relay-failure count,
-            # not just target_serial's -- the failure was specific to
-            # the OLD gateway's own route, which may not still be
-            # relevant at all under the newly-promoted one.
             for other_member in group.members.values():
                 other_member.consecutive_relay_failures = 0
             return True
 
     def record_relay_success(self, pan_id: int, target_serial: str) -> None:
-        """Call on every successful RELAYED read -- resets that specific
-        target's own consecutive-failure counter, matching
-        record_gateway_success()'s own reasoning: a real, successful
-        relay means there's no reason to keep counting whatever earlier
-        trouble just ended against this target."""
+        """Resets the relay failure count of `target_serial`."""
         group = self._groups.get(pan_id)
         if group is not None and target_serial in group.members:
             member = group.members[target_serial]
@@ -593,39 +374,25 @@ class GatewayRegistry:
             member.consecutive_relay_failures = 0
 
     def update_mesh_address(self, pan_id: int, serial: str, address: bytes) -> None:
-        """Caches a member's Thread mesh-local IPv6 address (see
-        coordinator.py's on-demand discovery fallback, and the dedicated
-        background prefetch task) -- does nothing if the group or member
-        doesn't (yet) exist. Not gated by the group lock: a cached
-        address is only ever read during a relay attempt, not during
-        gateway selection, so losing a race against a concurrent
-        join()/leave() is harmless."""
+        """Stores a member's mesh-local address. Does nothing for an unknown group
+        or member. Not locked: the address isn't used by gateway selection.
+        """
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
             member = group.members[serial]
             if member.mesh_address != address:
-                # Only logged on an actual CHANGE -- this is called every
-                # poll cycle for every member (coordinator.py's own
-                # _fetch(), plus __init__.py's own periodic
-                # revalidation), so logging every unchanged confirmation
-                # would be pure noise. A None -> known transition
-                # specifically is the "device came back" recovery signal
-                # worth surfacing -- see the real "Could not determine
-                # Thread mesh address" production error this addresses.
                 _LOGGER.debug(
                     "Mesh address for %s (pan_id %#06x): %s -> %s",
                     serial, pan_id,
-                    _format_mesh_address(member.mesh_address), _format_mesh_address(address),
+                    _log_address(member.mesh_address), _log_address(address),
                 )
             member.mesh_address = address
 
     def update_mesh_last_seen(self, pan_id: int, serial: str, last_seen_at: datetime) -> None:
-        """Caches a member's own, freshly-computed "last heard from on
-        the mesh" timestamp -- see coordinator.py's own _fetch(), which
-        calls this for every peer in one shot on each of the gateway's
-        own poll cycles, not per-member. Same reasoning as
-        update_mesh_address() for not gating this by the group lock: only
-        ever read for display, never during gateway selection itself."""
+        """Stores when a member was last heard from on the mesh (see
+        coordinator.py's _refresh_mesh_last_seen()). Not locked, like
+        update_mesh_address().
+        """
         group = self._groups.get(pan_id)
         if group is not None and serial in group.members:
             group.members[serial].mesh_last_seen_at = last_seen_at

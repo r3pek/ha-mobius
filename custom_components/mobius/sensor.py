@@ -1,15 +1,11 @@
 """Sensor entities for Mobius devices.
 
-Read-only for the most part, deliberately -- kept in lockstep with
-what python-mobius itself supports rather than getting ahead of it.
-Scene activation itself is a select.py entity now that python-mobius
-has grown that write support; ConfiguredScenesSensor here stays purely
-informational (how many scene slots this device is actually using).
+Scene activation is a select (select.py); ConfiguredScenesSensor only shows
+how many scene slots are used.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 
 from homeassistant.components.sensor import (
@@ -19,7 +15,6 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -27,169 +22,99 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.unit_conversion import VolumeFlowRateConverter
 from homeassistant.util import dt as dt_util
 
-from mobius import SceneID
+from mobius import format_mesh_address
 
-from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
-from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
+from . import MobiusRuntimeData
+from .const import DOMAIN, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
+from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version, device_display_name, used_scenes
+from .entity import entry_tank_identifier, iter_entry_devices
 
 _LOGGER = logging.getLogger(__name__)
-from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version
-
-
-def _device_info(serial: str, data: dict, address: str | None = None,
-                  sw_version: str | None = None, hw_version: str | None = None,
-                  via_device_id: str | None = None) -> DeviceInfo:
-    """
-    identifiers is SERIAL-based, not BLE-address-based -- a real,
-    necessary fix, not incidental to this integration's move to
-    tank-aware, multi-device config entries: a tank peer never has any
-    stored BLE address in the first place (see config_flow.py's own
-    _async_create_tank_entry() docstring for why), so address can't be
-    the identity for every device anymore. serial is the only
-    identifier guaranteed present either way -- see python-mobius's own
-    documentation/12-device-identity-and-address-stability.md for why
-    it's the right one regardless, not just the only available option
-    here. coordinator.py's own _sync_device_registry_info() must
-    look this device up the same, serial-based way, or it would never
-    find anything to update.
-
-    address, if known (an ad-hoc device's own entry stores it; a tank
-    peer's own entry doesn't), is used only for the connections hint,
-    not identity.
-
-    via_device_id, if given, is the synthetic tank device's own
-    RESOLVED device_registry ID (see __init__.py's own
-    resolve_tank_device_id()) -- produces the "one hub, N child
-    devices" grouping this whole feature was designed against. None
-    for a single, ad-hoc device (no tank to group under). Deliberately
-    a resolved ID, not the tank's own raw identifier tuple (the
-    now-deprecated via_device field took that instead) -- this
-    Home Assistant deprecation turns into a hard error.
-    """
-    custom_name = data.get("name")
-    model = data.get("model")
-
-    # The device's own configured "name" attribute is often blank (one
-    # of our test XR15 lights had an empty name).
-    # Falling back to just the model name alone isn't enough to disambiguate
-    # multiple identical devices (e.g. two XR15 lights would both show the
-    # exact same name) -- append the serial number for a unique, meaningful
-    # fallback that's traceable to the physical unit.
-    if custom_name:
-        name = custom_name
-    elif model and serial:
-        name = f"{model} ({serial})"
-    elif model:
-        name = model
-    elif serial:
-        name = f"Mobius device ({serial})"
-    else:
-        name = "Mobius device"
-
-    return DeviceInfo(
-        identifiers={(DOMAIN, serial)},
-        connections={("bluetooth", address)} if address else set(),
-        name=name,
-        manufacturer=data.get("manufacturer"),
-        model=model,
-        serial_number=serial,
-        sw_version=sw_version,
-        hw_version=hw_version,
-        via_device_id=via_device_id,
-    )
 
 
 class MobiusEntity(CoordinatorEntity[MobiusDeviceCoordinator], SensorEntity):
-    """Base for every Mobius sensor -- one coordinator per device now
-    (status and schedule data both come from the same read cycle), unlike
-    the earlier two-tier design."""
+    """Base of every per-device Mobius sensor. unique_id is
+    "{serial}_{key}"."""
 
     _attr_has_entity_name = True
 
     def __init__(self, coordinator: MobiusDeviceCoordinator, serial: str, key: str,
-                 description: SensorEntityDescription, device_info: DeviceInfo) -> None:
+                 description: SensorEntityDescription, device_info: DeviceInfo,
+                 diagnostic: bool = False) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._serial = serial
-        # SERIAL-based, not address-based -- see _device_info()'s own
-        # docstring for why this had to change (a tank peer has no
-        # stored address at all, so it couldn't be the basis for
-        # unique_id for every device anymore either).
         self._attr_unique_id = f"{serial}_{key}"
         self._attr_device_info = device_info
+        # Set on the entity rather than the description: some Home Assistant
+        # versions returned a plain str from the description.
+        if diagnostic:
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def data(self) -> dict:
+        return self.coordinator.data or {}
 
     @property
     def available(self) -> bool:
         return super().available and self.coordinator.data is not None
 
 
-class SupportTierSensor(MobiusEntity):
-    """Diagnostic: which support tier this device falls into (light/pump/unsupported)."""
+class _DataKeySensor(MobiusEntity):
+    """A sensor whose state is coordinator.data[key]."""
+
+    _key: str
+    _icon: str
+    _diagnostic = False
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
-            coordinator, serial, "support",
-            SensorEntityDescription(key="support", translation_key="support", icon="mdi:list-status"),
-            device_info,
+            coordinator, serial, self._key,
+            SensorEntityDescription(key=self._key, translation_key=self._key, icon=self._icon),
+            device_info, diagnostic=self._diagnostic,
         )
-        # Set directly rather than via SensorEntityDescription -- observed
-        # HA (at least 2025.1.4) returning a plain str instead of the
-        # EntityCategory enum when set through entity_description in some
-        # cases; this path is documented as reliable regardless.
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def native_value(self):
-        return (self.coordinator.data or {}).get("support")
+        return self.data.get(self._key)
+
+
+class SupportTierSensor(_DataKeySensor):
+    """Support tier of the device (light/pump/unsupported)."""
+    _key, _icon, _diagnostic = "support", "mdi:list-status", True
 
     @property
     def extra_state_attributes(self):
-        data = self.coordinator.data or {}
-        attrs = {}
-        if "support_note" in data:
-            attrs["support_note"] = data["support_note"]
-        return attrs
+        return {"support_note": self.data["support_note"]} if "support_note" in self.data else {}
 
 
-class ErrorStateSensor(MobiusEntity):
-    def __init__(self, coordinator, serial, device_info):
-        super().__init__(
-            coordinator, serial, "error_state",
-            SensorEntityDescription(
-                key="error_state", translation_key="error_state", icon="mdi:alert-circle-outline",
-            ),
-            device_info,
-        )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    @property
-    def native_value(self):
-        return (self.coordinator.data or {}).get("error_state")
+class ErrorStateSensor(_DataKeySensor):
+    _key, _icon, _diagnostic = "error_state", "mdi:alert-circle-outline", True
 
 
-class OperationStateSensor(MobiusEntity):
-    """Pump/light devices only -- OperationState (Schedule/Scene/LiveDemo/OOB)."""
+class OperationStateSensor(_DataKeySensor):
+    """OperationState (Schedule/Scene/LiveDemo/OOB)."""
+    _key, _icon = "operation_state", "mdi:state-machine"
 
-    def __init__(self, coordinator, serial, device_info):
-        super().__init__(
-            coordinator, serial, "operation_state",
-            SensorEntityDescription(
-                key="operation_state", translation_key="operation_state", icon="mdi:state-machine",
-            ),
-            device_info,
-        )
+
+class SchedulePointCountSensor(_DataKeySensor):
+    _key, _icon, _diagnostic = "schedule_point_count", "mdi:calendar-clock", True
+
+
+class CurrentPumpModeSensor(_DataKeySensor):
+    """Mode of the active pump schedule block; its parameters are
+    attributes."""
+    _key, _icon = "current_pump_mode", "mdi:waves"
 
     @property
-    def native_value(self):
-        return (self.coordinator.data or {}).get("operation_state")
+    def extra_state_attributes(self):
+        return self.data.get("current_pump_params") or {}
 
 
 class MotorSpeedSensor(MobiusEntity):
-    """Pump devices only. Per the decompiled app's own display
-    code (see python-mobius documentation/03), a percentage of max
-    pump power, not RPM. Uses speed_percent (always non-negative); the raw
-    signed value (sign encodes reverse-rotation direction) is exposed as an
-    attribute rather than the primary state."""
+    """Pump speed as a percentage of maximum power (speed_percent, never
+    negative). The signed raw value (negative = reverse) is an attribute.
+    """
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
@@ -216,58 +141,13 @@ class MotorSpeedSensor(MobiusEntity):
 
 
 class FlowRateSensor(MobiusEntity):
-    """Pump devices only. Estimated flow (GPH), matching what the app itself displays.
+    """Pump flow (GPH). Only created when get_pump_telemetry() reports
+    gph_reliable (the app doesn't show flow otherwise).
 
-    Only created when python-mobius's own get_pump_telemetry() reports
-    gph_reliable=True for this device (see _build_type_specific_entities()'s
-    own comment, and that method's docstring in python-mobius, for the
-    full picture) -- a device the app itself wouldn't trust a raw
-    gph reading for (no supported flow range) doesn't get this entity
-    at all, rather than showing a number the app itself would never
-    display.
-
-    Exposes flow_reliable/minimum_flow/maximum_flow as this entity's own
-    extra state attributes -- named generically ("flow", not "gph"),
-    deliberately not matching python-mobius's own gph-prefixed dict keys
-    one-to-one: this entity's own native_unit_of_measurement can be
-    overridden per-entity to something other than gal/h (see below), and
-    these attribute names shouldn't be locked to a specific unit that
-    might no longer match what's actually displayed.
-
-    minimum_flow/maximum_flow are actively converted (via
-    VolumeFlowRateConverter, the same converter HA's own SensorEntity
-    uses internally) to whatever unit is CURRENTLY effectively displayed
-    -- i.e. self.unit_of_measurement, which accounts for a per-entity
-    override, not native_unit_of_measurement, which never changes.
-    This matters because HA's own native_value -> state
-    conversion (see below) does NOT extend to extra_state_attributes at
-    all -- these are plain values an integration returns directly, with
-    no framework involvement -- so without this, overriding this
-    entity's own display unit (e.g. to L/h) converts the visible state
-    correctly but silently leaves minimum_flow/maximum_flow in gal/h,
-    unconverted and unlabeled as such.
-
-    native_unit_of_measurement stays "gal/h" -- that's the actual native
-    value the protocol reports, not a display preference.
-
-    Per HA's own source (homeassistant/components/
-    sensor/__init__.py and homeassistant/util/unit_system.py): unlike
-    temperature/length/pressure, `volume_flow_rate` is NOT one of the
-    device classes tied to HA's system-wide Metric/US Customary toggle
-    (Settings -> General -> Unit System) -- that toggle has no effect on
-    this sensor at all. device_class=VOLUME_FLOW_RATE does register real
-    conversion machinery (VolumeFlowRateConverter), but
-    it's only invoked via a PER-ENTITY manual override stored in the entity
-    registry (Settings -> Devices & Services -> Entities -> this entity ->
-    gear icon -> "Unit of measurement"), not automatically from any
-    system-wide preference. If you want L/h (or any other unit) displayed,
-    set it there -- there's no code-level "default" to change.
-
-    'gal/h' is a valid VOLUME_FLOW_RATE unit on HA 2026.06
-    (current docs list it); it was NOT valid on HA 2025.1.4 (the version
-    pinned by this repo's test harness) -- exact cutoff version between
-    those two isn't pinned down, so if you're running something older than
-    ~2026, double check this still validates.
+    The native unit is gal/h. volume_flow_rate isn't affected by Home
+    Assistant's unit system; another unit can be chosen per entity. The
+    flow_reliable/minimum_flow/maximum_flow attributes are converted to the
+    unit currently displayed, because Home Assistant only converts the state.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -293,17 +173,7 @@ class FlowRateSensor(MobiusEntity):
         maximum_flow = telemetry.get("maximum_gph")
         attributes = {"flow_reliable": telemetry.get("gph_reliable")}
         if minimum_flow is not None or maximum_flow is not None:
-            # HA's own native_value -> state unit conversion (see this
-            # class's own docstring) does NOT extend to
-            # extra_state_attributes -- these are plain values this
-            # integration returns directly, with no involvement from HA's
-            # conversion framework at all. self.unit_of_measurement (NOT
-            # native_unit_of_measurement) is the currently-EFFECTIVE unit,
-            # accounting for any per-entity override the user has set
-            # (see this class's own docstring on how) -- converting these
-            # two values here, manually, the same way HA's own `state`
-            # property converts native_value, keeps them consistent with
-            # whatever unit the entity's own state is actually showing.
+            # Converted manually to the displayed unit (see the class docstring).
             display_unit = self.unit_of_measurement
             native_unit = self.native_unit_of_measurement
             if minimum_flow is not None:
@@ -315,37 +185,14 @@ class FlowRateSensor(MobiusEntity):
         return attributes
 
 
-class SchedulePointCountSensor(MobiusEntity):
-    def __init__(self, coordinator, serial, device_info):
-        super().__init__(
-            coordinator, serial, "schedule_point_count",
-            SensorEntityDescription(
-                key="schedule_point_count", translation_key="schedule_point_count",
-                icon="mdi:calendar-clock",
-            ),
-            device_info,
-        )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    @property
-    def native_value(self):
-        return (self.coordinator.data or {}).get("schedule_point_count")
-
-
 def _used_scenes(coordinator) -> list:
-    """Every configured scene except a genuinely empty/unused slot
-    (EmptyScene id with no name at all)."""
-    scenes = (coordinator.data or {}).get("configured_scenes") or []
-    return [s for s in scenes if not (s.scene_type == SceneID.EmptyScene and not s.name)]
+    return used_scenes(coordinator.data or {})
 
 
 class ConfiguredScenesSensor(MobiusEntity):
-    """State is how many of this device's own scene slots are actually
-    used, not the device's own total capacity (a real difference --
-    that capacity itself is device-reported and can vary by device
-    type, see total_slots below). Kept deliberately compact regardless
-    of channel count: each scene's own light/pump payload never
-    appears here, only its index/name/type."""
+    """Number of used scene slots; total_slots and a compact list of the used
+    scenes are attributes.
+    """
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
@@ -353,9 +200,8 @@ class ConfiguredScenesSensor(MobiusEntity):
             SensorEntityDescription(
                 key="configured_scenes", translation_key="configured_scenes", icon="mdi:palette-swatch",
             ),
-            device_info,
+            device_info, diagnostic=True,
         )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def native_value(self):
@@ -373,56 +219,12 @@ class ConfiguredScenesSensor(MobiusEntity):
         }
 
 
-class CurrentPumpModeSensor(MobiusEntity):
-    """Pump devices only -- the currently active schedule block's mode."""
-
-    def __init__(self, coordinator, serial, device_info):
-        super().__init__(
-            coordinator, serial, "current_pump_mode",
-            SensorEntityDescription(
-                key="current_pump_mode", translation_key="current_pump_mode", icon="mdi:waves",
-            ),
-            device_info,
-        )
-
-    @property
-    def native_value(self):
-        return (self.coordinator.data or {}).get("current_pump_mode")
-
-    @property
-    def extra_state_attributes(self):
-        return (self.coordinator.data or {}).get("current_pump_params") or {}
-
-
 class LightChannelIntensitySensor(MobiusEntity):
-    """
-    Light devices only -- one entity per channel, current interpolated
-    intensity in %.
+    """Current intensity of one light channel, in whole percent.
 
-    Whole numbers, not decimals -- the underlying raw value is itself
-    only ever a coarse permille figure (matching the schedule/interpolation
-    granularity), so a fractional percent doesn't represent any real
-    additional precision; it's just noise. suggested_display_precision=0
-    is a frontend display hint (a user could still override it per-entity
-    in HA's own UI) -- native_value itself also returns a true int
-    (round() with no second argument, not round(x, 0) which would still
-    be a float like 100.0), so the underlying state/history is whole
-    numbers too, not just the display.
-
-    VisualID.Brightness's own display name is overridden to "Point" here
-    (giving "Point intensity", not "Brightness intensity") -- the app's
-    own UI calls this channel Point Intensity, not Brightness; showing
-    "Brightness intensity" here read as a near-duplicate of
-    ScheduleIntensitySensor's own "Schedule intensity" (both scale
-    every other channel, at different granularities -- see
-    python-mobius's own 06-light-schedule.md for the actual
-    per-point-vs-whole-schedule distinction between the two), risking
-    real confusion about which one is which. _channel_name itself
-    (used to look up current_intensities) and unique_id/key (both still
-    literally "brightness") are deliberately untouched -- those are
-    wire-level/identity concerns, not display ones, and changing
-    unique_id would delete and recreate this entity for anyone who
-    already has it, losing its history.
+    The Brightness channel is shown as "Point" (the app's name for it), so it
+    isn't confused with ScheduleIntensitySensor; its key and unique_id stay
+    "brightness".
     """
 
     _DISPLAY_NAME_OVERRIDES = {"Brightness": "Point"}
@@ -452,18 +254,10 @@ class LightChannelIntensitySensor(MobiusEntity):
 
 
 class ScheduleIntensitySensor(MobiusEntity):
-    """
-    Light devices only -- Schedule1Intensity (see python-mobius's own
-    06-light-schedule.md), a schedule-level master dimmer applied on
-    top of every channel's own interpolated value, separate from the
-    schedule's own points entirely. A distinct entity from
-    LightChannelIntensitySensor (which reports each channel's own
-    fully-modified current output) -- this is specifically the one
-    scalar mobius.set_schedule_intensity itself writes, exposed here so
-    a schedule editor card's own "overall intensity" control has a
-    real entity to read reactively via hass.states, rather than being
-    stuck with a stale snapshot from whenever it last called
-    resolve_schedule_groups.
+    """Schedule1Intensity: the schedule-level dimmer applied on top of every
+    channel (see python-mobius 06-light-schedule.md), in percent. Used by the
+    schedule card to follow the value live. lunar_enabled and moon_phase_icon
+    are attributes.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -489,27 +283,17 @@ class ScheduleIntensitySensor(MobiusEntity):
 
 
 class CalibrationSensor(MobiusEntity):
-    """
-    Light devices only -- per the app's
-    own UI gating (its own device category check), a light feature; pumps don't
-    expose this (get_calibration_info() returns None for them, per
-    VorTech hardware). Only added to a config entry if
-    calibration data was actually present at setup -- see
-    async_setup_entry() below.
-
-    State is whether calibration has completed (True/False); the last
-    calibration date and calibrated speed bounds (if available) are
-    exposed as attributes rather than separate entities, since they're
-    supplementary detail to the main completed/not-completed status.
+    """Whether light calibration has completed; the last calibration time and
+    calibrated bounds are attributes. Only created when calibration data is
+    available at setup (pumps don't support it).
     """
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
             coordinator, serial, "calibration",
             SensorEntityDescription(key="calibration", translation_key="calibration", icon="mdi:tune"),
-            device_info,
+            device_info, diagnostic=True,
         )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def available(self) -> bool:
@@ -534,16 +318,9 @@ class CalibrationSensor(MobiusEntity):
 
 
 class FirmwareVersionSensor(MobiusEntity):
-    """
-    Diagnostic: the same headline value already shown as sw_version on
-    Home Assistant's own built-in device info card (that label -- always
-    "Firmware", not customizable per-integration -- comes from Home
-    Assistant itself, not this entity), but as a first-class entity with
-    the full per-component breakdown available as attributes -- e.g.
-    "Radio Firmware"/"Filesystem"/"Radio OS"/"Radio"/"WLAN"/"Product OS"/
-    "Product Bootloader" for a light, not just the single "Firmware"
-    value derive_sw_version() picks as most representative. See
-    coordinator.py's derive_sw_version() for the label priority.
+    """The firmware version shown as the device's sw_version (see
+    derive_sw_version()), with every firmware component and the supported
+    attribute names as attributes.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -552,9 +329,8 @@ class FirmwareVersionSensor(MobiusEntity):
             SensorEntityDescription(
                 key="firmware_version", translation_key="firmware_version", icon="mdi:chip",
             ),
-            device_info,
+            device_info, diagnostic=True,
         )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def native_value(self):
@@ -570,19 +346,8 @@ class FirmwareVersionSensor(MobiusEntity):
 
 
 class HardwareRevisionSensor(MobiusEntity):
-    """
-    Diagnostic: the same headline value already shown as hw_version on
-    Home Assistant's own built-in device info card (labeled "Hardware" --
-    not customizable per-integration), but as a first-class entity with
-    the full per-field breakdown available as attributes.
-
-    Requires python-mobius>=0.3.0: as of that version,
-    get_hardware_info() already decodes Color/ProductType/RadioType/
-    MotorType into their own display label strings (e.g.
-    "White"/"VorTech"/"QCA4020"/"VorTech MP40 G3" -- each is itself a
-    known enum with display labels, see that library's
-    mobius.constants), and Revision/Segments as plain integers -- used
-    directly here, not re-decoded.
+    """The hardware revision shown as hw_version, with every HardwareRevision
+    field (labels for the enum fields) as attributes.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -591,9 +356,8 @@ class HardwareRevisionSensor(MobiusEntity):
             SensorEntityDescription(
                 key="hardware_revision", translation_key="hardware_revision", icon="mdi:developer-board",
             ),
-            device_info,
+            device_info, diagnostic=True,
         )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def native_value(self):
@@ -605,33 +369,10 @@ class HardwareRevisionSensor(MobiusEntity):
 
 
 class MeshAddressSensor(MobiusEntity):
-    """
-    Diagnostic: this device's own Thread mesh-local IPv6 address, from
-    the gateway registry's own live cache (gateway_registry.MemberState.
-    mesh_address) -- NOT read from coordinator.data, since address
-    discovery isn't part of the normal poll cycle's own fetched data.
-    Populated for every device (gateway included) at setup -- see
-    __init__.py's own async_setup_entry() docstring for why the gateway
-    needed a deliberate fix to get this too, since nothing else in
-    normal operation ever populates a gateway's own address in the
-    registry (relay has no need to know it).
-
-    Unavailable (native_value None) until that discovery has actually
-    succeeded at least once -- for a relayed device, this can briefly
-    lag behind the device's own other sensors becoming available (which
-    only need the GATEWAY's connection to be up, not this specific
-    device's own address to already be known) -- not a bug, just the
-    two becoming available on slightly different schedules.
-
-    Also carries this device's own "last seen on the mesh" timestamp as
-    an attribute (last_seen), folded in here rather than as its own
-    separate sensor entity, since the two are closely related diagnostic
-    facts about the same underlying mesh connectivity, not independently
-    meaningful enough to justify a whole extra entity each. Refreshed on
-    the same schedule as every other poll-driven sensor (every poll
-    cycle, for every device -- see coordinator.py's own _fetch()), read
-    directly from coordinator.data here rather than the registry, since
-    that's where it's actually written each cycle.
+    """The device's mesh-local IPv6 address, from the gateway registry (address
+    discovery isn't part of the poll data). Unknown until discovered, which
+    for a relayed device can happen after its other sensors are available.
+    The time the device was last heard on the mesh is the last_seen attribute.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -640,9 +381,8 @@ class MeshAddressSensor(MobiusEntity):
             SensorEntityDescription(
                 key="mesh_address", translation_key="mesh_address", icon="mdi:ip-network-outline",
             ),
-            device_info,
+            device_info, diagnostic=True,
         )
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def native_value(self):
@@ -650,13 +390,7 @@ class MeshAddressSensor(MobiusEntity):
         if group is None:
             return None
         member = group.members.get(self.coordinator.serial)
-        if member is None or member.mesh_address is None:
-            return None
-        # A Thread mesh-local IPv6 address (16 raw bytes, per
-        # python-mobius's own wire-format documentation) -- format it
-        # as one (standard colon-separated, zero-compressed notation via
-        # the stdlib ipaddress module), not raw hex.
-        return str(ipaddress.IPv6Address(member.mesh_address))
+        return format_mesh_address(member.mesh_address) if member is not None else None
 
     @property
     def extra_state_attributes(self):
@@ -667,17 +401,8 @@ class MeshAddressSensor(MobiusEntity):
 
 
 class MeshPrefixSensor(SensorEntity):
-    """
-    Diagnostic: the tank's own shared 8-byte Thread mesh-local prefix
-    (see python-mobius's mobius.discovery.discover_tank()) -- attached
-    to the synthetic TANK device itself (see __init__.py's
-    tank_device_identifier()/_register_tank_device()), not any one real
-    device, since it's shared by every device on the tank, not a
-    per-device property. A plain SensorEntity, not MobiusEntity -- no
-    coordinator of its own to poll (the value is fixed at tank-creation
-    time and stored directly in the config entry, see config_flow.py's
-    own _async_create_tank_entry()), so there's nothing to subscribe to
-    for updates; always available once created.
+    """The tank's shared mesh-local prefix, on the tank device. The value is
+    fixed in the config entry, so there is nothing to poll.
     """
 
     _attr_has_entity_name = True
@@ -698,35 +423,10 @@ class MeshPrefixSensor(SensorEntity):
 
 
 class GatewayDeviceSensor(SensorEntity):
-    """
-    Diagnostic: which of this tank's devices currently holds the actual
-    BLE connection and relays for the others -- attached to the
-    synthetic TANK device itself (see MeshPrefixSensor's own docstring
-    for why), since which device this is can change over the tank's
-    lifetime (gateway failover -- see gateway_registry.py's own
-    GATEWAY_FAILURE_THRESHOLD) and isn't a property of any one real
-    device.
-
-    Shows the gateway device's own configured NAME, not its serial --
-    that name is already fetched fresh on every single poll cycle (on
-    a coordinator's own first poll, via get_device_info() directly; on
-    every poll after that, via get_full_poll_batch()'s own device_info
-    field instead -- either way, coordinator.py's own _fetch_all()
-    never skips it), so a rename in the Mobius app itself shows up
-    here within one normal poll interval, same as everywhere else in
-    this integration -- no separate polling needed for this specifically.
-    Falls back to "{model} ({serial})" if the device has no configured
-    name (matching _device_info()'s own fallback chain), or to the bare
-    serial if this integration doesn't have any data for that device at
-    all yet (shouldn't normally happen, since every device in
-    CONF_DEVICES always gets its own coordinator).
-
-    Not a MobiusEntity/CoordinatorEntity tied to one single coordinator
-    -- the gateway can be reported by whichever of the tank's devices
-    happens to poll next, not always the same one, so this listens to
-    ALL of the tank's own coordinators (via each one's own
-    async_add_listener(), the same "notify on any update" mechanism
-    DataUpdateCoordinator already exposes) rather than just one.
+    """Which device of the tank currently holds the connection (the gateway),
+    on the tank device. Shows the gateway's name (else "{model} ({serial})",
+    else the serial), with the serial as an attribute. Listens to every
+    coordinator of the tank, since the gateway can change with failover.
     """
 
     _attr_has_entity_name = True
@@ -750,12 +450,7 @@ class GatewayDeviceSensor(SensorEntity):
         await super().async_added_to_hass()
         for coordinator in self._coordinators.values():
             self.async_on_remove(coordinator.async_add_listener(self._handle_any_coordinator_update))
-        # Written once immediately, rather than waiting for the first of
-        # potentially several devices' own next poll cycle to complete --
-        # the gateway is very likely already known right after setup
-        # (registry.join() runs before any of this platform's own entities
-        # are even created), so there's no reason to show unavailable
-        # until then.
+        # The gateway is known right after setup, so write the state now.
         self.async_write_ha_state()
 
     def _handle_any_coordinator_update(self) -> None:
@@ -773,14 +468,7 @@ class GatewayDeviceSensor(SensorEntity):
         if serial is None:
             return None
         coordinator = self._coordinators.get(serial)
-        data = (coordinator.data if coordinator else None) or {}
-        name = data.get("name")
-        if name:
-            return name
-        model = data.get("model")
-        if model:
-            return f"{model} ({serial})"
-        return serial
+        return device_display_name(serial, (coordinator.data if coordinator else None) or {}) or serial
 
     @property
     def extra_state_attributes(self):
@@ -791,29 +479,18 @@ class GatewayDeviceSensor(SensorEntity):
 
 
 def _build_type_specific_entities(coordinator, serial, device_info, support, data) -> list[SensorEntity]:
-    """The pump-or-light-specific entities for one device, given its
-    CURRENT support/data snapshot -- split out from async_setup_entry()
-    below so _async_ensure_sensors_exist() (in __init__.py) can reuse
-    the exact same logic later, for a device whose data wasn't ready
-    yet the first time this ran. See that function's own docstring for
-    the full story of why a second call, later, with fresher data, is
-    sometimes necessary at all."""
+    """The pump- or light-specific sensors for one device from its current
+    data. Also used by __init__.py's _async_ensure_sensors_exist() to create
+    sensors missed at setup.
+    """
     if support.startswith("pump"):
         entities: list[SensorEntity] = [
             OperationStateSensor(coordinator, serial, device_info),
             MotorSpeedSensor(coordinator, serial, device_info),
             CurrentPumpModeSensor(coordinator, serial, device_info),
         ]
-        # Per the app's own support-check logic for its live
-        # flow gauge (see get_pump_telemetry()'s own docstring in
-        # python-mobius): the app itself doesn't trust or display a raw
-        # gph reading without a supported flow range (with a narrow
-        # exception for a few old Nero pumps) -- there's no reason for
-        # this integration to expose a sensor for a value the app
-        # itself wouldn't show. gph_reliable missing entirely (no
-        # telemetry fetched yet) is treated the same as False here --
-        # _async_ensure_sensors_exist() (see __init__.py) picks this
-        # entity up once real data confirms it's actually reliable.
+        # Only when gph is reliable (a missing value counts as not reliable;
+        # _async_ensure_sensors_exist() adds the sensor later).
         if (data.get("telemetry") or {}).get("gph_reliable"):
             entities.append(FlowRateSensor(coordinator, serial, device_info))
         return entities
@@ -823,9 +500,7 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
         for name in channel_names:
             entities.append(LightChannelIntensitySensor(coordinator, serial, device_info, name))
         entities.append(ScheduleIntensitySensor(coordinator, serial, device_info))
-        # Only added if calibration data was actually present at setup --
-        # not all lights necessarily support this, and there's no point
-        # creating a permanently unavailable entity for one that doesn't.
+        # Only for lights that report calibration data.
         if data.get("calibration") is not None:
             entities.append(CalibrationSensor(coordinator, serial, device_info))
         return entities
@@ -835,70 +510,15 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up sensors for a Mobius config entry -- one or more devices
-    (see const.py's own module-level docstring for the CONF_DEVICES
-    shape this mirrors)."""
+    """Sets up the sensors of every device of the entry, plus the tank-level
+    sensors for a multi-device tank."""
     runtime: MobiusRuntimeData = entry.runtime_data
     mlprefix_hex = entry.data.get(CONF_MLPREFIX)
     pan_id = entry.data.get(CONF_PAN_ID)
-    device_records = entry.data.get(CONF_DEVICES, [])
     registry = hass.data.get(DOMAIN, {}).get("gateway_registry")
 
-    # Every entry now has a synthetic tank device to link to, including
-    # an ad-hoc single device -- see tank_device_identifier()'s own
-    # docstring in __init__.py. Previously conditional on mlprefix_hex/
-    # len(device_records) > 1; no longer needed now that
-    # tank_device_identifier() always resolves to something. The
-    # MeshPrefixSensor/GatewayDeviceSensor condition further below is
-    # separate and unchanged -- those two genuinely still need a
-    # known mesh prefix and multi-device gateway election
-    # respectively, unlike via_device grouping itself.
-    tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
-    via_device_id = resolve_tank_device_id(hass, entry.entry_id, tank_identifier)
-
     entities: list[SensorEntity] = []
-    for device_record in device_records:
-        serial = device_record[CONF_SERIAL]
-        coordinator = runtime.coordinators.get(serial)
-        if coordinator is None:
-            # Shouldn't normally happen -- __init__.py's own
-            # async_setup_entry() builds runtime.coordinators from this
-            # exact same device list -- but fail soft (skip this device's
-            # entities) rather than crash the whole platform setup over
-            # one unexpectedly-missing coordinator.
-            _LOGGER.warning(
-                "No coordinator found for device %s in entry %s -- skipping its entities",
-                serial, entry.entry_id,
-            )
-            continue
-
-        address = device_record.get(CONF_ADDRESS)
-        data = coordinator.data or {}
-        support = data.get("support", "")
-
-        # See derive_sw_version()/_SW_VERSION_LABEL_PRIORITY in coordinator.py
-        # for the label priority (device-reported "Firmware" first,
-        # not "Product OS" -- matching what the
-        # official app itself displays) and why it's a fallback list rather
-        # than a single hardcoded lookup. Not all firmware/hardware
-        # components as separate sensors -- that would be sensor sprawl for
-        # something that's fundamentally device info, not a changing value;
-        # the full breakdown is available via python-mobius directly for
-        # anyone who wants it. coordinator._sync_device_registry_info()
-        # also keeps the device registry in sync afterward if any of these
-        # (or name/model/manufacturer) change, using the same derivation
-        # logic -- including fixing a device stuck at this method's own
-        # generic "Mobius device (SERIAL)" fallback name (built right here,
-        # below) once real data actually becomes available, since this is
-        # only ever consulted once, at entity-creation time, not
-        # continuously.
-        sw_version = derive_sw_version(data.get("firmware_versions", {}))
-        hw_version = derive_hw_version(data.get("hardware_info", {}))
-        device_info = _device_info(
-            serial, data, address=address, sw_version=sw_version, hw_version=hw_version,
-            via_device_id=via_device_id,
-        )
-
+    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
         entities += [
             SupportTierSensor(coordinator, serial, device_info),
             ErrorStateSensor(coordinator, serial, device_info),
@@ -907,43 +527,25 @@ async def async_setup_entry(
             HardwareRevisionSensor(coordinator, serial, device_info),
             MeshAddressSensor(coordinator, serial, device_info),
         ]
-        # get_configured_scenes() always returns one element per slot the
-        # device actually has (even a genuinely unused one) if it supports
-        # scenes at all, and an empty list if it doesn't -- a real signal,
-        # not a coincidence, so gate on it rather than creating this for
-        # every device unconditionally.
+        # Devices without scene support report no slots at all.
         if data.get("configured_scenes"):
             entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))
 
-        type_specific = _build_type_specific_entities(coordinator, serial, device_info, support, data)
+        type_specific = _build_type_specific_entities(coordinator, serial, device_info, data.get("support", ""), data)
         entities += type_specific
-        # advanced_features (LocalControlEnabled/AutoDimTimeout/MaxFanSpeed/
-        # FanShutdownEnabled) moved to switch.py/select.py now that
-        # python-mobius supports writing them -- no longer built here.
-        # Both consulted later by _async_ensure_sensors_exist() (in
-        # __init__.py) -- see that function's own docstring for why it
-        # needs to exist at all. sensor_device_infos specifically so it
-        # never has to duplicate this function's own via_device/
-        # tank_identifier logic just to build one when healing a device
-        # whose data wasn't ready yet the first time this ran.
+        # Kept for _async_ensure_sensors_exist() (see __init__.py).
         runtime.sensor_device_infos[serial] = device_info
         runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific)
 
-    # The tank-level prefix sensor, attached to the synthetic tank device
-    # itself, not any one real device. Deliberately still gated on
-    # mlprefix_hex/len(device_records) directly (not tank_identifier's
-    # own nullness, since that's now always set -- see above): a
-    # MeshPrefixSensor with no real mesh prefix to show, or a
-    # GatewayDeviceSensor for a device that's trivially always its own
-    # gateway, would be sensors with nothing meaningful to report.
-    if mlprefix_hex is not None and len(device_records) > 1:
+    # Tank-level sensors: only meaningful with a mesh prefix and more than one
+    # device.
+    if mlprefix_hex is not None and len(entry.data.get(CONF_DEVICES, [])) > 1:
+        tank_identifier = entry_tank_identifier(entry)
         entities.append(MeshPrefixSensor(entry, mlprefix_hex, tank_identifier))
         if registry is not None and pan_id is not None:
             entities.append(GatewayDeviceSensor(entry, pan_id, registry, runtime.coordinators, tank_identifier))
 
     async_add_entities(entities)
-    # Stashed last, not first -- if anything above this point raised,
-    # a partially-populated callback with no matching entities would be
-    # worse than none at all for _async_ensure_sensors_exist() to find.
+    # Stored last, so a failed setup leaves no callback for
+    # _async_ensure_sensors_exist().
     runtime.sensor_add_entities = async_add_entities
-

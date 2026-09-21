@@ -3145,10 +3145,8 @@ test("no reverse-rotation hint when supports_reverse is null (primitive_type not
 });
 
 // --------------------------------------------------------------------------
-// Pump points' own flags are always normalized to just FLAG_ACTIVE (1)
-// on save -- pumps only have an enabled/disabled notion, never
-// day/night/sunrise/sunset (confirmed against the app's own
-// Point.java).
+// Pump points are saved with flags = FLAG_ACTIVE (1): pumps don't use
+// the day/night/sunrise/sunset flags.
 // --------------------------------------------------------------------------
 
 test("saving a pump schedule normalizes every point's own flags to 1, regardless of what was loaded", async () => {

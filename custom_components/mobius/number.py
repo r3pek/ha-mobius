@@ -1,13 +1,6 @@
 """
-Number entity for configuring how often this tank's own devices are
-polled -- attached to the synthetic TANK device (see __init__.py's
-tank_device_identifier()/_register_tank_device()), not any one real
-device, since it affects every device on the tank uniformly.
-
-Unlike sensor.py's own MeshPrefixSensor/GatewayDeviceSensor, this is
-created for EVERY entry, including a single, ad-hoc device with no
-real mesh prefix -- a lone device still polls at an interval, exactly
-the same as a genuine multi-device tank.
+Poll interval of a tank's devices, on the tank device. Created for every
+entry, including a single device.
 """
 
 from __future__ import annotations
@@ -22,36 +15,23 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import MobiusRuntimeData, tank_device_identifier
-from .const import CONF_MLPREFIX, CONF_PAN_ID, POLL_INTERVAL
+from . import MobiusRuntimeData
+from .const import POLL_INTERVAL
+from .entity import entry_tank_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
-# Floor: avoid hammering the mesh/relay with back-to-back polls. Ceiling:
-# matches MARK_UNAVAILABLE_AFTER's own 5-minute grace window (coordinator.py)
-# -- a poll interval longer than that would make "how long to tolerate
-# consecutive failures before marking unavailable" meaningless, since a
-# single missed poll would already exceed it.
+# The maximum equals MARK_UNAVAILABLE_AFTER: a longer interval would make a
+# device unavailable after a single failed poll.
 MIN_POLL_INTERVAL_SECONDS = 10
 MAX_POLL_INTERVAL_SECONDS = 300
 
 
 class PollIntervalNumber(RestoreNumber):
     """
-    User-configurable poll interval (seconds) for every device on this
-    tank. Changing this updates update_interval on every one of this
-    tank's own coordinators (MobiusRuntimeData.coordinators) -- takes
-    effect from each coordinator's own NEXT scheduled refresh, not
-    immediately: this deliberately doesn't reach into
-    DataUpdateCoordinator's own private rescheduling internals
-    (_schedule_refresh()/_unschedule_refresh()) for what would only be
-    a one-time, marginal benefit (skipping a single already-pending
-    refresh) at the cost of depending on undocumented behavior that
-    could change across Home Assistant versions.
-
-    Persisted via RestoreNumber so a custom interval survives a Home
-    Assistant restart -- defaults to POLL_INTERVAL's own value (30s)
-    if never changed before.
+    Poll interval (seconds) of every coordinator of the tank. A change takes
+    effect at each coordinator's next scheduled refresh. Restored after a
+    restart; defaults to POLL_INTERVAL.
     """
 
     _attr_has_entity_name = True
@@ -99,7 +79,4 @@ class PollIntervalNumber(RestoreNumber):
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    mlprefix_hex = entry.data.get(CONF_MLPREFIX)
-    pan_id = entry.data.get(CONF_PAN_ID)
-    tank_identifier = tank_device_identifier(mlprefix_hex, pan_id)
-    async_add_entities([PollIntervalNumber(entry, tank_identifier)])
+    async_add_entities([PollIntervalNumber(entry, entry_tank_identifier(entry))])

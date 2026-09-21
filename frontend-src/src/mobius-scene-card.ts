@@ -7,36 +7,20 @@ import { formatDuration } from "./format";
 /**
  * mobius-scene-card
  *
- * Presents an existing select.*_scene_selection entity (already
- * shipped, real, working functionality -- options/current_option/
- * select_option()) as a row of tappable tiles instead of a generic
- * dropdown, with the active scene's own remaining time shown via that
- * entity's own duration_remaining_seconds attribute. Tank-wide by
- * nature -- one scene activation affects every device on the tank at
- * once -- so this card's only config is which select entity to show,
- * never a device_id.
- *
- * This card does not call any Mobius-specific backend at all: every
- * capability it needs already exists on the select entity itself, via
- * the same select.select_option service every other HA select entity
- * already supports. That's deliberate -- there's no new
- * Mobius-specific functionality this card introduces, only a nicer
- * presentation of what's already there.
+ * Shows a tank's select.*_scene_selection entity as tiles, with the active
+ * scene's remaining time (duration_remaining_seconds). Scenes apply to the
+ * whole tank, so the only setting is the select entity. Uses only the
+ * standard select.select_option service.
  */
 
 interface MobiusSceneCardConfig extends LovelaceCardConfig {
   entity: string;
 }
 
-const NONE_OPTION = "None"; // must match select.py's own SceneSelectionSelect.NONE_OPTION exactly
+const NONE_OPTION = "None"; // SceneSelectionSelect.NONE_OPTION in select.py
 
-// No icon is ever stored anywhere for a scene -- it's purely a name,
-// both on the wire and in the app. This is a purely cosmetic,
-// best-effort guess at a fitting icon for a few common factory scene
-// names; anything unmatched (including any scene a person names
-// themselves) gets one consistent, clearly-generic placeholder rather
-// than a different guess per name, which would wrongly suggest a real
-// per-scene icon exists to guess from.
+// Scenes have no icon, only a name. Common scene names get a matching icon;
+// everything else gets the same placeholder.
 const SCENE_ICON_GUESSES: Record<string, string> = {
   sunrise: "mdi:weather-sunset-up",
   sunset: "mdi:weather-sunset-down",
@@ -47,14 +31,7 @@ const SCENE_ICON_GUESSES: Record<string, string> = {
   moonlit: "mdi:weather-night",
   clean: "mdi:broom",
   "water change": "mdi:water-sync",
-  // The remaining built-in scenes (see python-mobius's own SceneID) --
-  // confirmed against the app's own scene icon assets where they
-  // exist (CloudCover's own is a plain cloud shape, matching
-  // mdi:weather-cloudy directly; the app's own "Disco" asset is
-  // oddly a globe/world icon, not an actual disco ball -- likely a
-  // mismatched asset on the app's own side, not worth replicating
-  // here in place of something that actually reads as "disco" to a
-  // person looking at it).
+  // Other built-in scenes (python-mobius SceneID).
   cloud: "mdi:weather-cloudy",
   "color cycle": "mdi:palette",
   disco: "mdi:party-popper",
@@ -88,9 +65,7 @@ export class MobiusSceneCard extends LitElement {
     return 3;
   }
 
-  // Sections view (newer, grid-based dashboards) -- masonry view uses
-  // getCardSize() above instead; both are defined since either
-  // layout might be in use.
+  // Sections view size (masonry uses getCardSize()).
   public getGridOptions() {
     return { rows: 3, columns: 6, min_rows: 3 };
   }
@@ -100,12 +75,7 @@ export class MobiusSceneCard extends LitElement {
     return { entity: guess || "" };
   }
 
-  // The built-in form editor (see Home Assistant's own developer docs
-  // on custom-card configuration) -- the right fit for a card with
-  // exactly one config field, rather than a hand-built editor
-  // element. domain: "select" on the entity selector means the
-  // picker only offers select.* entities in the first place, not
-  // free-text entry a person could get wrong.
+  // Built-in form editor; the picker only offers select entities.
   public static getConfigForm() {
     return {
       schema: [{ name: "entity", required: true, selector: { entity: { domain: "select" } } }] as const,

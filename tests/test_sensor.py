@@ -753,7 +753,7 @@ def test_identical_model_devices_get_distinct_names_via_serial():
     full config entries through the Bluetooth stack (which introduces
     unrelated teardown flakiness with pytest-socket when running two live
     entries in one test)."""
-    from custom_components.mobius.sensor import _device_info
+    from custom_components.mobius.entity import _device_info
 
     status_a = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine"}
     status_b = {"name": "", "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine"}

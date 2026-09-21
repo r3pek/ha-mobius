@@ -2471,9 +2471,7 @@ async def test_mesh_last_seen_refresh_failure_is_non_fatal(hass):
 
 
 # --------------------------------------------------------------------------
-# moon_phase_icon -- every boundary confirmed directly against the
-# app's own compiled bytecode (LightingFragment.smali's own
-# lunarPhase() method), not assumed.
+# moon_phase_icon -- phase boundaries as used by the app.
 # --------------------------------------------------------------------------
 
 class TestMoonPhaseIcon:

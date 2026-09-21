@@ -341,10 +341,8 @@ class TestRelayFailover:
     persistently failing to relay to ONE specific target for 40+
     minutes straight -- see RELAY_FAILURE_THRESHOLD's own docstring in
     const.py for the full reasoning, including why forcing a different
-    gateway turned out to be the best recovery lever actually
-    available, confirmed by reverse-engineering the real app's own
-    source specifically looking for (and not finding) any runtime
-    mesh-rebuild command it could fall back to instead."""
+    gateway is the available recovery (the protocol has no runtime
+    mesh reset)."""
 
     @pytest.mark.asyncio
     async def test_below_threshold_does_not_promote(self, registry):

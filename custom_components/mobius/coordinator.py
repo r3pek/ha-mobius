@@ -1,66 +1,38 @@
 """
-Single unified data update coordinator per Mobius device, sharing BLE
-connections across devices on the same pan_id (Thread mesh/"tank") via
-gateway_registry.GatewayRegistry rather than each device holding its own
-direct connection.
+Data update coordinator, one per Mobius device.
 
-One coordinator per device, one ~30s poll cycle, fetching both status
-and schedule data together.
+Devices with the same pan_id (Thread mesh, "tank") share one BLE
+connection, held by the group's gateway (see gateway_registry.py). Each poll
+fetches status and schedule data together.
 
 ## Gateway vs. relayed reads
 
-Each poll cycle, the coordinator checks whether ITS OWN serial is
-currently the gateway for its pan_id group (gateway_registry.PanGroup.
-gateway_serial). If so, it reads directly over that group's shared
-MobiusConnectionManager. If not, it reads through a RelayedMobiusDevice
-wrapping that same connection, addressed to its own cached Thread
-mesh-local IPv6 (see _resolve_own_mesh_peer() for the on-demand discovery
-fallback if that isn't cached yet).
+Every poll checks whether this device is currently its group's gateway
+(PanGroup.gateway_serial). The gateway reads over the shared
+MobiusConnectionManager directly; every other device reads through a
+RelayedMobiusDevice on that connection, addressed to its cached mesh-local
+address (discovered on demand if missing, see _resolve_own_mesh_peer()).
+Because this is decided per poll, a gateway change takes effect on the next
+poll.
 
-This check happens fresh on every poll cycle, not once at setup -- if
-this device's group promotes a different gateway (see
-gateway_registry.py's failover logic) between one cycle and the next,
-the very next read from this coordinator automatically switches from
-direct to relayed (or vice versa, if THIS device gets promoted TO
-gateway), with no separate code path needed to handle the transition.
+## Failure handling
 
-## Failure handling: graceful, not immediate
+A failed read keeps returning the last good data until
+MARK_UNAVAILABLE_AFTER has passed without a successful read; only then is
+UpdateFailed raised. A failed read marks the connection disconnected so the
+next poll reconnects.
 
-A single failed read doesn't immediately mark a device unavailable --
-the coordinator keeps returning its last-known-good data for up to
-MARK_UNAVAILABLE_AFTER (const.py) of consecutive failures before actually
-raising UpdateFailed. Only a genuinely sustained outage results in
-entities going unavailable. Reconnection itself isn't retried within the
-same poll cycle -- a failed
-read marks the connection disconnected so the NEXT ~30s cycle reconnects
-fresh, and the grace period covers the gap in between; this is simpler
-than an immediate in-cycle retry and, given the poll interval is already
-short, doesn't meaningfully change how quickly a transient drop recovers.
+Gateway read failures are reported to the registry
+(record_gateway_failure()), which promotes another member after
+GATEWAY_FAILURE_THRESHOLD failures. Relayed read failures are counted per
+target (record_relay_failure(), RELAY_FAILURE_THRESHOLD) and never mark the
+shared connection disconnected.
 
-Separately, when THIS device is the group's gateway, a failed read is
-also reported to the registry (record_gateway_failure()) -- after
-GATEWAY_FAILURE_THRESHOLD consecutive gateway-read failures (much sooner
-than the 5-minute mark-unavailable grace period), the registry promotes
-a different member to gateway, since a bad gateway takes its whole group
-down with it. Relayed devices' own read failures are NOT reported to the
-registry this way -- a single relayed device failing to read through an
-otherwise-healthy gateway is much more likely to be specific to that
-device/target than to the gateway itself, so only the gateway's own
-direct connection health drives promotion.
-
-Reconnection (the gateway's first connect, or after a detected drop)
-always resolves the device's CURRENT address by serial number -- BLE
-addresses are not guaranteed stable over time, matching real
-hardware behavior and the official app's own Peripheral class (identity is
-serial-number-based, never address-based). See python-mobius's
-documentation/12-device-identity-and-address-stability.md.
-
-Deliberately does NOT use mobius.find_device_by_serial() for this --
-that function runs its own independent BleakScanner, which conflicts
-with Home Assistant's own shared Bluetooth manager. Instead,
-MobiusConnectionManager reads Home Assistant's own already-running
-Bluetooth cache (bluetooth.async_discovered_service_info()), the same
-approach config_flow.py's manual-setup step already uses.
+Reconnecting resolves the device's current address from its serial using
+Home Assistant's Bluetooth cache (not an independent BleakScanner, which
+would conflict with Home Assistant's Bluetooth manager). BLE addresses are
+not stable; the serial is the device identity (see python-mobius
+documentation/12-device-identity-and-address-stability.md).
 """
 
 from __future__ import annotations
@@ -70,7 +42,7 @@ import logging
 import time
 from dataclasses import asdict
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -82,9 +54,9 @@ from homeassistant.util import dt as dt_util
 
 from mobius import (
     MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
-    MOBIUS_COMPANY_IDS, MobiusAdvertisement, parse_manufacturer_data, discover_tank,
-    LIGHT_PRIMITIVES, PUMP_PRIMITIVES_VERIFIED, PUMP_PRIMITIVES_EXPERIMENTAL,
-    PRIMITIVE_SIZE, extract_short_address, C2Attribute, PumpParam,
+    parse_advertisement, discover_tank,
+    LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, extract_short_address, C2Attribute,
+    PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
@@ -92,19 +64,14 @@ from .gateway_registry import GatewayRegistry, PanGroup
 
 _LOGGER = logging.getLogger(__name__)
 
-# The 8 standard MDI moon-phase icons, in cycle order starting at new
-# moon -- matches lunar_days_into_phase()'s own 0=new-moon convention.
+_T = TypeVar("_T")
+
+
 def _moon_phase_bucket(current_day: int) -> int:
-    """current_day is lunar_days_into_phase()'s own 0-29 "days since new
-    moon" index. Thresholds traced directly from the app's own compiled
-    bytecode (LightingFragment.smali's own lunarPhase() method) rather
-    than assumed -- the app uses exactly 6 phases (no separate quarter
-    phases at all), with these precise, confirmed boundaries:
-    <=0 or >=29 -> new, 1-7 -> waxing crescent, 8-13 -> waxing gibbous,
-    14-15 -> full, 16-21 -> waning gibbous, 22-28 -> waning crescent.
-    Returns an index (0-5) into _MOON_PHASE_ICONS/_MOON_PHASE_NAMES,
-    shared so both stay in sync rather than duplicating these
-    boundaries in two places."""
+    """Index (0-5) of the moon phase shown for `current_day` (0-29, days
+    since new moon, see lunar_days_into_phase()). The app uses six phases:
+    <=0 or >=29 new, 1-7 waxing crescent, 8-13 waxing gibbous, 14-15 full,
+    16-21 waning gibbous, 22-28 waning crescent."""
     if current_day <= 0 or current_day >= 29:
         return 0
     if current_day <= 7:
@@ -122,12 +89,8 @@ _MOON_PHASE_ICONS = [
     "mdi:moon-new", "mdi:moon-waxing-crescent", "mdi:moon-waxing-gibbous",
     "mdi:moon-full", "mdi:moon-waning-gibbous", "mdi:moon-waning-crescent",
 ]
-# English names matching the app's own strings.xml exactly (full_moon,
-# new_moon, waxing_crescent, waxing_gibbous, waning_gibbous,
-# waning_crescent) -- for a diagnostic attribute value, not shown
-# through Home Assistant's own translation system (that's the
-# schedule card's own moonPhaseName(), which localizes this same
-# 6-phase set from the icon value instead).
+# English names used by the app. Used for an attribute value; the schedule
+# card localizes the phase from the icon instead.
 _MOON_PHASE_NAMES = [
     "New Moon", "Waxing Crescent", "Waxing Gibbous", "Full Moon", "Waning Gibbous", "Waning Crescent",
 ]
@@ -141,66 +104,21 @@ def moon_phase_name(current_day: int) -> str:
     return _MOON_PHASE_NAMES[_moon_phase_bucket(current_day)]
 
 
-def parsed_advertisement(manufacturer_data: dict) -> Optional[MobiusAdvertisement]:
-    """
-    Tries every known Mobius company ID (python-mobius's own
-    MOBIUS_COMPANY_IDS -- currently EcoTech Marine and
-    AquaIllumination) against a BluetoothServiceInfoBleak's own
-    manufacturer_data dict, returning the first one that parses. A
-    device advertises under exactly one company ID, never more than
-    one at once. Shared here (not duplicated per call site) so
-    fixing a bug once in one place -- rather than
-    catching every place that used to hardcode a single company ID --
-    covers every case: a device advertising under any OTHER known
-    company ID used to come back unparsed everywhere in this
-    integration, not just in one spot.
-    """
-    for company_id in MOBIUS_COMPANY_IDS:
-        payload = manufacturer_data.get(company_id)
-        if payload:
-            parsed = parse_manufacturer_data(payload)
-            if parsed is not None:
-                return parsed
-    return None
-
-
 def _find_in_bluetooth_cache(hass: HomeAssistant, serial: str):
-    """Searches Home Assistant's own Bluetooth cache once for a
-    currently-visible advertisement matching serial, by manufacturer
-    data. Returns the matching BluetoothServiceInfoBleak, or None if
-    serial isn't currently present in the cache at all."""
+    """The connectable BluetoothServiceInfoBleak currently advertising
+    `serial`, or None."""
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        parsed = parsed_advertisement(info.manufacturer_data)
+        parsed = parse_advertisement(info.manufacturer_data)
         if parsed and parsed.serial == serial:
             return info
     return None
 
 
 async def _find_in_bluetooth_cache_with_active_scan_fallback(hass: HomeAssistant, serial: str):
-    """Like _find_in_bluetooth_cache() above, but if the fast, cache-
-    only lookup comes back empty, requests a one-shot active scan
-    sweep and tries once more before giving up entirely -- shared by
-    _resolve_current_ble_device() and discover_mesh_address() below,
-    both of which need this exact same fallback sequence.
-
-    Per Home Assistant's own documentation (bluetooth.
-    async_request_active_scan) this is exactly the intended use case --
-    "for config flow discovery and other one-shot probes" -- not
-    something reserved only for initial setup-time discovery. This
-    addresses a real production issue: a device
-    (in that case, the group's own gateway) can go missing from Home
-    Assistant's own Bluetooth cache for hours at a stretch, well past
-    whatever passive-scanning cadence would normally rediscover it.
-
-    Concurrent callers across every coordinator needing to resolve the
-    SAME device around the same time -- exactly what
-    happens when a shared gateway goes missing, since every relayed
-    coordinator's own poll also needs to resolve it -- dedupe to a
-    single, shared scan window on Home Assistant's own side (per that
-    same documentation), so calling this from every coordinator's own
-    failed resolution doesn't cause redundant, overlapping active-scan
-    storms.
-    """
+    """_find_in_bluetooth_cache(), requesting a one-shot active scan and
+    looking again if the first lookup finds nothing. A device can be missing
+    from the cache for a long time with passive scanning only. Home
+    Assistant merges concurrent active-scan requests into one scan."""
     info = _find_in_bluetooth_cache(hass, serial)
     if info is not None:
         return info
@@ -212,92 +130,95 @@ async def _find_in_bluetooth_cache_with_active_scan_fallback(hass: HomeAssistant
     return info
 
 
+async def _resolve_connectable_ble_device(hass: HomeAssistant, serial: str):
+    """The connectable BLEDevice currently advertising `serial`, or None.
+    Logs why it couldn't be found: not advertising at all (out of range,
+    powered off, or no connectable scanner) vs. advertising but not
+    connectable from here."""
+    info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
+    if info is None:
+        _LOGGER.debug(
+            "%s not found in Home Assistant's own Bluetooth cache, even after "
+            "requesting an active scan (%d connectable scanner(s) currently registered)",
+            serial, bluetooth.async_scanner_count(hass, connectable=True),
+        )
+        return None
+    ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
+    if ble_device is None:
+        _LOGGER.debug(
+            "%s found in Home Assistant's advertisement cache at %s, but not "
+            "currently connectable from here", serial, info.address,
+        )
+    else:
+        _LOGGER.debug("%s currently advertising at %s", serial, info.address)
+    return ble_device
+
+
+async def _with_temporary_connection(
+    hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore,
+    action: Callable[[MobiusDevice], Awaitable[_T]], what: str,
+) -> Optional[_T]:
+    """
+    Connects briefly to the device advertising `serial`, runs `action` on
+    it and disconnects. Returns None if the device can't be reached or the
+    action fails.
+
+    `semaphore` must be the shared connection semaphore
+    (MAX_CONCURRENT_CONNECTIONS): these connections are separate from the
+    gateway connections and would otherwise exceed the adapter's
+    connection limit, breaking the gateway's connection.
+    """
+    ble_device = await _resolve_connectable_ble_device(hass, serial)
+    if ble_device is None:
+        return None
+    try:
+        async with semaphore:
+            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+                return await action(mdevice)
+    except Exception as err:
+        _LOGGER.debug("%s failed for %s: %s", what, serial, err)
+        return None
+
+
 class MobiusConnectionManager:
-    """
-    Owns a single persistent MobiusDevice connection for one physical
-    device -- the gateway of a pan_id group. Shared (via
-    gateway_registry.PanGroup.gateway_connection) by every coordinator
-    for devices in that group, not just the gateway's own -- the actual
-    point of this class existing is that there's exactly one real BLE
-    connection per GROUP, not one per device.
-    """
+    """The persistent MobiusDevice connection of a pan_id group's gateway,
+    shared by every coordinator in the group (PanGroup.gateway_connection)."""
 
     def __init__(self, hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore):
         self.hass = hass
         self.serial = serial
         self._semaphore = semaphore
         self._device: Optional[MobiusDevice] = None
-        # Prevents multiple coordinators relaying through this same
-        # gateway from all trying to reconnect it at the same time.
+        # Coordinators relaying through this gateway must not reconnect it
+        # concurrently.
         self._lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
-        """Whether this manager currently holds an open connection --
-        exposed publicly (rather than callers reaching into the private
-        _device attribute directly) specifically so __init__.py's own
-        periodic revalidation can tell "genuinely not connected, worth
-        checking Home Assistant's own Bluetooth cache for" apart from
-        "already connected, so of course it isn't currently advertising
-        (a real, healthy device stops advertising while connected) --
-        checking the cache for it here would be a false alarm, not a
-        real signal of trouble."""
+        """Whether a connection is open. A connected device stops
+        advertising, so callers use this to avoid treating a missing
+        advertisement as a problem."""
         return self._device is not None and self._device.is_connected
 
     async def _resolve_current_ble_device(self):
-        """
-        Finds the BLEDevice currently advertising self.serial, by reading
-        Home Assistant's own Bluetooth cache -- NOT by scanning
-        independently. See this module's docstring for why.
-        """
-        info = await _find_in_bluetooth_cache_with_active_scan_fallback(self.hass, self.serial)
-        if info is not None:
-            _LOGGER.debug("%s currently advertising at %s", self.serial, info.address)
-            return bluetooth.async_ble_device_from_address(
-                self.hass, info.address, connectable=True
-            )
-        # The single most useful line for diagnosing "can't connect to
-        # any device at all" -- confirms whether this device is even
-        # visible to Home Assistant's own Bluetooth stack right now, as
-        # distinct from being visible but failing to actually connect
-        # (logged separately, in ensure_connected() below). These are
-        # different problems with different causes (out of range/
-        # powered off vs. a proxy connection-limit/timeout issue), and
-        # without this line they're indistinguishable from the logs
-        # alone. The connectable-scanner count is included too -- 0
-        # means nothing local could ever generate a connectable
-        # BLEDevice at all right now, a whole-system problem this
-        # integration has no way to fix on its own, as distinct from
-        # this one device specifically being out of range/powered off.
-        _LOGGER.debug(
-            "%s not found in Home Assistant's own Bluetooth cache, even after "
-            "requesting an active scan (%d connectable scanner(s) currently registered)",
-            self.serial, bluetooth.async_scanner_count(self.hass, connectable=True),
-        )
-        return None
+        """The BLEDevice currently advertising self.serial, or None."""
+        return await _resolve_connectable_ble_device(self.hass, self.serial)
 
     def mark_disconnected(self) -> None:
-        """
-        Forces the next ensure_connected() to reconnect from scratch, even
-        if the underlying client's own is_connected might still say True
-        momentarily -- used when a read fails unexpectedly, since that's a
-        reliable sign something's wrong even if the client object hasn't
-        fully updated its own state yet.
-        """
+        """Forces the next ensure_connected() to reconnect, for when a read
+        failed while the client may still report being connected."""
         self._device = None
 
     async def ensure_connected(self) -> MobiusDevice:
-        """Returns an already-connected MobiusDevice, reconnecting first
-        (via serial, resolved from Home Assistant's own Bluetooth cache)
-        if necessary."""
-        if self._device is not None and self._device.is_connected:
+        """Returns the connected MobiusDevice, reconnecting first (address
+        resolved from the serial via Home Assistant's Bluetooth cache) if
+        needed."""
+        if self.is_connected:
             return self._device
 
         async with self._lock:
-            # Re-check after acquiring the lock -- another coordinator
-            # relaying through this gateway may have already reconnected
-            # it while we were waiting.
-            if self._device is not None and self._device.is_connected:
+            # Another coordinator may have reconnected while we waited.
+            if self.is_connected:
                 return self._device
 
             _LOGGER.debug("%s needs a fresh connection -- resolving its current address", self.serial)
@@ -308,12 +229,6 @@ class MobiusConnectionManager:
                     "found in Home Assistant's Bluetooth cache"
                 )
 
-            # How long THIS specific attempt actually waited for a free
-            # connection slot -- the single most direct way to confirm
-            # or rule out MAX_CONCURRENT_CONNECTIONS contention as the
-            # cause of a device never seeming to get a real connection
-            # attempt at all, rather than guessing from the semaphore's
-            # own configured size alone.
             semaphore_wait_start = time.monotonic()
             async with self._semaphore:
                 semaphore_wait_seconds = time.monotonic() - semaphore_wait_start
@@ -354,33 +269,10 @@ class MobiusConnectionManager:
             self._device = None
 
 
-# Priority order for picking a single "main" firmware version to display
-# as a device's sw_version.
-#
-# "Firmware" first, not "Product OS" -- matches
-# what the official app itself displays for a Radion light:
-# a "Firmware" label (FirmwareType.LEDClusterMicro/Esp32*Firmware --
-# the light's actual LED-driver microcontroller) -- not
-# "Product OS" (FirmwareType.MainMicroOS) -- is what the app treats as
-# primary.
-#
-# Falls through this list rather than assuming any one label is always
-# present (some devices, or some firmware versions, may not report
-# every component) -- the first one found wins, matching "the most
-# main-firmware-like thing this device actually reported" rather than
-# picking arbitrarily among what's left.
-#
-# "OS" and "QCA4020Firmware" specifically: kept as a fallback for the
-# model=None/unrecognized-model case, where get_firmware_versions()
-# itself has no manufacturer to key off and falls back to the raw
-# FirmwareType enum name -- these two are what AquaIllumination-brand
-# devices (AI Prime/Axis/etc) reported as their raw enum names before
-# python-mobius gained proper AquaIllumination-brand labels
-# (FIRMWARE_TYPE_LABELS_NON_ETM), which map "OS" -> "Product OS" and
-# "QCA4020Firmware" -> "Firmware" -- both already earlier in this same
-# list, so a device with a recognized model now matches one of those
-# instead and never reaches these two at all. Harmless to keep for the
-# unrecognized-model fallback path.
+# Firmware labels tried, in order, for the device's sw_version. "Firmware"
+# (the LED driver on a Radion) is what the app shows as the main version.
+# "OS" and "QCA4020Firmware" are the raw FirmwareType names reported when the
+# model is unknown (no manufacturer labels apply).
 _SW_VERSION_LABEL_PRIORITY = [
     "Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio",
     "OS", "QCA4020Firmware",
@@ -388,10 +280,7 @@ _SW_VERSION_LABEL_PRIORITY = [
 
 
 def derive_sw_version(firmware_versions: dict) -> Optional[str]:
-    """Picks a single version string to show as a device's sw_version,
-    from whichever of _SW_VERSION_LABEL_PRIORITY's labels this device
-    actually reported -- see that list's comment for why this isn't just
-    a single hardcoded lookup."""
+    """The first version found following _SW_VERSION_LABEL_PRIORITY."""
     for label in _SW_VERSION_LABEL_PRIORITY:
         version = firmware_versions.get(label)
         if version:
@@ -400,24 +289,33 @@ def derive_sw_version(firmware_versions: dict) -> Optional[str]:
 
 
 def derive_hw_version(hardware_info: dict) -> Optional[str]:
-    """
-    Picks a single string to show as a device's hw_version, from
-    get_hardware_info()'s {HardwareInfo_name: value} dict. "Revision"
-    (HardwareInfo.Revision) is the field name most directly matching
-    "hardware revision" as a concept -- there's no other reasonable
-    candidate among Color/ProductType/RadioType/MotorType/Segments,
-    which describe entirely different things.
-
-    Requires python-mobius>=0.3.0: as of that version, "Revision" is
-    already a plain int (no known enum meaning exists for it, unlike
-    Color/ProductType/RadioType/MotorType, which that version decodes
-    into their own display label strings) -- just stringified here, not
-    decoded from raw bytes.
-    """
+    """The HardwareInfo "Revision" value (an int) as a string."""
     raw = hardware_info.get("Revision")
-    if raw is None:
-        return None
-    return str(raw)
+    return None if raw is None else str(raw)
+
+
+def device_display_name(serial: str, data: dict) -> Optional[str]:
+    """The device's own name, else "{model} ({serial})", else None."""
+    model = data.get("model")
+    return data.get("name") or (f"{model} ({serial})" if model else None)
+
+
+def used_scenes(data: dict) -> list:
+    """The configured scenes in coordinator data, without empty slots."""
+    return [s for s in data.get("configured_scenes") or [] if not s.is_empty]
+
+
+def _format_pump_params(params: dict, group: Optional[PanGroup]) -> dict[str, object]:
+    """Pump parameters for an attribute value (pump_params_to_dict()). The
+    Sync/EcoSmartBack Master parameter (a mesh address suffix) is replaced by
+    "ParentSerial", the serial it resolves to, like websocket_api.py does."""
+    result: dict[str, object] = {}
+    for name, value in pump_params_to_dict(params).items():
+        if name == PumpParam.Master.name and group is not None:
+            result["ParentSerial"] = group.serial_for_mesh_suffix(bytes.fromhex(value))
+        else:
+            result[name] = value
+    return result
 
 
 async def _fetch_all(
@@ -425,72 +323,34 @@ async def _fetch_all(
     cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
 ) -> tuple[dict[str, Any], set[int], bool, Optional[PrimitiveType], Optional[Model]]:
     """
-    The actual read logic, covering both status (identity + live
-    telemetry) and schedule (programmed schedule + firmware version) in
-    one pass. `device` can be a directly-connected
-    MobiusDevice or a RelayedMobiusDevice -- identical either way, since
-    RelayedMobiusDevice implements the same interface transparently.
+    One poll: identity, telemetry, schedule and metadata. `device` is a
+    MobiusDevice or a RelayedMobiusDevice.
 
-    Returns (info, supported_attribute_ids, used_batch, primitive,
-    model) -- everything past `info` itself is NOT part of
-    info/coordinator.data (diagnostics.py dumps that dict directly,
-    and none of these internal bookkeeping values has any business
-    leaking into a user-submitted diagnostic report) -- all of it is
-    specifically for the caller (MobiusDeviceCoordinator._fetch()) to
-    track on itself across poll cycles.
+    Returns (info, supported_attribute_ids, used_batch, primitive, model).
+    Only `info` becomes coordinator.data; the rest is state the coordinator
+    keeps between polls and must not appear in diagnostics.
 
-    cached_supported_attribute_ids -- pass whatever the coordinator
-    already has cached from a PRIOR call to skip fetching it again this
-    time. None (the default, and always the case on a coordinator's own
-    very first poll) means fetch it fresh. See get_metadata_batch()'s
-    own docstring in python-mobius for why this caching matters: a
-    device's own attribute support essentially never changes across a
-    session, so fetching it once and reusing it indefinitely avoids
-    paying for a whole extra round-trip every single poll, forever.
-
-    batch_disabled -- pass True once the coordinator has learned (via
-    used_batch coming back False BATCH_FAILURE_THRESHOLD times running)
-    that this specific device's batch mechanism doesn't work at all --
-    passed straight through as force_individual_reads, skipping a
-    batch attempt already known to be doomed rather than paying for it
-    every single poll forever.
-
-    cached_primitive_type/cached_model -- pass whatever the coordinator
-    already has cached from a PRIOR call to skip identifying the
-    device all over again. Both None (the default, and always the case
-    on a coordinator's own very first poll) means neither is known yet
-    -- see get_full_poll_batch()'s own docstring in python-mobius for
-    the full rationale: a device's own PrimitiveType and Model are both
-    permanent for its whole lifetime (a light is a light forever, a
-    pump is a pump forever, and a physical unit's own model number
-    doesn't change), so once known, this fetches EVERYTHING ELSE this
-    poll needs (identity's own volatile fields, metadata, and
-    light/pump-specific state) in ONE combined round-trip via
-    get_full_poll_batch() -- 2-2.6x faster on real hardware
-    than the equivalent separate calls. Only the very first poll (when
-    both are still None) pays for get_device_info() directly, purely
-    to learn them for every poll after.
-
-    group -- this device's own PanGroup (mesh-wide state shared across
-    every coordinator on the same pan_id), if known. Only used to
-    resolve a pump's own live Sync/EcoSmartBack "Master" param (a raw
-    mesh-address suffix) to a serial, for current_pump_params. None
-    (safe; that resolution is simply skipped) if the caller doesn't
-    have one yet -- this function otherwise deliberately takes no
-    coordinator state at all, so a missing group never blocks any of
-    the rest of what it fetches.
+    cached_supported_attribute_ids: the supported attribute set from an
+      earlier poll (None to read it). Attribute support doesn't change at
+      runtime.
+    batch_disabled: passed as force_individual_reads once batching has
+      failed BATCH_FAILURE_THRESHOLD times.
+    cached_primitive_type / cached_model: known once the first poll
+      succeeded (neither changes for a device). With both known, everything
+      is read in one get_full_poll_batch() request; the first poll reads
+      get_device_info() and then the separate metadata/light/pump reads.
+    group: the device's PanGroup, used to resolve a pump's Master parameter
+      to a serial. Optional.
     """
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
 
     if cached_supported_attribute_ids is not None:
-        supported_attribute_ids = cached_supported_attribute_ids
-        supported_attribute_ids_to_cache = cached_supported_attribute_ids
+        supported_attribute_ids = supported_attribute_ids_to_cache = cached_supported_attribute_ids
     else:
         try:
             supported = await device.get_supported_attributes()
-            supported_attribute_ids = {s.attr_id for s in supported}
-            supported_attribute_ids_to_cache = supported_attribute_ids
+            supported_attribute_ids = supported_attribute_ids_to_cache = {s.attr_id for s in supported}
         except Exception as e:
             _LOGGER.warning(
                 "get_supported_attributes() failed this poll (%s) -- proceeding with an "
@@ -499,30 +359,15 @@ async def _fetch_all(
                 "this failure permanently",
                 e,
             )
-            # An empty set here is ONLY for this one poll's own request-
-            # building below (get_full_poll_batch()/get_metadata_batch()
-            # need SOME set to filter against right now) -- it must
-            # never be what gets cached and returned as
-            # supported_attribute_ids_to_cache. The caller
-            # (MobiusDeviceCoordinator._fetch()) stores whatever this
-            # returns directly into self._supported_attribute_ids, and
-            # checks `is not None` (not "is falsy") to decide whether to
-            # skip re-fetching on the NEXT poll -- caching a real empty
-            # set here would look identical to "genuinely fetched, this
-            # device supports nothing" forever after, permanently
-            # starving every subsequent poll of literally all batched
-            # data (a single transient failure this one time is not the
-            # same claim as "this device supports zero attributes").
+            # Use an empty set for this poll only. Returning None (not an
+            # empty set) makes the next poll read it again; an empty set
+            # would be cached as "supports nothing".
             supported_attribute_ids = set()
             supported_attribute_ids_to_cache = None
 
-    pump_schedule_points = None  # populated by either path below, for pumps only
+    pump_schedule_points = None
 
     if cached_primitive_type is not None and cached_model is not None:
-        # STEADY STATE: identity is already known permanently -- ONE
-        # combined round-trip for literally everything else this poll
-        # needs. See get_full_poll_batch()'s own docstring in
-        # python-mobius for the full rationale.
         primitive = cached_primitive_type
         model = cached_model
         full_poll = await device.get_full_poll_batch(
@@ -539,22 +384,10 @@ async def _fetch_all(
         configured_scenes = full_poll.configured_scenes
         current_scene = full_poll.current_scene
     else:
-        # FIRST POLL ONLY: identity (including primitive_type/model)
-        # isn't known yet -- learn it directly, then use the original,
-        # separate metadata/light-poll/pump-telemetry calls for the
-        # rest of this one poll. Every poll AFTER this uses the
-        # combined batch above instead.
+        # First poll: learn primitive type and model.
         info = await device.get_device_info()
-        primitive_name = info.get("primitive_type")
-        try:
-            primitive = PrimitiveType[primitive_name] if primitive_name else None
-        except KeyError:
-            primitive = None
-        model_raw = info.get("model_raw")
-        try:
-            model = Model(model_raw) if model_raw is not None else None
-        except ValueError:
-            model = None
+        primitive = primitive_type_from_name(info.get("primitive_type"))
+        model = enum_or_none(Model, info.get("model_raw"))
 
         metadata = await device.get_metadata_batch(
             model=model, supported_attribute_ids=supported_attribute_ids,
@@ -569,15 +402,11 @@ async def _fetch_all(
                 supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
             )
             used_batch = used_batch and light_poll.used_batch
-        elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
+        elif primitive in PUMP_PRIMITIVES:
             pump_schedule_points = await device.get_pump_schedule(which=1)
             pump_telemetry_result = await device.get_pump_telemetry(model=model, primitive=primitive)
 
-        # Not part of any of the calls above yet on this, the FIRST poll
-        # only -- every poll after this one gets both for free as part
-        # of get_full_poll_batch() itself instead. Both fail soft to
-        # empty/None rather than raising, since most devices in the
-        # wild won't support scenes at all.
+        # Most devices don't support scenes; both reads fail soft.
         try:
             configured_scenes = await device.get_configured_scenes(primitive=primitive)
         except Exception:
@@ -587,8 +416,8 @@ async def _fetch_all(
         except Exception:
             current_scene = None
 
-    if primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
-        info["support"] = "pump" if primitive in PUMP_PRIMITIVES_VERIFIED else "pump (experimental)"
+    info["support"] = support_tier(primitive)
+    if primitive in PUMP_PRIMITIVES:
         info["telemetry"] = pump_telemetry_result
         if info["telemetry"].get("gph") is not None and not info["telemetry"].get("gph_reliable"):
             _LOGGER.debug(
@@ -599,20 +428,13 @@ async def _fetch_all(
                 info.get("serial"), info["telemetry"]["gph"], model, primitive,
             )
         info["operation_state"] = (await device.get_operation_state()).name
-    elif primitive in LIGHT_PRIMITIVES:
-        info["support"] = "light"
-    else:
-        # Only reachable on this coordinator's own first poll -- once a
-        # real primitive_type is cached, every poll after this always
-        # matches one of the two branches above (see this function's
-        # own docstring for why that's permanent).
-        primitive_name = info.get("primitive_type")
-        info["support"] = "unsupported"
+    elif primitive not in LIGHT_PRIMITIVES:
+        # Only possible on the first poll: once a primitive type is cached it
+        # is a light or a pump.
         size = PRIMITIVE_SIZE.get(primitive) if primitive else None
         info["support_note"] = (
-            f"PrimitiveType {primitive_name!r} has no parser implemented "
-            f"({size} byte primitive)." if size is not None else
-            f"PrimitiveType {primitive_name!r} has no parser implemented."
+            f"PrimitiveType {info.get('primitive_type')!r} has no parser implemented"
+            + (f" ({size} byte primitive)." if size is not None else ".")
         )
 
     info["firmware_versions"] = metadata.firmware_versions
@@ -620,142 +442,42 @@ async def _fetch_all(
 
     if primitive in LIGHT_PRIMITIVES:
         info["channels"] = [c.name for c in metadata.supported_channels]
-        # ONE combined round-trip for the schedule itself plus every
-        # lunar/acclimation/insolation-related attribute
-        # process_light_intensities() might need -- see
-        # get_light_poll_batch()'s own docstring in python-mobius.
-        points = light_poll.schedule_points
-        info["schedule_point_count"] = len(points)
+        info["schedule_point_count"] = len(light_poll.schedule_points)
         current = light_poll.intensities
         info["current_intensities"] = {ch.name: v for ch, v in current.items()}
-        # The app applies a lunar-phase
-        # reduction (or not) on top of the raw schedule-interpolated
-        # value depending on both the current time (is this the
-        # dusk-to-night segment of the schedule) and a per-device toggle
-        # (lunar phases enabled) -- a mismatch against what the app
-        # itself displays can come from either one being misjudged, and
-        # those aren't distinguishable from the final intensity value
-        # alone. python-mobius's own get_current_light_intensities()
-        # already surfaces exactly this via its own .diagnostics, so
-        # just log it -- without this, that information exists for one
-        # call and is then gone, forcing a separate, manual diagnostic
-        # script every time this needs debugging again.
+        # Which lunar/schedule branch produced the intensities.
         _LOGGER.debug("%s light intensity diagnostics: %s", device.serial, current.diagnostics)
-        # The same schedule-level master dimmer the debug log line
-        # above already surfaces for troubleshooting -- also stored
-        # here, plainly, as its own field: a 0.0-1.0 fraction (matching
-        # get_schedule_intensity()'s own return range) for anything
-        # that wants the raw scalar itself (e.g. a schedule editor
-        # card's own global-intensity control), not just this specific
-        # moment's fully-modified per-channel output.
-        #
-        # A real, confirmed production bug lived here before this
-        # comment existed: this used to read current.diagnostics.get(
-        # "scalar") instead, which is NOT the same thing -- "scalar" is
-        # whichever value is CURRENTLY driving the effective per-channel
-        # output (during a lunar-reduced night segment, that's the
-        # lunar reduction factor itself, completely unrelated to the
-        # schedule intensity setting), not the device's own raw
-        # schedule-level intensity. That bug showed the lunar reduction
-        # factor (e.g. 0.08) as if it were the schedule intensity
-        # slider's own value (e.g. 0.897), specifically whenever the
-        # device happened to be in its own lunar-reduced night segment
-        # at poll time -- exactly the condition under which the two
-        # values differ, so it was never caught by simply checking the
-        # value during the day. light_poll.schedule_intensity is
-        # python-mobius's own dedicated field for this (added
-        # specifically to fix this bug -- previously computed
-        # internally but never actually propagated to the caller at
-        # all), always the device's own raw setting regardless of
-        # which branch is currently in effect.
+        # The schedule-level dimmer setting (0.0-1.0). Not
+        # diagnostics["scalar"], which during the night segment is the lunar
+        # reduction.
         info["schedule_intensity"] = light_poll.schedule_intensity
-        # Confirmed directly against the app: the "Lunar" chip at the
-        # top of the light schedule editor both toggles this and, while
-        # on, displays the current moon phase -- so both the on/off
-        # state and a phase icon (from lunar_days_into_phase()) are
-        # stored here for the switch and the schedule card to read.
-        #
-        # A real, confirmed production bug lived here before this
-        # comment existed: this used to read
-        # current.diagnostics.get("lunar_enabled")/["lunar_date"]
-        # instead of light_poll's own dedicated fields -- NOT the same
-        # thing. process_light_intensities() unconditionally wipes both
-        # of those diagnostics keys to None outside the night segment
-        # (correct for its OWN reduction-factor calculation, since the
-        # toggle only affects anything during the night segment, but
-        # not correct for a caller wanting the device's own current
-        # setting at any time of day). That bug showed this sensor as
-        # Unknown for lunar_enabled/moon_phase_icon during the day, even
-        # when the device's own Lunar toggle was genuinely on --
-        # confirmed by a real user's own report and a matching debug
-        # log showing diagnostics correctly populated only because the
-        # poll happened to land during a lunar-reduced night segment.
-        # light_poll.lunar_enabled/lunar_phase_day are python-mobius's
-        # own dedicated fields for this (added specifically to fix this
-        # bug), always correct regardless of which branch is currently
-        # in effect.
-        #
-        # lunar_supported: whether this light's own firmware even
-        # exposes LunarPhasesEnabled at all -- some models may not.
-        # Gates whether the switch entity and the schedule card's own
-        # moon toggle get created for this device at all, rather than
-        # showing a control (or a fake "off" reading) for a feature the
-        # device genuinely doesn't have.
-        info["lunar_supported"] = C2Attribute.LunarPhasesEnabled in supported_attribute_ids
-        info["lunar_enabled"] = light_poll.lunar_enabled if info["lunar_supported"] else None
-        info["lunar_phase_day"] = light_poll.lunar_phase_day if info["lunar_supported"] else None
-        info["moon_phase_icon"] = (
-            moon_phase_icon(light_poll.lunar_phase_day) if info["lunar_supported"] else None
-        )
-        info["moon_phase_name"] = (
-            moon_phase_name(light_poll.lunar_phase_day) if info["lunar_supported"] else None
-        )
-        # Light-only per the app's own
-        # UI gating -- returns None for pumps, which is fine (the sensor
-        # built on this is only added for light devices anyway).
+        # LunarPhasesEnabled (the app's "Lunar" chip) and the current moon
+        # phase, valid at any time of day (diagnostics["lunar_enabled"] is
+        # only set during the night segment). All None when the light
+        # doesn't support the attribute; the lunar switch and the card's moon
+        # toggle are only offered when it does.
+        lunar_supported = C2Attribute.LunarPhasesEnabled in supported_attribute_ids
+        info["lunar_supported"] = lunar_supported
+        info["lunar_enabled"] = light_poll.lunar_enabled if lunar_supported else None
+        info["lunar_phase_day"] = light_poll.lunar_phase_day if lunar_supported else None
+        info["moon_phase_icon"] = moon_phase_icon(light_poll.lunar_phase_day) if lunar_supported else None
+        info["moon_phase_name"] = moon_phase_name(light_poll.lunar_phase_day) if lunar_supported else None
+        # Calibration is a light feature.
         info["calibration"] = metadata.calibration
 
-    elif primitive in PUMP_PRIMITIVES_VERIFIED or primitive in PUMP_PRIMITIVES_EXPERIMENTAL:
+    elif primitive in PUMP_PRIMITIVES:
         info["schedule_point_count"] = len(pump_schedule_points)
-        # Reuses the schedule already fetched above (either via
-        # get_full_poll_batch() in steady state, or get_pump_schedule()
-        # directly on this coordinator's own first poll) --
-        # get_current_pump_block() would otherwise re-fetch that exact
-        # same attribute internally.
         block = await device.get_current_pump_block(
             which=1, minute_of_day=minute_of_day, points=pump_schedule_points,
         )
         if block:
             info["current_pump_mode"] = block.pump.mode.name
-            params: dict[str, object] = {}
-            for p, v in block.pump.params.items():
-                # Same translation as websocket_api.py's own
-                # _translate_master_to_parent_serial() -- a raw mesh-
-                # address suffix is meaningless to anything reading this
-                # sensor's own attributes; the schedule card's pump
-                # glance view resolves this serial to a display name
-                # itself (see its own current-mode display logic).
-                if p == PumpParam.Master and isinstance(v, bytes) and group is not None:
-                    params["ParentSerial"] = group.serial_for_mesh_suffix(v)
-                else:
-                    params[p.name] = v.hex() if isinstance(v, bytes) else (v.name if hasattr(v, "name") else v)
-            info["current_pump_params"] = params
+            info["current_pump_params"] = _format_pump_params(block.pump.params, group)
 
-    # Deliberately unconditional -- NOT gated to LIGHT_PRIMITIVES/
-    # PUMP_PRIMITIVES the way most of the above is. The app's own
-    # AdvancedFeatures screen covers VorTech (LocalControlEnabled/
-    # AutoDimTimeout) and Radion (MaxFanSpeed/FanShutdownEnabled) under
-    # one umbrella, gated per-attribute rather than per-device-type (see
-    # python-mobius's own get_advanced_features() docstring for the full
-    # confirmation) -- so this is populated for every device, regardless
-    # of what "support" ended up being above, and simply None for
-    # whichever devices support none of the four underlying attributes.
+    # Supported per attribute, on any device type; None when none of the
+    # four attributes is supported.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    # Populated by whichever branch above actually ran -- get_full_poll_batch()
-    # itself in steady state (no further round-trip needed here at all), or
-    # the separate, fail-soft calls just above on this coordinator's own
-    # first poll only.
     info["configured_scenes"] = configured_scenes
     info["current_scene"] = current_scene
 
@@ -763,8 +485,7 @@ async def _fetch_all(
 
 
 class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """One coordinator per device. See this module's docstring for the
-    gateway-vs-relayed and graceful-failure design."""
+    """One coordinator per device. See the module docstring."""
 
     def __init__(
         self, hass: HomeAssistant, entry: ConfigEntry, registry: GatewayRegistry,
@@ -776,51 +497,22 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.serial = serial
         self.pan_id = pan_id
         self._last_success: Optional[Any] = None
-        # Cached across every poll cycle for this device's own lifetime
-        # -- see _fetch_all()'s own docstring for why: a device's own
-        # attribute support essentially never changes across a session,
-        # so this avoids paying for a whole extra get_supported_attributes()
-        # round-trip on every single poll, forever, once it's known.
+        # Supported attribute ids, read once (see _fetch_all()).
         self._supported_attribute_ids: Optional[set[int]] = None
-        # Both reset to these defaults on every Home Assistant restart
-        # or config-entry reload -- MobiusDeviceCoordinator instances
-        # are always freshly created (see async_setup_entry()'s own
-        # for-loop), never reused across one, so there's no separate
-        # reset path needed for that. Also reset (see _fetch()'s own
-        # handling of PanGroup.generation below) whenever this group's
-        # gateway changes -- a device's batch mechanism failing through
-        # one gateway/relay path says nothing about whether it'll fail
-        # through a different one, so a new gateway deserves a fresh
-        # chance rather than inheriting a disablement earned under a
-        # since-replaced gateway.
+        # Batch failure tracking (see _record_batch_result()). Reset when the
+        # group's gateway changes, since batch failures can be specific to
+        # one relay path.
         self._consecutive_batch_failures = 0
         self._batch_disabled = False
-        # None until this coordinator's first fetch -- see _fetch()'s
-        # own generation-change check just below for why that first
-        # fetch must NOT be treated as a change (the flags above are
-        # already fresh from this same __init__, nothing to reset).
+        # PanGroup.generation seen by the previous fetch; None before the
+        # first one.
         self._last_seen_gateway_generation: Optional[int] = None
-        # A device's own PrimitiveType AND Model are both permanent for
-        # its whole lifetime (a light is a light forever, a pump is a
-        # pump forever, and a physical unit's own model number doesn't
-        # change) -- see get_full_poll_batch()'s own docstring in
-        # python-mobius. Both populated once, on this coordinator's own
-        # first successful poll, and never re-fetched after.
+        # Read on the first successful poll; neither changes for a device.
         self._primitive_type: Optional[PrimitiveType] = None
         self._model: Optional[Model] = None
-        # VectraV1-only, and only meaningful once primitive_type is
-        # actually known as VectraV1 -- see this coordinator's own
-        # _fetch() for where it's populated. A real settings-screen
-        # toggle (see VectraInfo's own docstring), not immutable
-        # hardware fact the way primitive_type/model are -- but still
-        # cached the same way, once, rather than re-fetched every poll:
-        # get_vectra_info() costs three separate protocol round-trips
-        # (PowerOnDelay/ClosedLoop/FeedModeReturnDelay aren't a single
-        # batched read), a real ongoing cost for a value that changes
-        # about as rarely as primitive_type/model do in practice. A
-        # genuine change on real hardware is picked up the same way a
-        # primitive_type/model change would be -- an integration
-        # reload, which re-runs this __init__.
+        # Vectra closed-loop mode (see VectraInfo). A setting, but read only
+        # once since get_vectra_info() takes three reads; a change is picked
+        # up after a reload.
         self._closed_loop: Optional[bool] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -841,54 +533,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"Error communicating with {self.serial}: {err}") from err
 
     def _sync_device_registry_info(self, data: dict[str, Any]) -> None:
-        """Keeps the device registry's sw_version/hw_version/name/model/
-        manufacturer in sync with reality -- firmware changes are
-        infrequent but real (a device got an OTA update
-        mid-development of this integration), so this needs to actually
-        propagate, not just be captured once at setup and left stale
-        forever after.
+        """
+        Updates the device registry's sw_version, hw_version, name, model
+        and manufacturer after every successful read, so firmware updates
+        and a placeholder name set before the first read are corrected.
+        A user-set name is stored in name_by_user and is not affected.
 
-        name/model/manufacturer specifically: fills a gap the
-        entity-healing fix (_async_ensure_sensors_exist(), in __init__.py)
-        left behind. sensor.py's own _device_info() falls back to a
-        generic "Mobius device (SERIAL)" name when a device's own first
-        read at setup didn't have "model" yet -- and since DeviceInfo is
-        only ever consulted at entity-CREATION time, not continuously,
-        that fallback name was never getting corrected once real data
-        actually arrived, even after the entities themselves recovered
-        correctly. This is the fix: recomputed and re-synced on every
-        successful read, the same as sw_version/hw_version already were.
-
-        Safe to update .name unconditionally whenever it differs --
-        matches Home Assistant's own DeviceEntry:
-        name and name_by_user are separate fields, and a user's own
-        rename (via Home Assistant's UI) always goes into the latter,
-        which this never touches and which always takes display
-        precedence regardless of what .name itself holds.
-
-        Looks the device up by SERIAL, not BLE address -- a
-        necessary fix, not incidental to this integration's move to
-        tank-aware, multi-device config entries: an entry's own data no
-        longer has one single top-level address at all (multiple devices
-        now share one entry), and a tank peer never has any stored
-        address in the first place (see config_flow.py's own
-        _async_create_tank_entry() docstring for why). serial is the
-        only identifier guaranteed present for every device either way
-        -- see python-mobius's own documentation/12-device-identity-and-
-        address-stability.md for why it's the right one regardless, not
-        just the only available option here. sensor.py's own
-        _device_info() must build its own DeviceInfo.identifiers the
-        same, serial-based way, or this lookup would never find anything."""
+        The device is looked up by serial, like sensor.py's _device_info()
+        builds its identifiers.
+        """
         sw_version = derive_sw_version(data.get("firmware_versions") or {})
         hw_version = derive_hw_version(data.get("hardware_info") or {})
         model = data.get("model")
         manufacturer = data.get("manufacturer")
-        # Mirrors _device_info()'s own fallback chain exactly -- serial
-        # is always known here (self.serial, never dependent on a
-        # successful read), so "model and serial" is the only realistic
-        # non-custom-name outcome once real data exists at all.
-        custom_name = data.get("name")
-        name = custom_name or (f"{model} ({self.serial})" if model else None)
+        name = device_display_name(self.serial, data)
         if not any([sw_version, hw_version, model, manufacturer, name]):
             return
         device_registry = dr.async_get(self.hass)
@@ -897,76 +555,40 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if device_entry is None:
             return
-        updates = {}
-        if sw_version and device_entry.sw_version != sw_version:
-            updates["sw_version"] = sw_version
-        if hw_version and device_entry.hw_version != hw_version:
-            updates["hw_version"] = hw_version
-        if model and device_entry.model != model:
-            updates["model"] = model
-        if manufacturer and device_entry.manufacturer != manufacturer:
-            updates["manufacturer"] = manufacturer
-        if name and device_entry.name != name:
-            updates["name"] = name
+        wanted = {
+            "sw_version": sw_version, "hw_version": hw_version, "model": model,
+            "manufacturer": manufacturer, "name": name,
+        }
+        updates = {k: v for k, v in wanted.items() if v and getattr(device_entry, k) != v}
         if updates:
             device_registry.async_update_device(device_entry.id, **updates)
 
     async def async_get_connected_device(self) -> "MobiusDevice":
         """
-        Resolves and returns an already-connected MobiusDevice (direct,
-        if this coordinator's own device is currently the gateway) or
-        RelayedMobiusDevice (otherwise) for THIS coordinator's own
-        device -- the same resolution _fetch() itself does for its own
-        regular poll cycle, factored out so a one-off action against
-        this specific device (e.g. a button press -- see button.py)
-        can reuse it without duplicating the gateway-vs-relay decision.
+        A connected MobiusDevice for this device: the gateway connection if
+        this device is the gateway, else a RelayedMobiusDevice through it.
+        For one-off actions (buttons, services); unlike _fetch(), failures
+        are not recorded against the gateway.
 
-        Deliberately does NOT do any of _fetch()'s own poll-cycle
-        bookkeeping (record_gateway_success()/record_relay_success()/
-        mark_disconnected() etc, all specific to what a regular,
-        recurring read failure should mean for the registry's own
-        gateway-health tracking) -- a one-off action failing doesn't
-        necessarily mean the same thing a poll failing does (e.g. a
-        device can perfectly well reject a specific write while its
-        connection is completely healthy), so a caller of this method
-        is expected to handle its own failure differently, not treat
-        it as a regular poll failure.
-
-        Raises HomeAssistantError if no gateway is currently available
-        for this device's own pan_id group at all.
+        Raises HomeAssistantError if the group has no gateway.
         """
         group = self.registry.group(self.pan_id)
         if group is None or group.gateway_serial is None:
             raise HomeAssistantError(
                 f"No gateway currently available for pan_id {self.pan_id:#06x}"
             )
-        if group.gateway_serial == self.serial:
-            return await group.gateway_connection.ensure_connected()
         gateway_device = await group.gateway_connection.ensure_connected()
+        if group.gateway_serial == self.serial:
+            return gateway_device
         peer = await self._resolve_own_mesh_peer(group)
         return RelayedMobiusDevice(gateway_device, peer)
 
     def _record_batch_result(self, used_batch: bool) -> None:
         """
-        Tracks whether get_metadata_batch()'s own batched request is
-        actually working for THIS device -- see BATCH_FAILURE_THRESHOLD's
-        own docstring in const.py for the full reasoning. Only ever
-        called after a successful poll (used_batch only means something
-        once _fetch_all() has actually returned) -- a poll that fails
-        entirely (the connection itself down, say) never reaches this at
-        all, and correctly leaves whatever was already tracked here
-        untouched.
-
-        Once self._batch_disabled is already True, this returns
-        immediately without touching the counter or logging anything
-        further -- otherwise every poll from
-        then on passes force_individual_reads=True, so used_batch comes
-        back False EVERY TIME by deliberate design, not because of a
-        fresh failure. Without this guard, the counter would grow completely
-        unbounded (observed at 420/2 consecutive on one device) and
-        the same misleading "X/2 consecutive" debug line kept firing on
-        every single poll forever, long after the threshold had already
-        been crossed and acted on.
+        Counts consecutive polls whose batched read fell back to individual
+        reads, and disables batching after BATCH_FAILURE_THRESHOLD of them.
+        Once disabled nothing is counted: every poll then reports
+        used_batch=False by design.
         """
         if self._batch_disabled:
             return
@@ -998,34 +620,16 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def supported_attribute_names(self) -> Optional[list[str]]:
         """
-        This device's own known supported-attribute set (see
-        self._supported_attribute_ids's own docstring above), as
-        sorted, human-readable C2Attribute names rather than the raw
-        numeric IDs -- deliberately a public property returning names,
-        not the private, numeric self._supported_attribute_ids itself:
-        that field stays out of coordinator.data on purpose
-        (diagnostics.py dumps that dict directly, and a raw set of
-        attribute IDs has no business leaking into a user-submitted
-        diagnostic report -- see _fetch_all()'s own docstring), but a
-        friendly, named list is genuinely useful surfaced to a user
-        (e.g. as an entity attribute), which is a different, deliberate
-        exposure rather than an accidental one.
-
-        Returns None until the first successful poll has populated the
-        underlying cache -- callers should treat that the same as "not
-        yet known", not "known to support nothing". An ID this
-        library's own C2Attribute enum doesn't cover yet (newer
-        firmware reporting something not yet catalogued) renders as
-        "unknown(<id>)" rather than being silently dropped.
+        The supported attributes as sorted C2Attribute names
+        ("unknown(<id>)" for ids the enum doesn't know), for display as an
+        entity attribute. None until the first successful poll.
         """
         if self._supported_attribute_ids is None:
             return None
         names = []
         for attr_id in sorted(self._supported_attribute_ids):
-            try:
-                names.append(C2Attribute(attr_id).name)
-            except ValueError:
-                names.append(f"unknown({attr_id})")
+            attr = enum_or_none(C2Attribute, attr_id)
+            names.append(attr.name if attr is not None else f"unknown({attr_id})")
         return names
 
     async def _fetch(self) -> dict[str, Any]:
@@ -1036,15 +640,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         is_gateway = group.gateway_serial == self.serial
-        # Captured alongside is_gateway, at the exact same moment, for
-        # the exact same reason: a fetch's failure can arrive well after
-        # the underlying gateway state it was acting on has already been
-        # superseded by a concurrent promotion elsewhere (a torn-down
-        # connection doesn't make an in-flight read fail instantly -- it
-        # keeps waiting for a response that will never come until its
-        # own, separate timeout elapses). See PanGroup.generation's own
-        # docstring in gateway_registry.py for the full reasoning and the
-        # production incident this fixes.
+        # The gateway state this fetch acts on. A read through a torn-down
+        # connection only fails at its timeout, possibly after another
+        # gateway was promoted; such a failure is not recorded against the
+        # new gateway (see PanGroup.generation).
         expected_generation = group.generation
         if self._last_seen_gateway_generation is not None and expected_generation != self._last_seen_gateway_generation:
             if self._batch_disabled or self._consecutive_batch_failures > 0:
@@ -1063,30 +662,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         try:
             device = await self.async_get_connected_device()
+            data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
+                device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                batch_disabled=self._batch_disabled,
+                cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
+            )
+            self._record_batch_result(used_batch)
             if is_gateway:
-                data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
-                    device, cached_supported_attribute_ids=self._supported_attribute_ids,
-                    batch_disabled=self._batch_disabled,
-                    cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
-                )
-                self._record_batch_result(used_batch)
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
             else:
-                data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
-                    device, cached_supported_attribute_ids=self._supported_attribute_ids,
-                    batch_disabled=self._batch_disabled,
-                    cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
-                )
-                self._record_batch_result(used_batch)
                 self.registry.record_relay_success(self.pan_id, self.serial)
 
             if self._primitive_type == PrimitiveType.VectraV1 and self._closed_loop is None:
-                # get_vectra_info() already fails soft to None internally
-                # (unsupported attribute, connection hiccup, etc.) -- no
-                # extra try/except needed here beyond the one already
-                # wrapping this whole block.
-                vectra_info = await device.get_vectra_info()
+                vectra_info = await device.get_vectra_info()  # None when unavailable
                 if vectra_info is not None:
                     self._closed_loop = vectra_info.closed_loop
             data["closed_loop"] = self._closed_loop
@@ -1096,18 +685,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "gateway" if is_gateway else "relayed", err,
             )
             if group.generation != expected_generation:
-                # A promotion already happened elsewhere while this
-                # fetch was still in flight -- is_gateway (and whichever
-                # connection this fetch actually used) reflect a gateway
-                # state that's already been superseded, so nothing here
-                # says anything meaningful about the group's CURRENT
-                # gateway. Deliberately skips mark_disconnected() too,
-                # not just the registry calls below it: group.
-                # gateway_connection read now would be the NEW
-                # connection (a different object than whatever this
-                # fetch actually used), and marking THAT one
-                # disconnected would incorrectly flag a connection that
-                # was never actually part of this failure at all.
+                # The gateway changed while this fetch was in flight: the
+                # failure says nothing about the current gateway, and
+                # group.gateway_connection is now a different connection, so
+                # neither is touched.
                 _LOGGER.debug(
                     "%s's own fetch started under generation %d, but pan_id %#06x is "
                     "now on generation %d -- not recording this failure against the "
@@ -1115,57 +696,28 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.serial, expected_generation, self.pan_id, group.generation,
                 )
             elif is_gateway:
-                # A READ can fail even after ensure_connected() reported
-                # success (the connection can drop in between) -- this
-                # needs to mark the connection disconnected in that case
-                # too, not just when ensure_connected() itself raises,
-                # or the next poll cycle would keep reusing the same
-                # dead connection forever instead of ever actually
-                # reconnecting.
+                # The connection may have dropped after ensure_connected()
+                # succeeded; force a reconnect on the next poll.
                 group.gateway_connection.mark_disconnected()
                 await self.registry.record_gateway_failure(self.pan_id, expected_generation)
             else:
-                # A relayed device's own failure never touches the shared
-                # gateway CONNECTION's state (mark_disconnected()) -- it
-                # might be specific to this one device/target, not the
-                # gateway connection itself, which the gateway's own
-                # coordinator already detects and handles independently on
-                # its own cycle. It DOES still count toward a separate,
-                # per-target failure tally (record_relay_failure()) though --
-                # a production incident showed a gateway can
-                # be perfectly healthy for its own reads, and for relaying to
-                # OTHER members, while persistently failing to relay to one
-                # specific target for 40+ minutes straight. See
-                # RELAY_FAILURE_THRESHOLD's own docstring in const.py for why
-                # this is a genuinely different symptom from the gateway's
-                # own health, kept as a deliberately separate mechanism.
+                # May be specific to this target, so the shared connection is
+                # left alone; the failure counts towards
+                # RELAY_FAILURE_THRESHOLD for this target.
                 await self.registry.record_relay_failure(self.pan_id, self.serial, expected_generation)
             raise
 
-        # Every device -- gateway and relayed alike -- picks up its own,
-        # most-recently-known value here, on every single poll cycle
-        # (not just the gateway's own). Only the gateway itself actually
-        # does the extra read above; a relayed device just reads
-        # whatever the gateway's own last poll (up to one POLL_INTERVAL
-        # old) already wrote to the shared registry -- avoids every
-        # device in an N-device tank independently repeating the exact
-        # same mesh-wide read every cycle for data that's identical
-        # regardless of which device asks for it.
+        # Written to the registry by the gateway's poll
+        # (_refresh_mesh_last_seen()), so it is up to one poll old for
+        # relayed devices.
         member = group.members.get(self.serial)
         data["mesh_last_seen_at"] = member.mesh_last_seen_at if member else None
         return data
 
     async def _refresh_mesh_last_seen(self, group: PanGroup, device: MobiusDevice) -> None:
-        """Refreshes every tank member's own "last heard from on the
-        mesh" timestamp, from the SAME connection _fetch() just used for
-        this device's own regular status read -- one extra attribute
-        read, reused for every device in the tank, not one read per
-        device. Deliberately non-fatal: this is supplementary
-        information layered on top of a status read that already
-        succeeded, so a failure here (a device that doesn't support this
-        attribute, or a transient read error) must not undo that
-        success or fail the whole poll cycle over it -- just leaves
-        every member's own value at whatever it was already."""
+        """Updates every member's "last heard on the mesh" time from one
+        NetworkedThreadDevices read on the gateway. Failures are ignored and
+        leave the previous values."""
         try:
             peers = await device.discover_networked_thread_devices()
         except Exception as err:
@@ -1183,11 +735,9 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
     async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
-        """Returns a MeshPeer for THIS coordinator's own device, using a
-        cached mesh address if available (usually already populated by
-        __init__.py's proactive discovery-at-setup step, which runs
-        before the first refresh for any relayed device), or discovering
-        it on demand via a brief direct connection if not."""
+        """A MeshPeer for this device, from the cached mesh address (usually
+        discovered at setup by __init__.py) or, failing that, discovered now
+        through a brief direct connection."""
         member = group.members.get(self.serial)
         address = member.mesh_address if member else None
 
@@ -1210,114 +760,28 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _discover_own_mesh_address(self) -> Optional[bytes]:
-        """On-demand fallback for _resolve_own_mesh_peer() -- see
-        discover_mesh_address() below for the actual logic, shared with
-        __init__.py's proactive discovery-at-setup path."""
         return await discover_mesh_address(self.hass, self.serial, self.registry.semaphore)
 
 
 async def discover_mesh_address(hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore) -> Optional[bytes]:
-    """
-    Connects directly and briefly to whichever device is currently
-    advertising `serial` (resolved via Home Assistant's own Bluetooth
-    cache, matching MobiusConnectionManager's own resolution) to read its
-    own Thread mesh-local address. Returns None (not an exception) if the
-    device can't currently be found/reached -- callers that need to
-    surface this as a real failure (e.g. MobiusDeviceCoordinator's
-    on-demand fallback, when relay genuinely can't proceed without an
-    address) do so themselves; __init__.py's proactive call at setup time
-    treats a None here as "will retry later" rather than fatal, since the
-    coordinator's own on-demand fallback covers it if this attempt
-    doesn't pan out.
-
-    `semaphore` MUST be the same shared connection semaphore
-    MobiusConnectionManager uses (MAX_CONCURRENT_CONNECTIONS, const.py)
-    -- this was a real bug when it was
-    missing: this connects independently of any gateway connection, and
-    without sharing the same semaphore, a burst of on-demand discovery
-    calls (e.g. several devices needing discovery around the same time,
-    such as right after a gateway promotion, when the demoted former
-    gateway needs its own mesh address for the first time) could exceed
-    the real BLE adapter's actual concurrent-connection capacity even
-    while appearing to respect MAX_CONCURRENT_CONNECTIONS, since this
-    path wasn't throttled by it at all -- manifesting as the CURRENT
-    gateway's own otherwise-healthy connection failing for reasons
-    unrelated to the gateway itself, triggering unnecessary failover.
-    """
-    info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
-    if info is not None:
-        ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
-        if ble_device is None:
-            # Present in Home Assistant's OWN advertisement
-            # cache (matched by serial, above), but not connectable via
-            # async_ble_device_from_address() -- a meaningfully
-            # different situation from never having been seen at all
-            # (the case below): the device is there, but nothing local
-            # currently has a connectable path to it (e.g. its only
-            # proxy right now is scan-only, or briefly unavailable).
-            _LOGGER.debug(
-                "%s found in Home Assistant's advertisement cache at %s, but not "
-                "currently connectable from here", serial, info.address,
-            )
-            return None
-        try:
-            async with semaphore:
-                async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
-                    return await mdevice.get_own_mesh_address()
-        except Exception as err:
-            _LOGGER.debug("Mesh address discovery failed for %s: %s", serial, err)
-            return None
-    _LOGGER.debug(
-        "%s not found in Home Assistant's own Bluetooth cache at all, even after "
-        "requesting an active scan (%d connectable scanner(s) currently registered)",
-        serial, bluetooth.async_scanner_count(hass, connectable=True),
+    """The device's own mesh-local address, read through a brief direct
+    connection. None if the device can't be reached (callers decide whether
+    that is fatal). See _with_temporary_connection() for `semaphore`."""
+    return await _with_temporary_connection(
+        hass, serial, semaphore, lambda mdevice: mdevice.get_own_mesh_address(),
+        "Mesh address discovery",
     )
-    return None
 
 
 async def discover_tank_for_serial(
     hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore,
 ) -> Optional[Tank]:
     """
-    Connects directly and briefly to whichever device is currently
-    advertising `serial` and calls python-mobius's
-    mobius.discovery.discover_tank() on it -- the config flow's own way
-    of answering "is this device part of a multi-device tank, and if so
-    who else is on it" before deciding whether to offer a one-tank or
-    one-device confirm. Same resolution/connection pattern as
-    discover_mesh_address() above (including sharing the same connection
-    semaphore, for the same reason that function's
-    own docstring explains), just calling a different python-mobius
-    function once connected.
+    discover_tank() on the device advertising `serial`, through a brief
+    direct connection (used by the config flow).
 
-    Returns None (not an exception, not an empty Tank) if the device
-    can't currently be found/reached at all -- distinguishable from
-    discover_tank()'s own Tank(prefix=None, peers=[]) return, which means
-    "reached the device fine, but it isn't part of any provisioned
-    Thread network" (the genuine "ad-hoc, no tank" case the config flow
-    falls back to a single-device confirm for). Callers need to tell
-    these apart: this function's None means "try again later, this
-    device isn't currently reachable," not "this device has no tank."
+    None means the device couldn't be reached (try again later). A
+    reachable device that isn't part of a Thread network returns
+    Tank(prefix=None, peers=[]) instead.
     """
-    info = await _find_in_bluetooth_cache_with_active_scan_fallback(hass, serial)
-    if info is None:
-        _LOGGER.debug(
-            "%s not found in Home Assistant's own Bluetooth cache at all, even after "
-            "requesting an active scan (%d connectable scanner(s) currently registered)",
-            serial, bluetooth.async_scanner_count(hass, connectable=True),
-        )
-        return None
-    ble_device = bluetooth.async_ble_device_from_address(hass, info.address, connectable=True)
-    if ble_device is None:
-        _LOGGER.debug(
-            "%s found in Home Assistant's advertisement cache at %s, but not "
-            "currently connectable from here", serial, info.address,
-        )
-        return None
-    try:
-        async with semaphore:
-            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
-                return await discover_tank(mdevice)
-    except Exception as err:
-        _LOGGER.debug("Tank discovery failed for %s: %s", serial, err)
-        return None
+    return await _with_temporary_connection(hass, serial, semaphore, discover_tank, "Tank discovery")

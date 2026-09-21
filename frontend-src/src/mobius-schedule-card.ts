@@ -8,20 +8,11 @@ import { formatDuration } from "./format";
 /**
  * mobius-schedule-card
  *
- * One card per schedule GROUP -- not per tank, and not per light/pump
- * device in isolation. Config is a single field, device_id, and it
- * must be a MEMBER's own device_id (a specific light or pump) -- never
- * the Tank device itself, even though the backend call this card
- * actually needs (mobius/resolve_schedule_groups) takes the Tank's own
- * ID. This card resolves that itself: given the configured device_id,
- * it looks up that device's own via_device_id (every light/pump this
- * integration creates is registered with via_device_id pointing at its
- * own Tank -- see __init__.py/sensor.py/switch.py/button.py/select.py,
- * all of which set this identically) to find its Tank, calls
- * resolve_schedule_groups with THAT, then shows only the one group
- * containing the originally configured device -- so a tank with two
- * independently-grouped light pairs needs two separate card instances,
- * one per group, each pointed at any one of that group's own members.
+ * Shows and edits the schedule of one schedule group. Configured with the
+ * device_id of a light or pump (not the tank): the card finds the device's
+ * tank through via_device_id, calls mobius/resolve_schedule_groups for it and
+ * shows the group containing the device. Independent light groups on one
+ * tank need one card each.
  */
 
 interface MobiusScheduleCardConfig extends LovelaceCardConfig {
@@ -37,22 +28,10 @@ function joinNaturally(names: string[]): string {
 const CHART_WIDTH = 600;
 const CHART_HEIGHT = 200;
 
-// Best-effort visual match to a channel's own real-world color --
-// purely cosmetic (channel identity itself comes entirely from the
-// name/entity_id, never from this mapping). Covers every real
-// channel VisualID defines (see below), so the fallback palette
-// exists only for a name this map has genuinely never seen (a
-// renamed or custom channel), not for any real, currently-defined
-// channel -- it cycles through a small fixed palette by position, so
-// it's still visually distinguishable from its neighbors without
-// pretending to know what color it actually corresponds to.
-// Keyed by the exact channel name as python-mobius's own VisualID
-// enum reports it (IntEnum.name -- e.g. "DeepRed", "MoonlightBlue":
-// PascalCase, no spaces), lowercased to match channelColor()'s own
-// lookup. Covers every real light-color channel VisualID defines
-// (constants.py) -- excluding Brightness (not a color channel, the
-// separate per-point master dimmer) and the Status*/StormProbability/
-// CloudProbability entries (not lighting channels at all).
+// Display color per channel, keyed by the lowercased VisualID name (e.g.
+// "deepred"). Only cosmetic. Covers every lighting channel VisualID defines
+// (not Brightness or the Status*/probability entries); other names get a
+// color from FALLBACK_PALETTE by hash.
 const CHANNEL_COLOR_GUESSES: Record<string, string> = {
   coolwhite: "#d6ecff",
   blue: "#2f6fed",
@@ -93,12 +72,8 @@ function channelColor(name: string): string {
   return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
 }
 
-// custom-card-helpers' own HomeAssistant type is a deliberately
-// minimal subset (states/services/config/etc.) -- it does NOT include
-// the device/entity registries, even though the real hass object
-// passed to every card at runtime genuinely has them. Extending
-// locally (rather than casting to `any` every time this is needed)
-// keeps everything past this one boundary still type-checked.
+// custom-card-helpers' HomeAssistant type lacks the device registry that the
+// real hass object has.
 interface DeviceRegistryEntry {
   id: string;
   via_device_id: string | null;
@@ -132,11 +107,8 @@ interface ScheduleGroup {
   schedule_intensity?: number | null;
 }
 
-// Home Assistant's own "compressed state" wire format, used by the
-// history/history_during_period websocket command -- s/lu/lc rather
-// than state/last_updated/last_changed. lu is itself optional: HA
-// omits it when it's identical to lc, so the real timestamp to use is
-// whichever of the two is actually present.
+// Compressed state format of history/history_during_period: s = state,
+// lc = last changed, lu = last updated (omitted when equal to lc).
 interface CompressedStateEntry {
   s: string;
   lu?: number;
@@ -148,7 +120,7 @@ interface HistoryPoint {
   v: number;
 }
 
-// Matches pump_schedule_to_dict()'s own output shape exactly (python-mobius).
+// pump_schedule_to_dict() entry (python-mobius).
 interface PumpScheduleEntry {
   time_minutes: number;
   flags: number;
@@ -156,30 +128,24 @@ interface PumpScheduleEntry {
   params: Record<string, unknown>;
 }
 
-// Matches light_schedule_to_dict()'s own output shape exactly (python-mobius).
+// light_schedule_to_dict() entry (python-mobius).
 interface LightScheduleEntry {
   time_minutes: number;
   flags: number;
   channels: Record<string, number>;
 }
 
-// Everything that's genuinely generic across both kinds (time editing,
-// period editing, the read/save-to-device flow itself) operates on
-// this union rather than PumpScheduleEntry specifically -- see
-// isPumpEntry() below for the one place that needs to tell them apart.
+// Time/period editing and reading/saving work on either kind; isPumpEntry()
+// tells them apart.
 type ScheduleEntry = PumpScheduleEntry | LightScheduleEntry;
 
 function isPumpEntry(entry: ScheduleEntry): entry is PumpScheduleEntry {
   return "mode" in entry;
 }
 
-// Bit values confirmed against python-mobius's own documentation
-// (06-light-schedule.md's own flags table -- shared by light and pump
-// points, same wire framing for both). ACTIVE(1) is not a period on
-// its own; every real point has it set, so it's excluded here.
-// SUNRISE/SUNSET are combination flags that also include the NIGHT
-// bit, so they're checked first -- checking NIGHT alone first would
-// misclassify every sunrise/sunset point as plain Night.
+// Point flags (python-mobius 06-light-schedule.md): ACTIVE = 1 on every
+// point; SUNRISE (6) and SUNSET (10) include the NIGHT bit (2), so they are
+// checked first.
 type Period = "day" | "night" | "sunrise" | "sunset";
 
 function periodForFlags(flags: number): Period {
@@ -189,10 +155,8 @@ function periodForFlags(flags: number): Period {
   return "day";
 }
 
-// Maps coordinator.py's own moon_phase_icon() output back to a
-// localized, human-readable phase name for the toggle button's own
-// title -- the icon alone doesn't convey which phase it is to
-// someone who doesn't recognize MDI icon names on sight.
+// Localized moon phase name for a moon_phase_icon() value (the lunar
+// button's tooltip).
 function moonPhaseName(icon: string, hass: HomeAssistant): string {
   const lang = hass?.locale?.language;
   switch (icon) {
@@ -226,26 +190,17 @@ function periodLabel(period: Period): string {
   }
 }
 
-// h:mm, 24h wall-clock -- time_minutes is minutes since midnight
-// (0-1439), not a real Date, so this doesn't need locale-aware
-// formatTime() the way the chart's own hour labels do (there's no
-// timezone or date involved, just a wall-clock offset).
+// h:mm of a time_minutes value (minutes since midnight; no date or time
+// zone involved).
 function formatMinutes(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return `${h}:${String(m).padStart(2, "0")}`;
 }
 
-// Mirrors Home Assistant's own useAmPm()/TimeFormat logic (frontend's
-// src/common/datetime/use_am_pm.ts). A real, confirmed bug lived here
-// before this existed: the edit form's own time field used a plain
-// native <input type="time">, whose AM/PM-vs-24h display is entirely
-// controlled by the BROWSER/OS locale -- completely independent of
-// Home Assistant's own configured Time Format setting. A person with
-// their OS set to a 12-hour locale would see AM/PM here even with
-// Home Assistant's own Time Format explicitly set to 24 hour. This is
-// why the time field is built from plain number inputs below instead
-// of a native time input, which can't be made to honor this setting.
+// Whether times are shown with AM/PM, following Home Assistant's Time Format
+// setting like its frontend's useAmPm(). The time field uses number inputs
+// because a native time input follows the browser locale instead.
 function shouldUseAmPm(hass: HomeAssistant): boolean {
   const timeFormat = hass.locale?.time_format as string | undefined;
   if (timeFormat === "12hour" || timeFormat === "am_pm" || timeFormat === "12") return true;
@@ -257,35 +212,40 @@ function shouldUseAmPm(hass: HomeAssistant): boolean {
   return new Intl.DateTimeFormat(locale, { hour: "numeric" }).resolvedOptions().hour12 ?? false;
 }
 
-// hass.states[...].state is always the raw, unrounded string --
-// suggested_display_precision on the backend's own SensorEntity only
-// applies inside Home Assistant's own frontend components, never to
-// a state read directly like this. Falls back to the state as-is if
-// it isn't actually numeric, rather than ever showing "NaN".
+// A numeric state rounded to an integer (states are unrounded; display
+// precision only applies in Home Assistant's own components). Non-numeric
+// states are returned as-is.
 function roundedState(state: string): string {
   const n = Number(state);
   return Number.isFinite(n) ? String(Math.round(n)) : state;
 }
 
-// Confirmed from Home Assistant's own state-history-chart-line: its
-// own chart shows a rolling window ending at "now", not a fixed
-// calendar-day window that resets to a blank chart at midnight. This
-// is called fresh each time (never cached), so the fetch range and
-// the chart's own X-axis both advance together as time passes,
-// rather than drifting apart.
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isAvailable(stateObj?: { state: string }): boolean {
+  return !!stateObj && stateObj.state !== "unavailable" && stateObj.state !== "unknown";
+}
+
+// A clock time in Home Assistant's time format (H:mm without a locale).
+function formatClock(date: Date, locale?: HomeAssistant["locale"]): string {
+  return locale ? formatTime(date, locale) : `${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// [channel name, entity_id] of the member's channel sensors that exist.
+function channelEntities(member: ScheduleGroupMember): [string, string][] {
+  return Object.entries(member.channel_entity_ids ?? {}).filter((entry): entry is [string, string] => !!entry[1]);
+}
+
+// Start of the chart window: the last 24 hours up to now, like Home
+// Assistant's history charts.
 function chartWindowStartMs(): number {
   return Date.now() - 24 * 60 * 60 * 1000;
 }
 
-// Real clock-hour marks (0:00, 6:00, 12:00, 18:00, ...) that fall
-// within [windowStartMs, windowEndMs], not fixed fractional offsets
-// into the window. A rolling window means which actual hours are
-// visible keeps changing as it advances -- an old mark scrolls off
-// the left as a new one appears on the right -- but each individual
-// mark itself always lands on a clean, predictable hour, matching
-// how real time-series charts (including HA's own) label a rolling
-// window, rather than always showing exactly 4 labels at whatever
-// (likely not-on-the-hour) times happen to be 0/6/12/18h before now.
+// Timestamps of whole hours divisible by intervalHours within
+// [windowStartMs, windowEndMs], for the chart's hour labels.
 function niceHourMarks(windowStartMs: number, windowEndMs: number, intervalHours: number): number[] {
   const marks: number[] = [];
   const cursor = new Date(windowStartMs);
@@ -300,26 +260,14 @@ function niceHourMarks(windowStartMs: number, windowEndMs: number, intervalHours
   return marks;
 }
 
-// A fixed, universal enum (python-mobius's own RampType) -- unlike
-// PumpMode/channels, its own valid values don't vary by pump model,
-// so unlike those this doesn't need to come from the backend at all.
+// RampType values (the same for every pump).
 const RAMP_TYPES = ["Sinusoidal", "Logarithmic", "Linear"];
 
-// The reverse of periodForFlags() -- ACTIVE(1) is always set on a
-// real point (a point without it is a padding entry, never something
-// a person edits), combined with the bits for the chosen period.
+// The reverse of periodForFlags(), with ACTIVE set.
 const PERIOD_FLAGS: Record<Period, number> = { day: 1, night: 3, sunrise: 7, sunset: 11 };
 
-// The app's own UI never shows a raw PhaseShift value or separate
-// "Sync"/"EcoSmartBack" entries to choose between -- confirmed from
-// the decompiled app's own PumpMode.text(): Sync's own display name
-// is picked from PhaseShift alone (180 -> "Anti-Sync", anything else
-// -> "Sync"), and EcoSmartBack is always just "EcoSmart Back" with no
-// phase-based split of its own at all. So exactly three choices ever
-// reach a person, never four and never a raw phase number:
-// Sync, Anti-Sync, EcoSmart Back. These helpers reproduce that
-// collapsing here, rather than exposing PhaseShift as a plain numeric
-// field the way every other param is shown.
+// Like the app, the mode list offers Sync, Anti-Sync and EcoSmart Back
+// instead of a PhaseShift value: Anti-Sync is Sync with PhaseShift 180.
 type DisplayMode = "Sync" | "AntiSync" | string; // string covers EcoSmartBack and every non-child mode as-is
 
 function displayModeFor(mode: string, phaseShift: unknown): DisplayMode {
@@ -333,10 +281,7 @@ function displayModeLabel(displayMode: DisplayMode): string {
   return displayMode;
 }
 
-// The dropdown's own option list -- Sync expands to two entries
-// (Sync/Anti-Sync), everything else (including EcoSmartBack) passes
-// through as a single entry, matching the real modes this pump
-// actually supports.
+// Mode dropdown options: Sync becomes Sync and Anti-Sync.
 function displayModeOptions(modes: string[]): DisplayMode[] {
   return modes.flatMap((m) => (m === "Sync" ? (["Sync", "AntiSync"] as DisplayMode[]) : [m]));
 }
@@ -350,13 +295,8 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _error?: string;
   @state() private _loading = false;
 
-  // Shown instead of the live entity value while a person is actively
-  // dragging the intensity slider -- the debounced service call below
-  // hasn't necessarily landed yet, so reading the live entity value
-  // during that window would make the slider visibly snap back before
-  // jumping to the new value once the service call actually completes.
-  // Cleared once the debounced write itself resolves, so the display
-  // reverts to tracking the live entity normally again afterward.
+  // Slider value shown until the debounced intensity write completes, so the
+  // slider doesn't jump back to the old entity value in between.
   @state() private _pendingIntensityPercent?: number;
   @state() private _pendingLunarToggle = false;
   @state() private _lunarToggleError?: string;
@@ -364,12 +304,8 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _channelHistoryByEntity: Record<string, HistoryPoint[]> = {};
   @state() private _historyLoading = false;
 
-  // 0-1 fraction across the chart's own width -- a fraction rather
-  // than a pixel X so it doesn't depend on the SVG's actual rendered
-  // size (which varies with the card's own layout width, unlike its
-  // fixed viewBox). Deliberately kept OUT of _renderChannelChart's own
-  // memoization key -- see _renderChartHoverOverlay's own comment for
-  // why.
+  // Hover position as a fraction (0-1) of the chart width. Not part of the
+  // chart memoization key (see _renderChartHoverOverlay()).
   @state() private _chartHoverFraction?: number;
 
   @state() private _view: "glance" | "edit" = "glance";
@@ -377,66 +313,39 @@ export class MobiusScheduleCard extends LitElement {
   @state() private _scheduleError?: string;
   @state() private _schedulePoints: ScheduleEntry[] = [];
 
-  // The actual device write -- everything up to this point (per-point
-  // Save) only ever touches _schedulePoints in memory. A brief
-  // success message auto-clears itself; an error persists until the
-  // next save attempt, so it doesn't disappear before someone's had a
-  // chance to read it.
+  // State of Save schedule to device (point edits only change
+  // _schedulePoints). The success message clears itself; an error stays until
+  // the next save.
   @state() private _savingSchedule = false;
   @state() private _saveScheduleError?: string;
   @state() private _saveScheduleSucceeded = false;
 
-  // .mob export/import -- both local browser file operations, never
-  // touching the device directly. Import replaces _schedulePoints
-  // wholesale (a .mob file represents a whole schedule, not a single
-  // point) but doesn't write anything on its own -- the person still
-  // reviews and presses Save schedule to device afterward, same as
-  // any other local edit.
+  // .mob export/import. Import only replaces _schedulePoints; the device is
+  // written by Save schedule to device.
   @state() private _exportingMob = false;
   @state() private _importingMob = false;
   @state() private _mobError?: string;
 
-  // Which point (by index into _schedulePoints) is currently expanded
-  // for editing -- null when none is. _workingPoint is a separate,
-  // mutable copy of that point's own data, so edits in progress don't
-  // touch _schedulePoints (and thus don't affect the read-only list's
-  // own rendering) until Save is actually pressed.
+  // Index of the point being edited (null if none), and the copy being edited
+  // (_schedulePoints only changes on Save).
   @state() private _editingIndex: number | null = null;
   @state() private _workingPoint?: ScheduleEntry;
 
-  // True only when the point currently open for editing was just
-  // created by Add point, not an existing one someone opened to
-  // modify. Cancel needs to tell these apart: discarding an edit to
-  // an existing point means leaving it as it was, but discarding a
-  // brand new point means removing it -- Add already appended a real
-  // (if default-valued) entry to _schedulePoints before editing even
-  // starts, so without this a cancelled Add would silently leave that
-  // half-configured point sitting in the list.
+  // True when the point being edited was just created by Add point, so
+  // cancelling removes it instead of keeping it.
   @state() private _isNewPoint = false;
 
-  // For the parent-pump picker -- every pump member on the same tank
-  // other than this device itself. Populated in _resolveGroup(); see
-  // its own comment there for why no separate fetch is needed.
+  // Pumps of the same tank other than this one, for the parent pump picker.
   @state() private _otherPumps: ScheduleGroupMember[] = [];
 
-  // Not @state -- this is a plain timer handle, not something that
-  // should itself trigger a re-render when it changes.
   private _intensityDebounceHandle?: ReturnType<typeof setTimeout>;
 
-  // The device_id resolution was last run for -- avoids re-resolving
-  // on every single hass update (which happens on every poll cycle
-  // for ANY entity in the whole system, not just this card's own
-  // ones); only actually re-runs when the configured device_id itself
-  // changes, or after a failed attempt where hass wasn't ready yet.
+  // device_id the group was last resolved for; hass changes on every state
+  // change, so resolution only runs again when device_id changes.
   private _resolvedFor?: string;
 
-  // Re-fetches channel history on a timer -- a single fetch at
-  // resolution time would otherwise leave the chart frozen at
-  // whatever moment the card first loaded: new data points never
-  // arrive on their own the way live entity state does, since history
-  // is a point-in-time query, not something hass itself pushes
-  // updates for. Cleared on disconnect so it doesn't keep firing (and
-  // holding a reference to this card) after the card leaves the DOM.
+  // Periodic history refresh (history isn't pushed like entity states).
+  // Stopped when the card is disconnected.
   private _historyRefreshHandle?: ReturnType<typeof setInterval>;
   private static readonly HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -460,18 +369,8 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   public getGridOptions() {
-    // Confirmed empirically: 7 rows x 12 columns (full section width) is
-    // where the light card's own chart has enough room to be genuinely
-    // readable; 4x6 is the pump card's own comfortable minimum, since
-    // it has far less content (a single reading, mode line, and
-    // button). Explicit min/max on both axes -- not just a single
-    // preferred size -- so the sections view's own layout engine
-    // always has a bounded range to shrink into on a narrower
-    // viewport (e.g. mobile, or a dashboard using max_columns) rather
-    // than only a fixed preference with no defined floor, which is
-    // what let a too-wide desktop-configured card produce an "Invalid
-    // configuration" error once squeezed onto a screen with too few
-    // section-columns to honor it.
+    // Sections view size: the light chart needs about 12x7, the pump view
+    // 6x4. Min/max bounds let the layout shrink on narrow screens.
     if (this._group?.kind === "light") {
       return { columns: 12, rows: 7, min_columns: 4, max_columns: 12, min_rows: 5, max_rows: 10 };
     }
@@ -525,11 +424,7 @@ export class MobiusScheduleCard extends LitElement {
       }
       this._group = group;
 
-      // For the parent-pump picker (Sync/EcoSmartBack's own
-      // ParentSerial field) -- every pump member across every OTHER
-      // pump group on this same tank, excluding this device itself.
-      // Comes from this same response (every group on the tank, not
-      // just the matched one), so no separate round-trip is needed.
+      // Every other pump of the tank, from the same response.
       this._otherPumps = response.groups
         .filter((g) => g.kind === "pump")
         .flatMap((g) => g.members)
@@ -537,11 +432,7 @@ export class MobiusScheduleCard extends LitElement {
 
       clearInterval(this._historyRefreshHandle);
       if (group.kind === "light") {
-        // Deliberately not awaited -- the glance view itself doesn't
-        // depend on history to render (readings/slider/scene banner
-        // all come from live state), so a slow history query
-        // shouldn't hold up everything else. The chart area just
-        // shows its own loading state until this resolves.
+        // Not awaited: only the chart depends on history.
         this._fetchChannelHistory(group);
         this._historyRefreshHandle = setInterval(
           () => this._fetchChannelHistory(group),
@@ -549,21 +440,16 @@ export class MobiusScheduleCard extends LitElement {
         );
       }
     } catch (err) {
-      this._error = err instanceof Error ? err.message : String(err);
+      this._error = errorMessage(err);
       this._group = undefined;
     } finally {
       this._loading = false;
     }
   }
 
-  // One entity_id -> point[] map covering EVERY member's own channel
-  // sensors, fetched once per group resolution -- not per currently-
-  // picked fallback member. This means a fallback switch (a member
-  // recovering or going unavailable) can redraw the chart instantly
-  // from already-fetched data, with no second network round-trip, by
-  // simply picking a different member's own entries out of this same
-  // map at render time (see _pickAvailableLightMember, used
-  // identically for both the live reading and the chart).
+  // History of every member's channel sensors, keyed by entity_id, so the
+  // chart can switch to another member (see _pickAvailableLightMember())
+  // without fetching again.
   private async _fetchChannelHistory(group: ScheduleGroup): Promise<void> {
     const entityIds = group.members
       .flatMap((m) => Object.values(m.channel_entity_ids ?? {}))
@@ -588,27 +474,27 @@ export class MobiusScheduleCard extends LitElement {
       }
       this._channelHistoryByEntity = byEntity;
     } catch {
-      // The glance view itself still works without history -- the
-      // chart area just shows its own "couldn't load" state instead
-      // of failing the whole card the way a resolution error does.
+      // The chart shows its own error state; the rest of the card still works.
       this._channelHistoryByEntity = {};
     } finally {
       this._historyLoading = false;
     }
   }
 
-  private _closeEdit(): void {
-    // Same reasoning as _cancelEditingPoint() -- leaving edit mode
-    // entirely while a freshly-added point is still mid-edit must
-    // remove that point, not leave a half-configured default sitting
-    // in the list the person never actually confirmed.
-    if (this._isNewPoint && this._editingIndex != null) {
+  // Ends point editing. A point created by Add point and not saved
+  // (discardNew) is removed again.
+  private _finishEditing(discardNew: boolean): void {
+    if (discardNew && this._isNewPoint && this._editingIndex != null) {
       this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
     }
-    this._view = "glance";
     this._editingIndex = null;
     this._workingPoint = undefined;
     this._isNewPoint = false;
+  }
+
+  private _closeEdit(): void {
+    this._finishEditing(true);
+    this._view = "glance";
     this._saveScheduleError = undefined;
     this._saveScheduleSucceeded = false;
   }
@@ -616,9 +502,8 @@ export class MobiusScheduleCard extends LitElement {
   private _startEditingPoint(index: number): void {
     this._editingIndex = index;
     this._isNewPoint = false;
-    // A real clone, not a reference -- params/channels is itself an
-    // object, and mutating it in place would leak edits-in-progress
-    // into _schedulePoints (and thus the read-only list) before Save.
+    // Copy params/channels so edits don't reach _schedulePoints before
+    // Save.
     const point = this._schedulePoints[index];
     this._workingPoint = isPumpEntry(point)
       ? { ...point, params: { ...point.params } }
@@ -626,18 +511,7 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   private _cancelEditingPoint(): void {
-    // A fresh Add already appended a real (default-valued) entry to
-    // _schedulePoints before editing started -- cancelling it needs
-    // to remove that entry entirely, not just close the form on top
-    // of it, or a half-configured point would silently stay in the
-    // list. Cancelling an edit to an EXISTING point, by contrast,
-    // should leave that point exactly as it was.
-    if (this._isNewPoint && this._editingIndex != null) {
-      this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
-    }
-    this._editingIndex = null;
-    this._workingPoint = undefined;
-    this._isNewPoint = false;
+    this._finishEditing(true);
   }
 
   private _saveEditingPoint(): void {
@@ -645,22 +519,15 @@ export class MobiusScheduleCard extends LitElement {
     const points = [...this._schedulePoints];
     points[this._editingIndex] = this._workingPoint;
     this._schedulePoints = points;
-    this._editingIndex = null;
-    this._workingPoint = undefined;
-    this._isNewPoint = false;
+    this._finishEditing(false);
   }
 
-  // Generic across both kinds -- deletes whichever point is currently
-  // open for editing. Local-only, same as every other point edit:
-  // nothing reaches the device until Save schedule to device is
-  // pressed, so there's no separate confirmation step here -- the
-  // save action itself is the actual point of no return.
+  // Removes the point being edited (locally; the device is only written
+  // by Save schedule to device).
   private _deleteEditingPoint(): void {
     if (this._editingIndex == null) return;
     this._schedulePoints = this._schedulePoints.filter((_, i) => i !== this._editingIndex);
-    this._editingIndex = null;
-    this._workingPoint = undefined;
-    this._isNewPoint = false;
+    this._finishEditing(false);
   }
 
   private _updateWorkingPointTime(minutes: number): void {
@@ -673,32 +540,20 @@ export class MobiusScheduleCard extends LitElement {
     this._workingPoint = { ...this._workingPoint, flags: PERIOD_FLAGS[period] };
   }
 
-  // Pump-specific (mode/params only exist on PumpScheduleEntry) --
-  // only ever called from the pump edit form, itself only reachable
-  // when _group.kind === "pump", so the cast is safe by construction
-  // rather than needing a runtime check on every call.
+  // Pump edit form only.
   private _updateWorkingPumpMode(displayMode: DisplayMode): void {
     const working = this._workingPoint as PumpScheduleEntry | undefined;
     if (!working || !this._group) return;
 
-    // Anti-Sync isn't a real mode at all -- it's Sync with
-    // PhaseShift=180 (see the DisplayMode helpers above for the full
-    // reasoning). EcoSmartBack's own PhaseShift is never shown to a
-    // person either, so it gets the same "not 180" default Sync
-    // itself uses absent a choice -- the app's own UI never exposes a
-    // way to set it any other way, so this is the only value there's
-    // ever a reason to send.
+    // Anti-Sync is Sync with PhaseShift 180; Sync and EcoSmartBack otherwise
+    // use 0 (PhaseShift isn't editable).
     const realMode = displayMode === "AntiSync" ? "Sync" : displayMode;
     const presetPhaseShift =
       displayMode === "AntiSync" ? 180 : realMode === "Sync" || realMode === "EcoSmartBack" ? 0 : undefined;
 
     const paramNames = this._group.mode_params?.[realMode] ?? [];
-    // Values for params the new mode shares with the old one carry
-    // over (e.g. switching Lagoon -> ReefCrest keeps MaxSpeed); a
-    // param the new mode needs that the old one didn't have gets a
-    // sensible zero-ish default rather than being left undefined,
-    // since encode() (python-mobius) raises if a required param is
-    // ever missing at save time.
+    // Parameters shared with the previous mode keep their values; new ones
+    // get a default (python-mobius rejects missing parameters).
     const params: Record<string, unknown> = {};
     for (const name of paramNames) {
       if (name === "PhaseShift" && presetPhaseShift !== undefined) {
@@ -733,7 +588,7 @@ export class MobiusScheduleCard extends LitElement {
       });
       this._schedulePoints = response.points;
     } catch (err) {
-      this._scheduleError = err instanceof Error ? err.message : String(err);
+      this._scheduleError = errorMessage(err);
       this._schedulePoints = [];
     } finally {
       this._scheduleLoading = false;
@@ -745,19 +600,9 @@ export class MobiusScheduleCard extends LitElement {
     this._saveScheduleError = undefined;
     this._saveScheduleSucceeded = false;
     try {
-      // Sent as-is for light points (read_schedule_group already
-      // handed the card this same shape -- ParentSerial, not Master;
-      // already decoded params -- and the write service expects that
-      // same shape back, translating ParentSerial to Master internally
-      // itself). Pump points get their own flags normalized to just
-      // FLAG_ACTIVE (1) here first -- pumps only have an
-      // enabled/disabled notion at the wire level, never the
-      // day/night/sunrise/sunset one lights have (confirmed directly
-      // against the app's own Point.java: FLAG_NIGHT/SUNRISE/SUNSET
-      // are defined there but never actually read or written anywhere
-      // else in the app), so a pump point saved from here is always
-      // simply "enabled" regardless of whatever flags value it
-      // happened to be loaded with.
+      // Points are sent in the format read_schedule_group returned (the service
+      // converts ParentSerial back). Pump points are saved with flags = ACTIVE
+      // only: pumps don't use the day/night/sunrise/sunset flags.
       const points = this._schedulePoints.map((p) => (isPumpEntry(p) ? { ...p, flags: 1 } : p));
       await this.hass.callService("mobius", "write_schedule_group", {
         device_id: this._config!.device_id,
@@ -768,7 +613,7 @@ export class MobiusScheduleCard extends LitElement {
         this._saveScheduleSucceeded = false;
       }, 4000);
     } catch (err) {
-      this._saveScheduleError = err instanceof Error ? err.message : String(err);
+      this._saveScheduleError = errorMessage(err);
     } finally {
       this._savingSchedule = false;
     }
@@ -778,9 +623,7 @@ export class MobiusScheduleCard extends LitElement {
     this._exportingMob = true;
     this._mobError = undefined;
     try {
-      // The card never encodes/decodes primitiveData itself -- the
-      // response is already the finished .mob file's own JSON
-      // content, built server-side by python-mobius.
+      // The file content is built by python-mobius.
       const response = await this.hass.callWS<{ mob: unknown }>({
         type: "mobius/export_schedule_group_mob",
         device_id: this._config!.device_id,
@@ -793,7 +636,7 @@ export class MobiusScheduleCard extends LitElement {
       link.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      this._mobError = err instanceof Error ? err.message : String(err);
+      this._mobError = errorMessage(err);
     } finally {
       this._exportingMob = false;
     }
@@ -810,9 +653,7 @@ export class MobiusScheduleCard extends LitElement {
     input.value = ""; // allows re-selecting the same file name later
     if (!file) return;
 
-    // An explicit extension check, not just the file input's own
-    // accept=".mob" attribute -- that's only a picker hint and is
-    // trivial for a person to bypass (drag-and-drop, "all files").
+    // accept=".mob" is only a picker hint, so the extension is checked too.
     if (!file.name.toLowerCase().endsWith(".mob")) {
       this._mobError = localize("schedule_card.mob_wrong_extension");
       return;
@@ -833,31 +674,27 @@ export class MobiusScheduleCard extends LitElement {
         device_id: this._config!.device_id,
         mob,
       });
-      // Replaces the whole schedule -- a .mob file represents an
-      // entire schedule, not a single point. Nothing is written to
-      // the device yet; the person still reviews this and presses
-      // Save schedule to device themselves, same as any local edit.
+      // A .mob file holds a whole schedule. Nothing is written to the device
+      // until Save schedule to device.
       this._schedulePoints = response.points;
-      this._editingIndex = null;
-      this._workingPoint = undefined;
+      this._finishEditing(false);
     } catch (err) {
-      this._mobError = err instanceof Error ? err.message : String(err);
+      this._mobError = errorMessage(err);
     } finally {
       this._importingMob = false;
     }
   }
 
-  // Reads live, not the group's own active_scene snapshot (only
-  // current as of whenever resolve_schedule_groups last ran) --
-  // scene_entity_id is tank-wide structural metadata that rarely
-  // changes, but which scene is active and how long it has left
-  // change constantly, and hass updates reactively on every real
-  // entity state change, unlike a resolve_schedule_groups snapshot.
+  // The scene select entity if a scene is active, read live (the group's
+  // active_scene is only a snapshot from resolution).
+  private _activeSceneState(group?: ScheduleGroup) {
+    const stateObj = group?.scene_entity_id ? this.hass.states[group.scene_entity_id] : undefined;
+    return stateObj && stateObj.state !== "None" && stateObj.state !== "unavailable" ? stateObj : undefined;
+  }
+
   private _renderSceneBanner() {
-    const entityId = this._group?.scene_entity_id;
-    if (!entityId) return nothing;
-    const stateObj = this.hass.states[entityId];
-    if (!stateObj || stateObj.state === "None" || stateObj.state === "unavailable") return nothing;
+    const stateObj = this._activeSceneState(this._group);
+    if (!stateObj) return nothing;
 
     const duration = stateObj.attributes.duration_remaining_seconds as number | undefined;
     return html`
@@ -875,35 +712,19 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Opens Home Assistant's own native more-info dialog (history,
-  // attributes, everything it already shows for any entity) --
-  // hass-more-info is the standard event HA's own frontend and other
-  // custom cards use for this; bubbles and crosses shadow DOM
-  // boundaries so HA's own dialog manager, listening at the top
-  // level, always sees it regardless of how deep this card's own
-  // shadow root nesting goes.
+  // Opens Home Assistant's more-info dialog for an entity.
   private _showMoreInfo(entityId: string): void {
     this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
   }
 
-  // Scene-running check matches _renderSceneBanner()'s own live
-  // entity read exactly, not this._group's own active_scene snapshot
-  // (only current as of whenever resolve_schedule_groups last ran) --
-  // the two must never disagree about whether a scene is active right
-  // now.
+  // The text for "currently running": the active scene, else the pump mode
+  // (with its parent pump for Sync modes).
   private _currentModeText(group: ScheduleGroup, modeState?: { state: string; attributes: Record<string, unknown> }) {
-    const sceneState = group.scene_entity_id ? this.hass.states[group.scene_entity_id] : undefined;
-    if (sceneState && sceneState.state !== "None" && sceneState.state !== "unavailable") {
-      return sceneState.state;
-    }
+    const sceneState = this._activeSceneState(group);
+    if (sceneState) return sceneState.state;
     if (!modeState) return undefined;
 
-    // CurrentPumpModeSensor's own extra_state_attributes (sensor.py)
-    // returns current_pump_params' own contents directly as this
-    // sensor's attributes -- MaxSpeed/PhaseShift/ParentSerial etc. are
-    // top-level attribute keys themselves, not nested under a
-    // "current_pump_params" key. Confirmed directly against a real
-    // sensor's own attributes panel.
+    // CurrentPumpModeSensor's attributes are the mode parameters themselves.
     const params = modeState.attributes;
     const label = displayModeLabel(displayModeFor(modeState.state, params.PhaseShift));
     const parentSerial = params.ParentSerial as string | null | undefined;
@@ -914,6 +735,24 @@ export class MobiusScheduleCard extends LitElement {
     return label;
   }
 
+  // A value with its unit that opens the entity's more-info dialog.
+  private _renderReading(entityId: string, value: string, unit: unknown) {
+    return html`
+      <div
+        class="reading reading-clickable"
+        role="button"
+        tabindex="0"
+        @click=${() => this._showMoreInfo(entityId)}
+        @keydown=${(e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") this._showMoreInfo(entityId);
+        }}
+      >
+        <span class="reading-value">${value}</span>
+        <span class="reading-unit">${unit}</span>
+      </div>
+    `;
+  }
+
   private _renderPumpGlance() {
     const group = this._group!;
     const member = group.members[0];
@@ -921,8 +760,8 @@ export class MobiusScheduleCard extends LitElement {
     const speedState = member.speed_entity_id ? this.hass.states[member.speed_entity_id] : undefined;
     const modeState = member.mode_entity_id ? this.hass.states[member.mode_entity_id] : undefined;
 
-    const flowAvailable = flowState && flowState.state !== "unavailable" && flowState.state !== "unknown";
-    const speedAvailable = speedState && speedState.state !== "unavailable" && speedState.state !== "unknown";
+    const flowAvailable = isAvailable(flowState);
+    const speedAvailable = isAvailable(speedState);
 
     return html`
       <ha-card>
@@ -935,45 +774,19 @@ export class MobiusScheduleCard extends LitElement {
         ${this._renderSceneBanner()}
         ${
           flowAvailable
-            ? html`
-                <div
-                  class="reading reading-clickable"
-                  role="button"
-                  tabindex="0"
-                  @click=${() => this._showMoreInfo(member.flow_entity_id!)}
-                  @keydown=${(e: KeyboardEvent) => {
-                    if (e.key === "Enter" || e.key === " ") this._showMoreInfo(member.flow_entity_id!);
-                  }}
-                >
-                  <span class="reading-value">${roundedState(flowState!.state)}</span>
-                  <!-- Never a hardcoded assumption (e.g. "L/h") -- the
-                  device itself always reports GPH, but Home Assistant's
-                  own per-entity unit override (available for
-                  volume_flow_rate-class sensors) converts BOTH state
-                  and unit_of_measurement server-side, before this card
-                  ever sees them. Always displaying whatever this
-                  attribute actually says is what makes a person's own
-                  configured unit (GPH, L/h, or anything else) show up
-                  correctly, with zero unit-specific logic needed here
-                  at all. -->
-                  <span class="reading-unit">${flowState!.attributes.unit_of_measurement}</span>
-                </div>
-              `
+            ? // The unit comes from the entity, which reflects a per-entity
+              // unit override (the device reports GPH).
+              this._renderReading(
+                member.flow_entity_id!,
+                roundedState(flowState!.state),
+                flowState!.attributes.unit_of_measurement,
+              )
             : speedAvailable
-              ? html`
-                  <div
-                    class="reading reading-clickable"
-                    role="button"
-                    tabindex="0"
-                    @click=${() => this._showMoreInfo(member.speed_entity_id!)}
-                    @keydown=${(e: KeyboardEvent) => {
-                      if (e.key === "Enter" || e.key === " ") this._showMoreInfo(member.speed_entity_id!);
-                    }}
-                  >
-                    <span class="reading-value">${roundedState(speedState!.state)}%</span>
-                    <span class="reading-unit">${localize("schedule_card.speed_not_reliable")}</span>
-                  </div>
-                `
+              ? this._renderReading(
+                  member.speed_entity_id!,
+                  `${roundedState(speedState!.state)}%`,
+                  localize("schedule_card.speed_not_reliable"),
+                )
               : html`<div class="reading-missing">${localize("schedule_card.no_flow_data")}</div>`
         }
         ${
@@ -991,16 +804,9 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Try each member IN ORDER (already sorted, deterministic --
-  // resolve_schedule_groups sorts by serial) for one that's currently
-  // available, stopping once found. A single bounded pass through a
-  // fixed list, never retried or re-entered, so "every member
-  // unavailable at once" falls through to the null case below instead
-  // of looping. "Available" is judged from one representative channel
-  // sensor per member (the first channel in this group's own list) --
-  // every channel sensor on the same physical device transitions
-  // together (they're all polled from the same coordinator), so
-  // checking one is exactly as informative as checking all of them.
+  // The first available member (members are sorted by serial) and the names
+  // of the unavailable ones. Availability is judged from one channel sensor
+  // per member, since all of a device's sensors share one coordinator.
   private _pickAvailableLightMember(): { member?: ScheduleGroupMember; unavailableNames: string[] } {
     const group = this._group!;
     const unavailableNames: string[] = [];
@@ -1010,7 +816,7 @@ export class MobiusScheduleCard extends LitElement {
       const entityIds = member.channel_entity_ids ? Object.values(member.channel_entity_ids) : [];
       const representativeId = entityIds.find((id) => id != null);
       const stateObj = representativeId ? this.hass.states[representativeId] : undefined;
-      const available = !!stateObj && stateObj.state !== "unavailable" && stateObj.state !== "unknown";
+      const available = isAvailable(stateObj);
 
       if (available) {
         if (!picked) picked = member;
@@ -1034,18 +840,9 @@ export class MobiusScheduleCard extends LitElement {
     }, 1200);
   }
 
-  // Recomputing this is real work (every point in every channel's own
-  // history gets transformed to SVG coordinates and re-stringified) --
-  // and render() itself runs far more often than that data actually
-  // changes: hass is reassigned as a brand new object on every state
-  // change anywhere in the whole system (not just this card's own
-  // entities), and Lit's default change detection is reference-based,
-  // so this card re-renders on nearly every Home Assistant event.
-  // Skipping recomputation whenever the three things that actually
-  // affect the chart's own output (which member's data, the history
-  // itself, and the locale used for hour labels) haven't changed since
-  // the last render avoids doing that work dozens of times a minute
-  // for a result that would come out identical every time anyway.
+  // Memoized chart: hass changes on every state change in Home Assistant, so
+  // the chart is only rebuilt when the member, the history or the language
+  // changes.
   private _lastChartKey?: string;
   private _lastChartResult?: TemplateResult;
 
@@ -1058,27 +855,15 @@ export class MobiusScheduleCard extends LitElement {
     this._chartHoverFraction = undefined;
   }
 
-  // Deliberately NOT part of _renderChannelChart's own memoized
-  // result -- that memoization exists specifically to skip
-  // re-stringifying every channel's own SVG path on renders the chart
-  // itself hasn't changed for (see its own comment), and
-  // _chartHoverFraction changes on every mousemove. Recomputing just
-  // this small overlay each time is cheap; recomputing the whole
-  // chart on every mouse pixel would defeat the point of memoizing it
-  // at all.
+  // Hover line and tooltip, rendered separately from the memoized chart
+  // because they change on every mouse move.
   private _renderChartHoverOverlay(sourceMember: ScheduleGroupMember) {
     if (this._chartHoverFraction === undefined) return nothing;
 
-    const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
-      (entry): entry is [string, string] => !!entry[1],
-    );
+    const entries = channelEntities(sourceMember);
     const hoverTimeMs = chartWindowStartMs() + this._chartHoverFraction * 24 * 60 * 60 * 1000;
 
-    // Nearest point in time per channel, not interpolated -- history
-    // is already a step function server-side (HA's own compressed
-    // state format), so the value that was actually true at the
-    // nearest recorded moment is more honest than a value invented
-    // between two real ones.
+    // The nearest recorded value per channel (history is a step function).
     const readings = entries
       .map(([channelName, entityId]) => {
         const points = this._channelHistoryByEntity[entityId];
@@ -1092,11 +877,7 @@ export class MobiusScheduleCard extends LitElement {
 
     if (readings.length === 0) return nothing;
 
-    const lang = this.hass?.locale;
-    const hoverDate = new Date(hoverTimeMs);
-    const hoverTimeLabel = lang
-      ? formatTime(hoverDate, lang)
-      : `${hoverDate.getHours()}:${String(hoverDate.getMinutes()).padStart(2, "0")}`;
+    const hoverTimeLabel = formatClock(new Date(hoverTimeMs), this.hass?.locale);
 
     return html`
       <div class="chart-hover-line" style="left: ${this._chartHoverFraction * 100}%"></div>
@@ -1116,9 +897,7 @@ export class MobiusScheduleCard extends LitElement {
   }
 
   private _renderChartLegend(sourceMember: ScheduleGroupMember) {
-    const channelNames = Object.keys(sourceMember.channel_entity_ids ?? {}).filter(
-      (name) => sourceMember.channel_entity_ids![name],
-    );
+    const channelNames = channelEntities(sourceMember).map(([name]) => name);
     if (channelNames.length === 0) return nothing;
     return html`
       <div class="chart-legend">
@@ -1155,9 +934,7 @@ export class MobiusScheduleCard extends LitElement {
   private _lastChartHistoryRef?: Record<string, HistoryPoint[]>;
 
   private _computeChannelChart(sourceMember: ScheduleGroupMember) {
-    const entries = Object.entries(sourceMember.channel_entity_ids ?? {}).filter(
-      (entry): entry is [string, string] => !!entry[1],
-    );
+    const entries = channelEntities(sourceMember);
     if (entries.length === 0) {
       return html`<div class="chart-status">${localize("schedule_card.no_channel_data")}</div>`;
     }
@@ -1173,17 +950,8 @@ export class MobiusScheduleCard extends LitElement {
       .map(([channelName, entityId]) => {
         const points = this._channelHistoryByEntity[entityId];
         if (!points || points.length === 0) return nothing;
-        // Confirmed from Home Assistant's own state-history-chart-line:
-        // a sensor that stops changing stops producing new history
-        // points at all (no state_changed event fires for a repeated
-        // value), so without this the line would just stop wherever
-        // the value last actually changed instead of holding flat to
-        // now, leaving a growing blank gap for anything that's been
-        // steady for a while. Extends with the last known value at
-        // the current time, same as HA's own chart does -- only when
-        // that's actually later than the last real point, so a stale
-        // point in the future (a clock skew edge case) never draws
-        // backwards.
+        // A state that doesn't change produces no history, so the line is
+        // extended to now with the last value (like Home Assistant's charts).
         const last = points[points.length - 1];
         const extended = nowMs > last.t ? [...points, { t: nowMs, v: last.v }] : points;
         const path = extended.map((p) => `${toX(p.t).toFixed(1)},${toY(p.v).toFixed(1)}`).join(" ");
@@ -1213,11 +981,12 @@ export class MobiusScheduleCard extends LitElement {
         ${lines}
       </svg>
       <div class="chart-hour-labels">
-        ${hourMarks.map((t) => {
-          const d = new Date(t);
-          const label = lang ? formatTime(d, lang) : `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
-          return html`<span class="chart-hour-label" style="left: ${(toX(t) / CHART_WIDTH) * 100}%">${label}</span>`;
-        })}
+        ${hourMarks.map(
+          (t) =>
+            html`<span class="chart-hour-label" style="left: ${(toX(t) / CHART_WIDTH) * 100}%"
+              >${formatClock(new Date(t), lang)}</span
+            >`,
+        )}
       </div>
     `;
   }
@@ -1229,7 +998,7 @@ export class MobiusScheduleCard extends LitElement {
     try {
       await this.hass.callService("switch", "toggle", { entity_id: entityId });
     } catch (err) {
-      this._lunarToggleError = err instanceof Error ? err.message : String(err);
+      this._lunarToggleError = errorMessage(err);
     } finally {
       this._pendingLunarToggle = false;
     }
@@ -1348,10 +1117,8 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // The "ha-card + back button (+ title)" wrapper shared by every
-  // state of the edit view (error, loading, and the real content) --
-  // reused as-is by light's own edit view once it exists, since none
-  // of this cares what kind of group is being edited.
+  // Card, header (back, title, .mob import/export) and content of the edit
+  // view.
   private _renderEditShell(content: unknown) {
     return html`
       <ha-card>
@@ -1402,10 +1169,7 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // The save-to-device button plus its own status messages -- entirely
-  // generic (write_schedule_group takes whatever's in _schedulePoints
-  // as-is, regardless of kind), reused unchanged by light's own edit
-  // view.
+  // Save schedule to device and its status messages.
   private _renderSaveScheduleControls() {
     return html`
       ${this._saveScheduleError ? html`<div class="save-schedule-error">${this._saveScheduleError}</div>` : nothing}
@@ -1424,10 +1188,7 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Fully generic across both kinds -- error/loading states, the
-  // point list, and the save controls are identical either way; the
-  // only thing that differs is what a single point's own edit form
-  // looks like, passed in rather than hardcoded here.
+  // The edit view of either kind; only the point edit form differs.
   private _renderScheduleEditView(renderPointEditForm: () => unknown, onAddPoint: () => void) {
     if (this._scheduleError) {
       return this._renderEditShell(html`<div class="warning">${this._scheduleError}</div>`);
@@ -1456,10 +1217,8 @@ export class MobiusScheduleCard extends LitElement {
     );
   }
 
-  // Generic across both kinds -- time, period, and a one-line summary
-  // (the mode name for a pump point; light's own summary, once it
-  // exists, would describe its channels instead). isPumpEntry() is
-  // the only place this needs to tell the two apart at all.
+  // One point in the list: time plus the mode (pump), or channel bars and
+  // period (light).
   private _renderPointRow(point: ScheduleEntry, index: number) {
     const period = periodForFlags(point.flags);
     return html`
@@ -1475,9 +1234,7 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Light-only -- one small vertical bar per real channel, height and
-  // opacity both scaled by that channel's own intensity at this
-  // point, so the row itself reads at a glance without opening it.
+  // One small bar per channel, sized and shaded by its intensity.
   private _renderLightChannelBars(point: LightScheduleEntry) {
     return html`
       <span class="point-channel-bars">
@@ -1497,12 +1254,8 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // The time + period inputs -- fully generic (both operate on
-  // time_minutes/flags, present on every ScheduleEntry regardless of
-  // kind), reused as-is inside light's own point edit form.
-  // Time only -- pumps don't have a day/night/sunrise/sunset notion at
-  // all (confirmed directly), so this is used bare for pump points and
-  // wrapped together with the period select below for light points.
+  // Time input (hours, minutes and, for 12-hour format, AM/PM). Pumps have
+  // no period, so it is used alone for pump points.
   private _renderTimeField(point: ScheduleEntry) {
     const hours24 = Math.floor(point.time_minutes / 60);
     const minutes = point.time_minutes % 60;
@@ -1518,8 +1271,7 @@ export class MobiusScheduleCard extends LitElement {
       let h = Number(hourInput.value);
       const m = Number(minInput.value);
       if (useAmPm) {
-        // 12 -> 0 (the 12-hour clock's own base for both 12am and
-        // 12pm), then +12 only for PM -- 12am -> 0, 12pm -> 12.
+        // 12 AM -> 0, 12 PM -> 12.
         h = h % 12;
         if (ampmSelect?.value === "PM") h += 12;
       }
@@ -1560,12 +1312,12 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Time-only edit row -- pump points, which have no period notion.
+  // Time row of a pump point.
   private _renderTimeOnlyField(point: ScheduleEntry) {
     return html` <div class="edit-row">${this._renderTimeField(point)}</div> `;
   }
 
-  // Time + period edit row -- light points only.
+  // Time and period row of a light point.
   private _renderTimeAndPeriodFields(point: ScheduleEntry) {
     const period = periodForFlags(point.flags);
     return html`
@@ -1587,9 +1339,7 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Cancel/Delete/Save -- fully generic (delete/save/cancel all
-  // operate on _editingIndex/_workingPoint directly, neither cares
-  // what kind of point they're holding), reused by both edit forms.
+  // Cancel/Delete/Save of the point being edited.
   private _renderEditActions() {
     return html`
       <div class="edit-actions">
@@ -1606,11 +1356,7 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Pump-specific from here down -- mode dropdown and its own dynamic
-  // param fields. Light's own point edit form (channel sliders
-  // instead) is a sibling of this method, not a variant of it; both
-  // share _renderTimeAndPeriodFields/_renderEditShell/
-  // _renderSaveScheduleControls/_renderPointRow above.
+  // Pump points: mode dropdown and parameter fields.
   private _addPumpPoint(): void {
     const firstMode = this._group?.modes?.[0];
     if (!firstMode) return;
@@ -1618,10 +1364,7 @@ export class MobiusScheduleCard extends LitElement {
     this._schedulePoints = [...this._schedulePoints, newPoint];
     this._startEditingPoint(this._schedulePoints.length - 1);
     this._isNewPoint = true;
-    // Reuses the exact same "populate this mode's own real params"
-    // logic a person switching mode on an existing point already
-    // gets -- a brand new point is no different from any other point
-    // whose mode just changed from nothing.
+    // Fills in the parameters of the first mode.
     this._updateWorkingPumpMode(displayModeFor(firstMode, undefined));
   }
 
@@ -1630,9 +1373,7 @@ export class MobiusScheduleCard extends LitElement {
     const modes = this._group?.modes ?? [];
     const displayModes = displayModeOptions(modes);
     const currentDisplayMode = displayModeFor(point.mode, point.params.PhaseShift);
-    // PhaseShift is never shown as its own field -- it's fully implied
-    // by which of Sync/Anti-Sync/EcoSmart Back was chosen above (see
-    // the DisplayMode helpers' own reasoning).
+    // PhaseShift follows from the chosen mode and isn't shown.
     const paramNames = (this._group?.mode_params?.[point.mode] ?? []).filter((name) => name !== "PhaseShift");
 
     return html`
@@ -1691,10 +1432,8 @@ export class MobiusScheduleCard extends LitElement {
       `;
     }
     if (name === "Variance") {
-      // Confirmed from the app's own formatter: this isn't a plain
-      // number at all -- the raw 0-1000 value maps to one of four
-      // categorical labels (thresholds: 0, <400, <700, else), so the
-      // choice itself is what a person actually picks, not a number.
+      // Variance is shown as the app's four levels (0, <400, <700, else); each
+      // choice writes a representative value.
       const VARIANCE_OPTIONS: [string, number][] = [
         [localize("schedule_card.variance_none"), 0],
         [localize("schedule_card.variance_low"), 200],
@@ -1725,25 +1464,13 @@ export class MobiusScheduleCard extends LitElement {
         </label>
       `;
     }
-    // Confirmed in the app's own PumpPrimitive.getReverse(): a
-    // negative MaxSpeed/MinSpeed reverses rotation direction, but only
-    // on AlpacaV1 pumps (sliderSettings' own supportsReverse) -- every
-    // other primitive type never supports this regardless of mode or
-    // sign. supports_reverse (from resolve_schedule_groups, matching
-    // get_pump_reverse()'s own logic exactly) tells us which case
-    // we're in, so the hint only shows -- and a negative value is only
-    // actually accepted -- on a pump that genuinely supports it,
-    // instead of leaving every pump with an unconditional hint and no
-    // guard against typing a negative value that silently does
-    // nothing on hardware that doesn't support it.
+    // A negative MaxSpeed/MinSpeed reverses rotation, only on pumps with
+    // supports_reverse (AlpacaV1). Other pumps don't accept negative values.
     const isSpeedParam = name === "MaxSpeed" || name === "MinSpeed";
     if (isSpeedParam) {
       const supportsReverse = this._group?.members?.[0]?.supports_reverse === true;
-      // Confirmed from the app's own formatter:
-      // String.format("%d%%", Math.round(raw / 10.0)) -- the raw
-      // wire value is tenths of a percent, never shown to a person
-      // as-is. Sign is preserved through the round-trip (negative =
-      // reverse, see the hint below), only the magnitude is scaled.
+      // Shown as whole percent (the raw value is tenths of a percent); the sign
+      // is kept.
       const raw = Number(value ?? 0);
       const displayPercent = Math.sign(raw) * Math.round(Math.abs(raw) / 10);
       return html`
@@ -1756,10 +1483,7 @@ export class MobiusScheduleCard extends LitElement {
             title=${supportsReverse ? localize("schedule_card.reverse_hint") : nothing}
             @change=${(e: Event) => {
               let percent = Number((e.target as HTMLInputElement).value);
-              // Reverse isn't a thing this pump supports -- a
-              // negative value here would just be silently ignored by
-              // the device, so clamp it here instead of letting
-              // someone type one and wonder why it did nothing.
+              // The device would ignore a negative value.
               if (!supportsReverse && percent < 0) percent = Math.abs(percent);
               this._updateWorkingPumpParam(name, Math.sign(percent) * Math.round(Math.abs(percent) * 10));
             }}
@@ -1787,12 +1511,7 @@ export class MobiusScheduleCard extends LitElement {
     );
   }
 
-  // Light-specific from here down -- one intensity slider per real
-  // channel this group actually has, instead of a mode dropdown.
-  // Shares exactly the same _renderTimeAndPeriodFields/_renderEditShell/
-  // _renderSaveScheduleControls/_renderPointRow/_renderScheduleEditView
-  // the pump-specific section above does -- everything above this
-  // point in the file is what made that possible.
+  // Light points: one intensity slider per channel.
   private _addLightPoint(): void {
     const channels = this._group?.channels ?? [];
     if (channels.length === 0) return;
