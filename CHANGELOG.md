@@ -25,6 +25,9 @@
   Mobius keeps the Bluetooth connection to it, so the Mobius app can't
   control that device until this entry is disabled or another device of
   the tank is added.
+- The schedule editor now says that the Mobius app keeps its own copy of
+  the schedule, and that downloading the `.mob` file after saving and
+  importing it in the app brings the app up to date.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0

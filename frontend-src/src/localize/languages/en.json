@@ -59,6 +59,7 @@
     "schedule_saved": "Schedule saved.",
     "saving_schedule": "Saving…",
     "save_schedule": "Save schedule to device",
+    "app_cache_note": "The Mobius app keeps its own copy of the schedule and won't show changes made here. To bring it up to date, download the .mob file after saving and import it in the app.",
     "add_point": "Add point",
     "delete": "Delete",
     "variance_none": "None",

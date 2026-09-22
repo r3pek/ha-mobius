@@ -62,6 +62,13 @@ change and delete points, turn lunar phases on or off, load and download
 the app's `.mob` files, and save to the device. Lights that share a
 schedule group are changed together.
 
+Schedules written from Home Assistant don't reach the Mobius app: it keeps
+its own copy and only re-reads a device's schedule when it has none. To
+bring the app up to date, download the `.mob` file after saving and import
+it in the app (the editor says so too). Editing the schedule in the app
+afterwards writes the app's copy back to the device, replacing what Home
+Assistant wrote.
+
 ```yaml
 type: custom:mobius-scene-card
 entity: select.<tank>_scene_selection

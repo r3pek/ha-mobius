@@ -3443,3 +3443,30 @@ test("light card's own title and subtitle stay stacked, not side-by-side", async
   assert.ok(header.querySelector(".title"));
   assert.ok(header.querySelector(".subtitle"));
 });
+
+// --------------------------------------------------------------------------
+// The editor says the Mobius app keeps its own copy of the schedule.
+// --------------------------------------------------------------------------
+
+test("the edit view explains that the app keeps its own copy of the schedule", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, undefined, {
+    scheduleResponse: { points: [] },
+  });
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  const note = el.shadowRoot.querySelector(".app-cache-note");
+  assert.ok(note);
+  assert.ok(note.textContent.includes("keeps its own copy"));
+  assert.ok(note.textContent.includes(".mob"));
+});
+
+test("the glance view does not show the note", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
+  await settled(el);
+
+  assert.equal(el.shadowRoot.querySelector(".app-cache-note"), null);
+});

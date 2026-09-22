@@ -1202,7 +1202,8 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Save schedule to device and its status messages.
+  // Save schedule to device, its status messages, and the note about the
+  // Mobius app keeping its own copy of the schedule.
   private _renderSaveScheduleControls() {
     return html`
       ${this._saveScheduleError ? html`<div class="save-schedule-error">${this._saveScheduleError}</div>` : nothing}
@@ -1218,6 +1219,10 @@ export class MobiusScheduleCard extends LitElement {
       >
         ${this._savingSchedule ? localize("schedule_card.saving_schedule") : localize("schedule_card.save_schedule")}
       </button>
+      <div class="app-cache-note">
+        <ha-icon icon="mdi:information-outline"></ha-icon>
+        <span>${localize("schedule_card.app_cache_note")}</span>
+      </div>
     `;
   }
 
@@ -1956,6 +1961,19 @@ export class MobiusScheduleCard extends LitElement {
     .add-point-button:disabled {
       opacity: 0.5;
       cursor: default;
+    }
+    .app-cache-note {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+      margin: 8px 16px 4px;
+      color: var(--secondary-text-color);
+      font-size: 0.8em;
+      line-height: 1.35;
+    }
+    .app-cache-note ha-icon {
+      --mdc-icon-size: 16px;
+      flex-shrink: 0;
     }
     .save-schedule-button {
       width: 100%;
