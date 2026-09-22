@@ -16,6 +16,11 @@
 - Light schedule card: the moon now only shows the current moon phase
   (while lunar phases are on). Lunar phases are turned on and off from the
   schedule editor, for every light in the schedule group.
+- Fixed the remaining time of a running scene not counting down: the cards
+  now count it down every second (new `ends_at` attribute on the scene
+  selection).
+- Returning to the normal schedule is now sent to the whole tank in one
+  write, like the app, instead of to each device separately.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0

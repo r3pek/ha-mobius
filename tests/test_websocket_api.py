@@ -702,7 +702,7 @@ async def test_tank_active_scene_returns_name_from_configured_scenes(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": data})
 
     result = _tank_active_scene(entry.runtime_data)
-    assert result == {"name": "Feeding", "duration_seconds": 120}
+    assert result == {"name": "Feeding", "duration_seconds": 120, "ends_at": None}
 
 
 async def test_tank_active_scene_falls_back_to_generic_label_when_name_unknown(hass):
@@ -712,7 +712,7 @@ async def test_tank_active_scene_falls_back_to_generic_label_when_name_unknown(h
     entry, tank_device_id = _setup_tank(hass, {"SN1": data})
 
     result = _tank_active_scene(entry.runtime_data)
-    assert result == {"name": "Scene 7", "duration_seconds": 30}
+    assert result == {"name": "Scene 7", "duration_seconds": 30, "ends_at": None}
 
 
 async def test_tank_active_scene_skips_empty_scene_slots(hass):
@@ -742,7 +742,7 @@ async def test_resolve_tank_groups_includes_active_scene_in_every_group(hass):
     groups = _resolve_tank_groups(hass, tank_device_id)
 
     for g in groups:
-        assert g.as_dict()["active_scene"] == {"name": "Feeding", "duration_seconds": 120}
+        assert g.as_dict()["active_scene"] == {"name": "Feeding", "duration_seconds": 120, "ends_at": None}
 
 
 # --------------------------------------------------------------------------

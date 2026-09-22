@@ -138,30 +138,39 @@ class SceneSelectionSelect(SelectEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """duration_remaining_seconds of the active scene; None when no scene
-        is active."""
+        """duration_remaining_seconds (as of the last poll) and ends_at (ISO
+        time the scene ends, for a live countdown) of the running scene;
+        None when no scene is running."""
         runtime: MobiusRuntimeData = self._entry.runtime_data
         for coordinator in runtime.coordinators.values():
-            active = (coordinator.data or {}).get("current_scene")
+            data = coordinator.data or {}
+            active = data.get("current_scene")
             if active is not None:
-                return {"duration_remaining_seconds": active.duration_seconds}
+                return {
+                    "duration_remaining_seconds": active.duration_seconds,
+                    "ends_at": data.get("current_scene_ends_at"),
+                }
         return None
 
     async def async_select_option(self, option: str) -> None:
         runtime: MobiusRuntimeData = self._entry.runtime_data
 
         if option == self.NONE_OPTION:
-            # resume_schedule() writes OperationState without a group, so
-            # every device is written.
+            # One write to the tank's group returns every device to its
+            # schedule, like the app. Sent through the first device that
+            # accepts it.
+            errors: list[str] = []
             for coordinator in runtime.coordinators.values():
                 try:
                     device = await coordinator.async_get_connected_device()
-                    await device.resume_schedule()
+                    await device.resume_schedule(broadcast=True)
+                    break
                 except Exception as err:
-                    raise HomeAssistantError(
-                        f"Failed to resume the normal schedule on {coordinator.serial}: {err}"
-                    ) from err
-                await coordinator.async_request_refresh()
+                    errors.append(f"{coordinator.serial}: {err}")
+            else:
+                raise HomeAssistantError(f"Failed to resume the normal schedule: {'; '.join(errors)}")
+            for other in runtime.coordinators.values():
+                await other.async_request_refresh()
             return
 
         scene_id = self._scene_name_to_id().get(option)

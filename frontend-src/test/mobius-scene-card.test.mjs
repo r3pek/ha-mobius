@@ -340,3 +340,43 @@ test("a genuinely unrecognized custom scene still falls back to the generic plac
   const tile = [...el.shadowRoot.querySelectorAll(".tile")].find((t) => t.title === "Photo Mode");
   assert.equal(tile.querySelector("ha-icon").getAttribute("icon"), "mdi:bookmark-outline");
 });
+
+// --------------------------------------------------------------------------
+// Countdown: the remaining time is counted down from ends_at between polls.
+// --------------------------------------------------------------------------
+
+function remainingShown(el) {
+  const match = el.shadowRoot.textContent.match(/(\d+):(\d\d) remaining/);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : undefined;
+}
+
+test("counts the remaining time down from ends_at", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  try {
+    const hass = makeHass("Photo Mode", ["None", "Photo Mode"], 60);
+    hass.states["select.reef_tank_scene_selection"].attributes.ends_at = new Date(Date.now() + 60_000).toISOString();
+    el.hass = hass;
+    await el.updateComplete;
+    const first = remainingShown(el);
+    assert.ok(first >= 58 && first <= 60, `first reading ${first}`);
+
+    await new Promise((r) => setTimeout(r, 2100));
+    await el.updateComplete;
+    const second = remainingShown(el);
+    assert.ok(second < first, `second reading ${second} should be below ${first}`);
+  } finally {
+    el.remove();
+  }
+});
+
+test("stops counting once no scene is active", async () => {
+  const el = makeCard("select.reef_tank_scene_selection");
+  const active = makeHass("Photo Mode", ["None", "Photo Mode"], 60);
+  active.states["select.reef_tank_scene_selection"].attributes.ends_at = new Date(Date.now() + 60_000).toISOString();
+  el.hass = active;
+  await el.updateComplete;
+  el.hass = makeHass("None", ["None", "Photo Mode"]);
+  await el.updateComplete;
+  assert.equal(el._countdown._handle, undefined);
+  el.remove();
+});

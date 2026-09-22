@@ -135,7 +135,7 @@ def _member_name(serial: str, coordinator: MobiusDeviceCoordinator) -> str:
 
 def _tank_active_scene(runtime: MobiusRuntimeData) -> dict[str, Any] | None:
     """
-    {"name", "duration_seconds"} of the first active scene found on the
+    {"name", "duration_seconds", "ends_at"} of the first active scene found on the
     tank (a scene is activated tank-wide), or None. The name comes from
     whichever device has that scene id configured.
     """
@@ -145,11 +145,13 @@ def _tank_active_scene(runtime: MobiusRuntimeData) -> dict[str, Any] | None:
             id_to_name.setdefault(scene.id, scene.name)
 
     for coordinator in runtime.coordinators.values():
-        active = (coordinator.data or {}).get("current_scene")
+        data = coordinator.data or {}
+        active = data.get("current_scene")
         if active is not None:
             return {
                 "name": id_to_name.get(active.id, f"Scene {active.id}"),
                 "duration_seconds": active.duration_seconds,
+                "ends_at": data.get("current_scene_ends_at"),
             }
     return None
 

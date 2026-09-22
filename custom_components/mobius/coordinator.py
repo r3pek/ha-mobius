@@ -491,6 +491,12 @@ async def _fetch_all(
 
     info["configured_scenes"] = configured_scenes
     info["current_scene"] = current_scene
+    # When the running scene ends, so the remaining time can count down
+    # between polls.
+    info["current_scene_ends_at"] = (
+        (dt_util.utcnow() + timedelta(seconds=current_scene.duration_seconds)).isoformat()
+        if current_scene is not None else None
+    )
 
     return info, supported_attribute_ids_to_cache, used_batch, primitive, model
 

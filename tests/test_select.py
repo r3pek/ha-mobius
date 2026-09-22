@@ -251,7 +251,7 @@ async def test_extra_state_attributes_exposes_duration_when_a_scene_is_active():
     )
     select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
 
-    assert select.extra_state_attributes == {"duration_remaining_seconds": 25}
+    assert select.extra_state_attributes == {"duration_remaining_seconds": 25, "ends_at": None}
 
 
 @pytest.mark.asyncio
@@ -282,7 +282,9 @@ async def test_selecting_a_scene_writes_only_to_the_device_that_has_it():
 
 
 @pytest.mark.asyncio
-async def test_selecting_none_resumes_the_schedule_on_every_device():
+async def test_selecting_none_resumes_the_schedule_with_one_group_write():
+    """Like the app: one OperationState write to the tank's group, sent
+    through the first device that accepts it."""
     light_coord = _fake_coordinator("light1")
     pump_coord = _fake_coordinator("pump1")
     entry = _entry_with_coordinators(light_coord, pump_coord)
@@ -290,9 +292,33 @@ async def test_selecting_none_resumes_the_schedule_on_every_device():
 
     await select.async_select_option("None")
 
-    for coordinator in (light_coord, pump_coord):
-        device = coordinator.async_get_connected_device.return_value
-        device.resume_schedule.assert_awaited_once()
+    light_device = light_coord.async_get_connected_device.return_value
+    light_device.resume_schedule.assert_awaited_once_with(broadcast=True)
+    pump_coord.async_get_connected_device.return_value.resume_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_selecting_none_tries_the_next_device_when_one_fails():
+    light_coord = _fake_coordinator("light1")
+    pump_coord = _fake_coordinator("pump1")
+    light_coord.async_get_connected_device.return_value.resume_schedule.side_effect = IOError("timed out")
+    entry = _entry_with_coordinators(light_coord, pump_coord)
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    await select.async_select_option("None")
+
+    pump_coord.async_get_connected_device.return_value.resume_schedule.assert_awaited_once_with(broadcast=True)
+
+
+@pytest.mark.asyncio
+async def test_selecting_none_raises_when_every_device_fails():
+    light_coord = _fake_coordinator("light1")
+    light_coord.async_get_connected_device.return_value.resume_schedule.side_effect = IOError("timed out")
+    entry = _entry_with_coordinators(light_coord)
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    with pytest.raises(HomeAssistantError, match="timed out"):
+        await select.async_select_option("None")
 
 
 @pytest.mark.asyncio

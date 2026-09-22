@@ -3,7 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
 import { formatTime } from "custom-card-helpers";
 import { localize } from "./localize/localize";
-import { formatDuration } from "./format";
+import { CountdownTicker, formatDuration, sceneRemainingSeconds } from "./format";
 
 /**
  * mobius-schedule-card
@@ -102,7 +102,7 @@ interface ScheduleGroup {
   channels?: string[];
   modes?: string[];
   mode_params?: Record<string, string[]>;
-  active_scene: { name: string; duration_seconds: number } | null;
+  active_scene: { name: string; duration_seconds: number; ends_at?: string | null } | null;
   scene_entity_id: string | null;
   schedule_intensity?: number | null;
 }
@@ -349,9 +349,13 @@ export class MobiusScheduleCard extends LitElement {
   private _historyRefreshHandle?: ReturnType<typeof setInterval>;
   private static readonly HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
+  // Counts the active scene's remaining time down between polls.
+  private _countdown = new CountdownTicker(this);
+
   public disconnectedCallback(): void {
     super.disconnectedCallback();
     clearInterval(this._historyRefreshHandle);
+    this._countdown.stop();
   }
 
   public setConfig(config: MobiusScheduleCardConfig): void {
@@ -694,9 +698,10 @@ export class MobiusScheduleCard extends LitElement {
 
   private _renderSceneBanner() {
     const stateObj = this._activeSceneState(this._group);
+    this._countdown.sync(!!stateObj?.attributes.ends_at);
     if (!stateObj) return nothing;
 
-    const duration = stateObj.attributes.duration_remaining_seconds as number | undefined;
+    const duration = sceneRemainingSeconds(stateObj.attributes);
     return html`
       <div class="scene-banner">
         <ha-icon icon="mdi:auto-mode"></ha-icon>

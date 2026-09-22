@@ -2,7 +2,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, LovelaceCardConfig } from "custom-card-helpers";
 import { localize } from "./localize/localize";
-import { formatDuration } from "./format";
+import { CountdownTicker, formatDuration, sceneRemainingSeconds } from "./format";
 
 /**
  * mobius-scene-card
@@ -48,6 +48,14 @@ function iconFor(name: string): string {
 
 @customElement("mobius-scene-card")
 export class MobiusSceneCard extends LitElement {
+  // Counts the active scene's remaining time down between polls.
+  private _countdown = new CountdownTicker(this);
+
+  public disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._countdown.stop();
+  }
+
   @property({ attribute: false }) public hass!: HomeAssistant;
 
   @state() private _config?: MobiusSceneCardConfig;
@@ -142,8 +150,9 @@ export class MobiusSceneCard extends LitElement {
 
     const current = stateObj.state;
     const options: string[] = stateObj.attributes.options || [NONE_OPTION];
-    const duration: number | undefined = stateObj.attributes.duration_remaining_seconds;
     const activeSceneName = current !== NONE_OPTION ? current : null;
+    const duration = activeSceneName ? sceneRemainingSeconds(stateObj.attributes) : undefined;
+    this._countdown.sync(!!activeSceneName && !!stateObj.attributes.ends_at);
 
     return html`
       <ha-card>
