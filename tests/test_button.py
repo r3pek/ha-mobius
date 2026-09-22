@@ -40,6 +40,8 @@ def _fake_pump_device():
         "primitive_type": "VorTechV1", "error_state": "NoError", "mac_address": None,
     })
     device.get_pump_telemetry = AsyncMock(return_value={"speed": 447, "speed_percent": 44.7, "gph": 2272})
+    device.get_battery_backup_info = AsyncMock(return_value=None)
+    device.get_boosted_battery_info = AsyncMock(return_value=None)
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.get_advanced_features = AsyncMock(return_value=None)

@@ -34,7 +34,9 @@ from .gateway_registry import GatewayRegistry, PanGroup
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT, Platform.NUMBER]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT, Platform.NUMBER,
+]
 
 # Config entries only; YAML configuration is rejected with a clear error.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)

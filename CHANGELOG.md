@@ -8,6 +8,11 @@
   explains how to fix it.
 - Writes to a device reached through another device (a relayed device) now
   show an error when the device rejects them.
+- Added pump battery settings: "Battery backup speed" (up to the pump's
+  battery backup max speed) and, on pumps that have them, the boosted
+  battery power and on/off times. Boosted battery settings can only be
+  changed while the pump runs on battery.
+- Added a "Running on battery" sensor for pumps with battery backup.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0

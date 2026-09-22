@@ -100,6 +100,18 @@
     "number": {
       "poll_interval": {
         "name": "Poll interval"
+      },
+      "battery_backup_speed": {
+        "name": "Battery backup speed"
+      },
+      "boosted_battery_power": {
+        "name": "Boosted battery power"
+      },
+      "boosted_battery_on_time": {
+        "name": "Boosted battery on time"
+      },
+      "boosted_battery_off_time": {
+        "name": "Boosted battery off time"
       }
     },
     "select": {
@@ -128,6 +140,11 @@
       },
       "scene_selection": {
         "name": "Scene selection"
+      }
+    },
+    "binary_sensor": {
+      "running_on_battery": {
+        "name": "Running on battery"
       }
     }
   }

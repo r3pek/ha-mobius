@@ -137,6 +137,8 @@ def _fake_pump_device():
         "speed": 100, "speed_percent": 10.0, "gph": 500,
         "gph_reliable": True, "minimum_gph": 100, "maximum_gph": 800,
     })
+    fake_device.get_battery_backup_info = AsyncMock(return_value=None)
+    fake_device.get_boosted_battery_info = AsyncMock(return_value=None)
     fake_device.get_operation_state = AsyncMock()
     fake_device.get_operation_state.return_value.name = "Schedule"
     fake_point = MagicMock()

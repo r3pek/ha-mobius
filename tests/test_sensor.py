@@ -55,6 +55,8 @@ def _fake_pump_device():
         "speed": 447, "speed_percent": 44.7, "gph": 2272,
         "gph_reliable": True, "minimum_gph": 200, "maximum_gph": 2500,
     })
+    device.get_battery_backup_info = AsyncMock(return_value=None)
+    device.get_boosted_battery_info = AsyncMock(return_value=None)
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
@@ -313,6 +315,8 @@ async def test_pump_entry_setup_skips_flow_sensor_when_gph_unreliable(hass):
         "speed": 600, "speed_percent": 60.0, "gph": 1460,
         "gph_reliable": False, "minimum_gph": None, "maximum_gph": None,
     })
+    device.get_battery_backup_info = AsyncMock(return_value=None)
+    device.get_boosted_battery_info = AsyncMock(return_value=None)
 
     entry = MockConfigEntry(
         domain=DOMAIN,

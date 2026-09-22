@@ -383,6 +383,8 @@ async def _fetch_all(
         pump_schedule_points = full_poll.pump_schedule_points
         configured_scenes = full_poll.configured_scenes
         current_scene = full_poll.current_scene
+        battery_backup = full_poll.battery_backup
+        boosted_battery = full_poll.boosted_battery
     else:
         # First poll: learn primitive type and model.
         info = await device.get_device_info()
@@ -396,6 +398,8 @@ async def _fetch_all(
         used_batch = metadata.used_batch
         light_poll = None
         pump_telemetry_result = None
+        battery_backup = None
+        boosted_battery = None
         if primitive in LIGHT_PRIMITIVES:
             light_poll = await device.get_light_poll_batch(
                 which=1, minute_of_day=minute_of_day, now=now,
@@ -405,6 +409,8 @@ async def _fetch_all(
         elif primitive in PUMP_PRIMITIVES:
             pump_schedule_points = await device.get_pump_schedule(which=1)
             pump_telemetry_result = await device.get_pump_telemetry(model=model, primitive=primitive)
+            battery_backup = await device.get_battery_backup_info()
+            boosted_battery = await device.get_boosted_battery_info()
 
         # Most devices don't support scenes; both reads fail soft.
         try:
@@ -428,6 +434,11 @@ async def _fetch_all(
                 info.get("serial"), info["telemetry"]["gph"], model, primitive,
             )
         info["operation_state"] = (await device.get_operation_state()).name
+        # "BatteryBackup" while the pump runs on battery.
+        info["operation_mode"] = info["telemetry"].get("operation_mode")
+        # None when the pump doesn't support the setting.
+        info["battery_backup"] = asdict(battery_backup) if battery_backup else None
+        info["boosted_battery"] = asdict(boosted_battery) if boosted_battery else None
     elif primitive not in LIGHT_PRIMITIVES:
         # Only possible on the first poll: once a primitive type is cached it
         # is a light or a pump.

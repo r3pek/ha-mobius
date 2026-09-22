@@ -20,7 +20,8 @@ Not affiliated with or endorsed by any of these companies.
 - **Lights**: current intensity per channel, schedule intensity, lunar
   phases, calibration status.
 - **Pumps**: speed, flow (only when the pump reports it reliably),
-  operation state and current mode.
+  operation state and current mode; battery backup settings and whether
+  the pump is running on battery.
 - **Scenes**: start a scene on the whole tank or return to the schedule.
 - **Settings**: Local control, LED auto-dim, max fan speed and fan
   shutdown, where the device supports them.
@@ -36,6 +37,8 @@ Not affiliated with or endorsed by any of these companies.
 | Calibration | Lights that report it | Diagnostic |
 | Lunar phases switch | Lights that support it | |
 | Motor speed, Estimated flow, Operation state, Current mode | Pumps | Estimated flow only when reliable |
+| Battery backup speed; Running on battery | Pumps with battery backup | |
+| Boosted battery power, on time, off time | Pumps that support them | Only changeable while running on battery |
 | Local control, Fan shutdown switches; LED auto-dim timeout, Max fan speed selects | Devices that support them | |
 | Support tier, Error state, Schedule points, Firmware version, Hardware revision, Mesh address, Configured scenes | Every device | Diagnostic |
 | Reboot button | Every device | |
