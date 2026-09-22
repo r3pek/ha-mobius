@@ -887,6 +887,100 @@ async def test_single_device_ad_hoc_entry_still_registers_synthetic_tank_device(
 
 
 # --------------------------------------------------------------------------
+# Single-device tanks: the app can't reach the device while this
+# integration holds the connection, so a notification says so on every
+# setup (not a repair issue, which would be dismissed once and forgotten).
+# --------------------------------------------------------------------------
+
+async def _setup_entry_with_devices(hass, devices):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_MLPREFIX: MLPREFIX_HEX, CONF_DEVICES: devices},
+        unique_id=MLPREFIX_HEX,
+        title="Reef Tank",
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+def _single_device_notification(hass, entry):
+    from pytest_homeassistant_custom_component.common import async_get_persistent_notifications
+
+    return async_get_persistent_notifications(hass).get(f"mobius_single_device_tank_{entry.entry_id}")
+
+
+async def test_single_device_tank_notifies(hass):
+    entry = await _setup_entry_with_devices(hass, [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}])
+
+    notification = _single_device_notification(hass, entry)
+    assert notification is not None
+    assert "Reef Tank" in notification["title"]
+    assert "Disable" in notification["message"]
+
+
+async def test_tank_with_several_devices_does_not_notify(hass):
+    entry = await _setup_entry_with_devices(hass, [
+        {CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS},
+        {CONF_SERIAL: LIGHT_SERIAL, CONF_ADDRESS: "AA:AA:AA:AA:AA:02"},
+    ])
+
+    assert _single_device_notification(hass, entry) is None
+
+
+async def test_the_notification_comes_back_after_a_reload(hass):
+    """It is posted on every setup, so dismissing it isn't permanent."""
+    from homeassistant.components import persistent_notification
+
+    entry = await _setup_entry_with_devices(hass, [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}])
+    persistent_notification.async_dismiss(hass, f"mobius_single_device_tank_{entry.entry_id}")
+    assert _single_device_notification(hass, entry) is None
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
+        AsyncMock(return_value=_fake_pump_device()),
+    ), patch(
+        "custom_components.mobius.discover_tank_for_serial", AsyncMock(return_value=_fake_no_tank()),
+    ), patch(
+        "custom_components.mobius.discover_mesh_address", AsyncMock(return_value=None),
+    ), patch(
+        "custom_components.mobius._current_rssi", return_value=-50,
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
+    ), patch(
+        "homeassistant.config_entries.ConfigEntries.async_unload_platforms", AsyncMock(return_value=True),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _single_device_notification(hass, entry) is not None
+
+
+async def test_the_notification_goes_away_when_the_entry_is_unloaded(hass):
+    entry = await _setup_entry_with_devices(hass, [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}])
+    assert _single_device_notification(hass, entry) is not None
+
+    with patch("homeassistant.config_entries.ConfigEntries.async_unload_platforms", AsyncMock(return_value=True)):
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _single_device_notification(hass, entry) is None
+
+
+# --------------------------------------------------------------------------
 # CONFIG_SCHEMA -- required by hassfest for any integration implementing
 # async_setup (confirmed via a real hassfest finding: "Integrations which
 # implement 'async_setup' or 'setup' must define ... CONFIG_SCHEMA ...").

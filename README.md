@@ -125,6 +125,11 @@ serial numbers, so a passive-only proxy isn't enough.
   read"**: the serial number is only received while scanning actively.
   Set at least one Bluetooth adapter or proxy near the tank to the
   "Active" or "Auto" scanning mode.
+- **The Mobius app can't connect to a device**: Mobius keeps a Bluetooth
+  connection to one device per tank (the gateway), and a connected device
+  can't be reached by the app. With several devices the app can use the
+  others; with a single-device tank, disable the Mobius entry while you
+  use the app (a notification says the same whenever the tank loads).
 - **Debug logging**: *Settings → Devices & services → Mobius → Enable
   debug logging* logs connections, gateway changes and mesh scans.
 - **Diagnostics**: the entry's menu → *Download diagnostics* includes the

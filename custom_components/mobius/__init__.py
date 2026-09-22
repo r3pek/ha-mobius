@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Optional
 
-from homeassistant.components import bluetooth
+from homeassistant.components import bluetooth, persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, CoreState, EVENT_HOMEASSISTANT_STARTED
@@ -117,6 +117,47 @@ def _current_rssi(hass: HomeAssistant, serial: str) -> int | None:
     for gateway election)."""
     info = _find_in_bluetooth_cache(hass, serial)
     return info.rssi if info is not None else None
+
+
+def _single_device_notification_id(entry: ConfigEntry) -> str:
+    return f"{DOMAIN}_single_device_tank_{entry.entry_id}"
+
+
+def _notify_single_device_tank(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    Posts a notification while a tank has exactly one device.
+
+    The integration keeps a Bluetooth connection to one device of each tank
+    (the gateway) and reaches the others through it. A connected device
+    can't be reached by the Mobius app, so with a single device the app
+    can't control it at all until this entry is disabled. With more
+    devices the app can still use the others.
+
+    Posted on every setup (so it comes back after a restart or a reload
+    even if it was dismissed), and dismissed when the entry is unloaded or
+    the tank gains a second device.
+    """
+    if len(entry.data.get(CONF_DEVICES, [])) != 1:
+        _dismiss_single_device_notification(hass, entry)
+        return
+    persistent_notification.async_create(
+        hass,
+        title=f"Mobius: only one device in {entry.title}",
+        message=(
+            f"Mobius keeps a Bluetooth connection to one device of each tank, so the tank's other "
+            f"devices can be reached through it. {entry.title} has only one device, so the Mobius "
+            f"app can't connect to it while this integration is running.\n\n"
+            f"To use the app with this device, disable this Mobius entry "
+            f"(Settings > Devices & services > Mobius > the entry's menu > Disable) and enable it "
+            f"again afterwards. Adding another device of the same tank also solves it: the app can "
+            f"then use whichever device Mobius isn't connected to."
+        ),
+        notification_id=_single_device_notification_id(entry),
+    )
+
+
+def _dismiss_single_device_notification(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    persistent_notification.async_dismiss(hass, _single_device_notification_id(entry))
 
 
 def _register_tank_device(hass: HomeAssistant, entry: ConfigEntry, mlprefix_hex: Optional[str], pan_id: int) -> None:
@@ -381,6 +422,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     _register_tank_device(hass, entry, entry.data.get(CONF_MLPREFIX), pan_id)
+    _notify_single_device_tank(hass, entry)
 
     rssi_by_serial = {d[CONF_SERIAL]: _current_rssi(hass, d[CONF_SERIAL]) for d in devices}
     devices_by_rssi = sorted(
@@ -478,6 +520,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unloads an entry. Each device leaves the registry, which promotes a
     new gateway (and disconnects the old one) when needed."""
+    # The warning only applies while the entry is running; disabling it is
+    # one of the ways out of it.
+    _dismiss_single_device_notification(hass, entry)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
@@ -496,6 +542,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     without a restart. Only devices currently advertising (found by serial
     in the Bluetooth cache) can be handled.
     """
+    _dismiss_single_device_notification(hass, entry)
+
     known_serials = {d[CONF_SERIAL] for d in entry.data.get(CONF_DEVICES, [])}
     if not known_serials:
         return

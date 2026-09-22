@@ -21,6 +21,10 @@
   selection).
 - Returning to the normal schedule is now sent to the whole tank in one
   write, like the app, instead of to each device separately.
+- A tank with a single device now shows a notification whenever it loads:
+  Mobius keeps the Bluetooth connection to it, so the Mobius app can't
+  control that device until this entry is disabled or another device of
+  the tank is added.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0
