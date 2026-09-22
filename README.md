@@ -56,10 +56,11 @@ type: custom:mobius-schedule-card
 device_id: <a light or pump device, not the tank>
 ```
 
-Shows a light's channel history, intensity slider and lunar toggle, or a
-pump's flow and current mode, and opens a schedule editor: add, change
-and delete points, load and download the app's `.mob` files, and save to
-the device. Lights that share a schedule group are written together.
+Shows a light's channel history, intensity slider and current moon phase,
+or a pump's flow and current mode, and opens a schedule editor: add,
+change and delete points, turn lunar phases on or off, load and download
+the app's `.mob` files, and save to the device. Lights that share a
+schedule group are changed together.
 
 ```yaml
 type: custom:mobius-scene-card

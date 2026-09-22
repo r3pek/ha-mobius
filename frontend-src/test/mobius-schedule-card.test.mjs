@@ -3217,19 +3217,16 @@ test("light point's own time field shows plain 24-hour with no AM/PM select when
 });
 
 // --------------------------------------------------------------------------
-// Moon phase icon on the light glance view -- shown top-right of the
-// header, only when lunar tracking is genuinely enabled on this
-// light. Reads lunar_enabled/moon_phase_icon straight off the
-// schedule_intensity sensor's own attributes (added specifically for
-// this).
+// Moon phase: a read-only indicator in view mode (only while lunar phases
+// are on), a toggle for the whole group in the edit view header.
 // --------------------------------------------------------------------------
 
-function makeLightHassWithLunarSwitch(switchState, intensityAttrs) {
+function makeLightHassWithLunarSwitch(switchState, intensityAttrs, extra = {}) {
   const LUNAR_GROUP = {
     ...LIGHT_GROUP,
     members: [
       { ...LIGHT_GROUP.members[0], lunar_switch_entity_id: "switch.left_lunar_phases" },
-      LIGHT_GROUP.members[1],
+      { ...LIGHT_GROUP.members[1], lunar_switch_entity_id: "switch.right_lunar_phases" },
     ],
   };
   return makeHass({
@@ -3239,45 +3236,41 @@ function makeLightHassWithLunarSwitch(switchState, intensityAttrs) {
       "sensor.left_royalblue": { state: "60", attributes: {} },
       "sensor.left_schedule_intensity": { state: "59", attributes: intensityAttrs ?? {} },
       "switch.left_lunar_phases": { state: switchState, attributes: {} },
+      "switch.right_lunar_phases": { state: switchState, attributes: {} },
     },
+    scheduleResponse: { points: [] },
+    ...extra,
   });
 }
 
-test("no moon toggle at all when this light has no lunar switch entity", async () => {
-  const el = makeCard(LIGHT_DEVICE_ID);
-  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } });
+async function openEdit(el) {
+  el.shadowRoot.querySelector(".edit-button").click();
   await settled(el);
+}
 
-  assert.equal(el.shadowRoot.querySelector(".moon-toggle"), null);
-});
-
-test("moon toggle shows the phase icon and 'on' styling when lunar phases are enabled", async () => {
+test("view mode shows the moon phase, read-only, while lunar phases are on", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHassWithLunarSwitch("on", { moon_phase_icon: "mdi:moon-waning-gibbous" });
   await settled(el);
 
-  const button = el.shadowRoot.querySelector(".moon-toggle");
-  assert.ok(button);
-  assert.ok(button.classList.contains("on"));
-  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-waning-gibbous");
-  // The title shows the actual phase name, not just "active" -- this
-  // is the tooltip meant here, not the chart's own hover tooltip.
-  assert.equal(button.title, "Waning Gibbous");
+  const indicator = el.shadowRoot.querySelector(".moon-indicator");
+  assert.ok(indicator);
+  assert.equal(indicator.tagName, "SPAN");
+  assert.equal(indicator.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-waning-gibbous");
+  assert.equal(indicator.title, "Waning Gibbous");
+  assert.equal(el.shadowRoot.querySelector(".moon-toggle"), null);
 });
 
-test("moon toggle shows a dimmed new-moon icon when lunar phases are off", async () => {
+test("view mode shows no moon while lunar phases are off", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHassWithLunarSwitch("off", { moon_phase_icon: "mdi:moon-waning-gibbous" });
   await settled(el);
 
-  const button = el.shadowRoot.querySelector(".moon-toggle");
-  assert.ok(button);
-  assert.ok(!button.classList.contains("on"));
-  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-new");
-  assert.equal(button.title, "Lunar phases off -- tap to enable");
+  assert.equal(el.shadowRoot.querySelector(".moon-indicator"), null);
+  assert.equal(el.shadowRoot.querySelector(".moon-toggle"), null);
 });
 
-test("moon toggle's own title shows the correct name for every phase icon", async () => {
+test("the moon indicator's title names every phase", async () => {
   const cases = [
     ["mdi:moon-new", "New Moon"],
     ["mdi:moon-waxing-crescent", "Waxing Crescent"],
@@ -3290,44 +3283,96 @@ test("moon toggle's own title shows the correct name for every phase icon", asyn
     const el = makeCard(LIGHT_DEVICE_ID);
     el.hass = makeLightHassWithLunarSwitch("on", { moon_phase_icon: icon });
     await settled(el);
-    assert.equal(el.shadowRoot.querySelector(".moon-toggle").title, name, `icon ${icon}`);
+    assert.equal(el.shadowRoot.querySelector(".moon-indicator").title, name, `icon ${icon}`);
   }
 });
 
-test("clicking the moon toggle calls switch.toggle with the right entity_id", async () => {
+test("no moon toggle in the edit view when the light has no lunar switch", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, undefined, {
+    scheduleResponse: { points: [] },
+  });
+  await settled(el);
+  await openEdit(el);
+
+  assert.ok(el.shadowRoot.querySelector(".back-button"));
+  assert.equal(el.shadowRoot.querySelector(".moon-toggle"), null);
+});
+
+test("edit view toggle offers to disable tracking while it's on", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHassWithLunarSwitch("on", { moon_phase_icon: "mdi:moon-full" });
+  await settled(el);
+  await openEdit(el);
+
+  const button = el.shadowRoot.querySelector(".moon-toggle");
+  assert.ok(button.classList.contains("on"));
+  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-full");
+  assert.equal(button.title, "Disable moon cycle tracking");
+});
+
+test("edit view toggle offers to enable tracking while it's off", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHassWithLunarSwitch("off", {});
+  await settled(el);
+  await openEdit(el);
+
+  const button = el.shadowRoot.querySelector(".moon-toggle");
+  assert.ok(!button.classList.contains("on"));
+  assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:moon-new");
+  assert.equal(button.title, "Enable moon cycle tracking");
+});
+
+test("the edit view toggle switches every light of the group", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHassWithLunarSwitch("off", {});
+  await settled(el);
+  await openEdit(el);
   const calls = [];
   el.hass.callService = async (domain, service, data) => calls.push({ domain, service, data });
-  await settled(el);
 
   el.shadowRoot.querySelector(".moon-toggle").click();
   await el.updateComplete;
 
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {
-    domain: "switch",
-    service: "toggle",
-    data: { entity_id: "switch.left_lunar_phases" },
-  });
+  assert.deepEqual(calls, [
+    {
+      domain: "switch",
+      service: "turn_on",
+      data: { entity_id: ["switch.left_lunar_phases", "switch.right_lunar_phases"] },
+    },
+  ]);
 });
 
-test("moon toggle shows a spinner and disables itself while the toggle is pending", async () => {
+test("the edit view toggle turns tracking off for the group while it's on", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHassWithLunarSwitch("on", {});
+  await settled(el);
+  await openEdit(el);
+  const calls = [];
+  el.hass.callService = async (domain, service, data) => calls.push({ domain, service, data });
+
+  el.shadowRoot.querySelector(".moon-toggle").click();
+  await el.updateComplete;
+
+  assert.equal(calls[0].service, "turn_off");
+});
+
+test("the edit view toggle shows a spinner and disables itself while pending", async () => {
   let resolveCall;
   const pending = new Promise((r) => {
     resolveCall = r;
   });
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHassWithLunarSwitch("off", {});
-  el.hass.callService = async () => pending;
   await settled(el);
+  await openEdit(el);
+  el.hass.callService = async () => pending;
 
   const button = el.shadowRoot.querySelector(".moon-toggle");
   button.click();
   await el.updateComplete;
 
   assert.ok(button.disabled);
-  assert.ok(button.querySelector("ha-icon.spin"));
   assert.equal(button.querySelector("ha-icon").getAttribute("icon"), "mdi:loading");
 
   resolveCall();
@@ -3336,17 +3381,17 @@ test("moon toggle shows a spinner and disables itself while the toggle is pendin
   await Promise.resolve();
   await el.updateComplete;
 
-  assert.ok(!button.disabled);
-  assert.equal(el.shadowRoot.querySelector("ha-icon.spin"), null);
+  assert.ok(!el.shadowRoot.querySelector(".moon-toggle").disabled);
 });
 
-test("a failed toggle shows an error message", async () => {
+test("a failed toggle shows an error message in the edit view", async () => {
   const el = makeCard(LIGHT_DEVICE_ID);
   el.hass = makeLightHassWithLunarSwitch("off", {});
+  await settled(el);
+  await openEdit(el);
   el.hass.callService = async () => {
     throw new Error("device returned FSCI status Failed setting attribute 907");
   };
-  await settled(el);
 
   el.shadowRoot.querySelector(".moon-toggle").click();
   await el.updateComplete;
@@ -3354,19 +3399,13 @@ test("a failed toggle shows an error message", async () => {
   await Promise.resolve();
   await el.updateComplete;
 
-  assert.ok(el.shadowRoot.querySelector(".activation-error"));
   assert.ok(el.shadowRoot.textContent.includes("device returned FSCI status Failed setting attribute 907"));
 });
 
 // --------------------------------------------------------------------------
-// The header is a flex row (title/subtitle block vs. the light card's
-// own moon toggle sitting alongside it) -- confirming title/subtitle
-// are nested in their own wrapper div, not direct children of
-// .header, on BOTH cards. A real, confirmed regression: the pump
-// card's own title/subtitle were still direct .header children after
-// .header became a flex row for the light card's moon toggle, putting
-// the pump's own device name beside "Pump Schedule" instead of below
-// it.
+// The header is a flex row (title/subtitle block beside the light card's
+// moon indicator), so title and subtitle sit in their own wrapper div on
+// both cards; otherwise the pump's device name ends up beside the title.
 // --------------------------------------------------------------------------
 
 test("pump card's own title and subtitle stay stacked, not side-by-side", async () => {

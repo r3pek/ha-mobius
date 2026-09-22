@@ -13,6 +13,9 @@
   battery power and on/off times. Boosted battery settings can only be
   changed while the pump runs on battery.
 - Added a "Running on battery" sensor for pumps with battery backup.
+- Light schedule card: the moon now only shows the current moon phase
+  (while lunar phases are on). Lunar phases are turned on and off from the
+  schedule editor, for every light in the schedule group.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0

@@ -991,12 +991,34 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  private async _toggleLunar(entityId: string): Promise<void> {
-    if (this._pendingLunarToggle) return;
+  // Lunar phase state of a light group: the lunar switches of every member
+  // (a setting is applied to the whole group, like the schedule), whether
+  // the shown member has it on, and its current moon phase icon.
+  private _lunarState() {
+    const { member } = this._pickAvailableLightMember();
+    const entityIds = (this._group?.members ?? [])
+      .map((m) => m.lunar_switch_entity_id)
+      .filter((id): id is string => !!id);
+    const switchId = member?.lunar_switch_entity_id;
+    const intensityId = member?.schedule_intensity_entity_id;
+    const phaseIcon: string | undefined = intensityId
+      ? this.hass.states[intensityId]?.attributes.moon_phase_icon
+      : undefined;
+    return {
+      entityIds,
+      available: !!switchId,
+      on: !!switchId && this.hass.states[switchId]?.state === "on",
+      phaseIcon,
+    };
+  }
+
+  // Turns lunar phases on or off on every light of the group.
+  private async _setLunar(entityIds: string[], enable: boolean): Promise<void> {
+    if (this._pendingLunarToggle || entityIds.length === 0) return;
     this._pendingLunarToggle = true;
     this._lunarToggleError = undefined;
     try {
-      await this.hass.callService("switch", "toggle", { entity_id: entityId });
+      await this.hass.callService("switch", enable ? "turn_on" : "turn_off", { entity_id: entityIds });
     } catch (err) {
       this._lunarToggleError = errorMessage(err);
     } finally {
@@ -1013,10 +1035,7 @@ export class MobiusScheduleCard extends LitElement {
     const liveIntensityPercent = intensityState ? Math.round(Number(intensityState.state)) : undefined;
     const displayedIntensityPercent = this._pendingIntensityPercent ?? liveIntensityPercent;
 
-    const lunarSwitchEntityId = sourceMember?.lunar_switch_entity_id;
-    const lunarSwitchState = lunarSwitchEntityId ? this.hass.states[lunarSwitchEntityId] : undefined;
-    const lunarOn = lunarSwitchState?.state === "on";
-
+    const lunar = this._lunarState();
     return html`
       <ha-card>
         <div class="header">
@@ -1025,34 +1044,20 @@ export class MobiusScheduleCard extends LitElement {
             <div class="subtitle">${group.members.map((m) => m.name).join(" + ")}</div>
           </div>
           ${
-            lunarSwitchEntityId
-              ? html`<button
-                  class="moon-toggle ${lunarOn ? "on" : ""}"
-                  ?disabled=${this._pendingLunarToggle}
-                  @click=${() => this._toggleLunar(lunarSwitchEntityId)}
+            lunar.on
+              ? html`<span
+                  class="moon-indicator"
                   title=${
-                    lunarOn
-                      ? intensityState?.attributes.moon_phase_icon
-                        ? moonPhaseName(intensityState.attributes.moon_phase_icon, this.hass)
-                        : localize("schedule_card.lunar_phases_active")
-                      : localize("schedule_card.lunar_phases_off")
+                    lunar.phaseIcon
+                      ? moonPhaseName(lunar.phaseIcon, this.hass)
+                      : localize("schedule_card.lunar_phases_active")
                   }
                 >
-                  <ha-icon
-                    icon=${
-                      this._pendingLunarToggle
-                        ? "mdi:loading"
-                        : lunarOn && intensityState?.attributes.moon_phase_icon
-                          ? intensityState.attributes.moon_phase_icon
-                          : "mdi:moon-new"
-                    }
-                    class=${this._pendingLunarToggle ? "spin" : ""}
-                  ></ha-icon>
-                </button>`
+                  <ha-icon icon=${lunar.phaseIcon ?? "mdi:moon-waning-crescent"}></ha-icon>
+                </span>`
               : nothing
           }
         </div>
-        ${this._lunarToggleError ? html`<div class="activation-error">${this._lunarToggleError}</div>` : nothing}
         ${this._renderSceneBanner()}
         ${
           unavailableNames.length > 0
@@ -1117,8 +1122,28 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
-  // Card, header (back, title, .mob import/export) and content of the edit
-  // view.
+  // Lunar phases on/off for the whole group (edit view header). Only shown
+  // when the light supports lunar phases.
+  private _renderLunarToggle() {
+    const lunar = this._lunarState();
+    if (!lunar.available) return nothing;
+    const label = localize(lunar.on ? "schedule_card.lunar_disable" : "schedule_card.lunar_enable");
+    return html`<button
+      class="header-icon-button moon-toggle ${lunar.on ? "on" : ""}"
+      ?disabled=${this._pendingLunarToggle}
+      title=${label}
+      aria-label=${label}
+      @click=${() => this._setLunar(lunar.entityIds, !lunar.on)}
+    >
+      <ha-icon
+        icon=${this._pendingLunarToggle ? "mdi:loading" : lunar.on ? (lunar.phaseIcon ?? "mdi:moon-waning-crescent") : "mdi:moon-new"}
+        class=${this._pendingLunarToggle ? "spin" : ""}
+      ></ha-icon>
+    </button>`;
+  }
+
+  // Card, header (back, title, lunar toggle, .mob import/export) and content
+  // of the edit view.
   private _renderEditShell(content: unknown) {
     return html`
       <ha-card>
@@ -1132,6 +1157,7 @@ export class MobiusScheduleCard extends LitElement {
             <ha-icon icon="mdi:arrow-left"></ha-icon>
           </button>
           <div class="title">${localize("schedule_card.edit_schedule")}</div>
+          ${this._group?.kind === "light" ? this._renderLunarToggle() : nothing}
           <button
             class="header-icon-button"
             ?disabled=${this._importingMob || this._editingIndex != null}
@@ -1164,7 +1190,9 @@ export class MobiusScheduleCard extends LitElement {
             @change=${(e: Event) => this._handleMobFileSelected(e)}
           />
         </div>
-        ${this._mobError ? html`<div class="save-schedule-error">${this._mobError}</div>` : nothing} ${content}
+        ${this._mobError ? html`<div class="save-schedule-error">${this._mobError}</div>` : nothing}
+        ${this._lunarToggleError ? html`<div class="save-schedule-error">${this._lunarToggleError}</div>` : nothing}
+        ${content}
       </ha-card>
     `;
   }
@@ -1600,6 +1628,15 @@ export class MobiusScheduleCard extends LitElement {
       justify-content: space-between;
       align-items: flex-start;
       gap: 8px;
+    }
+    .moon-indicator {
+      display: flex;
+      flex-shrink: 0;
+      padding: 4px;
+      color: var(--primary-color);
+    }
+    .moon-indicator ha-icon {
+      --mdc-icon-size: 22px;
     }
     .moon-toggle {
       display: flex;
