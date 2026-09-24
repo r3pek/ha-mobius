@@ -71,6 +71,7 @@
     "load_mob": "Load .mob",
     "importing_mob": "Loading…",
     "mob_wrong_extension": "Please choose a .mob file.",
-    "mob_invalid_json": "This file doesn't look like a valid .mob file."
+    "mob_invalid_json": "This file doesn't look like a valid .mob file.",
+    "seconds_unit": "s"
   }
 }

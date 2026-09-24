@@ -1060,3 +1060,17 @@ async def test_real_pump_setup_resolves_mode_entity_id_end_to_end(hass):
         member = groups[0].as_dict()["members"][0]
 
         assert member["mode_entity_id"] == "sensor.mp40qd_right_current_mode"
+
+
+def test_mode_param_ranges_come_from_python_mobius():
+    from mobius import Model, PrimitiveType, PumpMode
+    from custom_components.mobius.websocket_api import _mode_param_ranges
+
+    assert _mode_param_ranges(PumpMode.ShortPulse, PrimitiveType.VorTechV1, None) == {
+        "MaxSpeed": {"min": 10, "max": 1000, "step": 10},
+        "Time": {"min": 250, "max": 2000, "step": 10},
+    }
+    assert _mode_param_ranges(PumpMode.Feed, PrimitiveType.VorTechV1, None)["MaxSpeed"]["min"] == 0
+    assert _mode_param_ranges(PumpMode.Pulse, PrimitiveType.PumpV1, Model.Nero7)["OnTime"]["min"] == 2000
+    # Sync: Master (ParentSerial) has no range.
+    assert set(_mode_param_ranges(PumpMode.Sync, PrimitiveType.VorTechV1, None)) == {"MaxSpeed", "PhaseShift"}

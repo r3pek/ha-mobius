@@ -28,6 +28,10 @@
 - The schedule editor now says that the Mobius app keeps its own copy of
   the schedule, and that downloading the `.mob` file after saving and
   importing it in the app brings the app up to date.
+- Pump schedule editor: parameters are limited to the ranges the app
+  allows, times are entered in seconds, and parameters added by a new mode
+  start at a valid value (they started at 0, which the pump doesn't
+  accept). Out-of-range schedules are rejected before writing.
 - Internal cleanup. Requires the matching python-mobius release.
 
 ## 0.8.0

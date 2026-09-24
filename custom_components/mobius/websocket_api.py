@@ -20,6 +20,7 @@ from mobius import (
     PumpMode, PumpParam, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
     light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
     supported_pump_modes, PUMP_MODE_PARAMS, primitive_type_from_name,
+    Model, enum_or_none, pump_param_range,
 )
 
 from . import MobiusRuntimeData
@@ -75,6 +76,9 @@ class ScheduleGroup:
     channels: list[str] | None = None  # light only
     modes: list[str] | None = None  # pump only
     mode_params: dict[str, list[str]] | None = None  # pump only -- which params each of `modes` needs
+    # pump only -- {mode: {param: {"min", "max", "step"}}}: the range the app
+    # allows for each parameter (see python-mobius pump_param_range()).
+    param_ranges: dict[str, dict[str, dict[str, int]]] | None = None
     active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
     schedule_intensity: float | None = None  # light only -- 0.0-1.0, see Schedule1Intensity
     scene_entity_id: str | None = None  # tank-wide -- same value for every group on the same tank
@@ -106,6 +110,7 @@ class ScheduleGroup:
         else:
             result["modes"] = self.modes
             result["mode_params"] = self.mode_params
+            result["param_ranges"] = self.param_ranges
         return result
 
 
@@ -243,10 +248,12 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
         data = coordinator.data or {}
         primitive = primitive_type_from_name(data.get("primitive_type"))
         pump_modes = supported_pump_modes(primitive, data.get("closed_loop")) if primitive else []
+        model = enum_or_none(Model, data.get("model_raw"))
         groups.append(ScheduleGroup(
             kind="pump", group_mask=None,
             modes=[m.name for m in pump_modes],
             mode_params={m.name: _mode_param_names(m) for m in pump_modes},
+            param_ranges={m.name: _mode_param_ranges(m, primitive, model) for m in pump_modes},
             active_scene=active_scene,
             scene_entity_id=scene_entity_id,
             members=[ScheduleGroupMember(
@@ -306,6 +313,17 @@ def _mode_param_names(mode: PumpMode) -> list[str]:
     """Parameter names of `mode` as the card sees them (Master is
     replaced by ParentSerial, see _translate_master_to_parent_serial())."""
     return ["ParentSerial" if p == PumpParam.Master else p.name for p in PUMP_MODE_PARAMS.get(mode, [])]
+
+
+def _mode_param_ranges(mode: PumpMode, primitive: PrimitiveType | None, model: Model | None) -> dict[str, dict[str, int]]:
+    """{param name: {"min", "max", "step"}} for the parameters of `mode`
+    that have a range."""
+    ranges = {}
+    for param in PUMP_MODE_PARAMS.get(mode, []):
+        allowed = pump_param_range(param, primitive, mode, model)
+        if allowed is not None:
+            ranges[param.name] = {"min": allowed.minimum, "max": allowed.maximum, "step": allowed.step}
+    return ranges
 
 
 def _translate_master_to_parent_serial(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:

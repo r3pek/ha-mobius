@@ -3470,3 +3470,112 @@ test("the glance view does not show the note", async () => {
 
   assert.equal(el.shadowRoot.querySelector(".app-cache-note"), null);
 });
+
+// --------------------------------------------------------------------------
+// Pump parameter ranges (param_ranges from resolve_schedule_groups).
+// --------------------------------------------------------------------------
+
+const RANGED_PUMP_GROUP = {
+  ...PUMP_GROUP,
+  members: PUMP_GROUP.members.map((m) => ({ ...m, supports_reverse: false })),
+  modes: ["ConstantSpeed", "ShortPulse", "Gyre"],
+  mode_params: {
+    ConstantSpeed: ["MaxSpeed"],
+    ShortPulse: ["MaxSpeed", "Time"],
+    Gyre: ["MaxSpeed", "BigTime"],
+  },
+  param_ranges: {
+    ConstantSpeed: { MaxSpeed: { min: 10, max: 1000, step: 10 } },
+    ShortPulse: { MaxSpeed: { min: 10, max: 1000, step: 10 }, Time: { min: 250, max: 2000, step: 10 } },
+    Gyre: { MaxSpeed: { min: 10, max: 1000, step: 10 }, BigTime: { min: 2000, max: 3600000, step: 1000 } },
+  },
+};
+
+async function openRangedPumpPoint(point) {
+  const el = makeCard(PUMP_DEVICE_ID);
+  el.hass = makePumpHass(
+    { "sensor.pump_flow": { state: "300", attributes: {} } },
+    { scheduleResponse: { points: [point] }, wsResponse: { groups: [RANGED_PUMP_GROUP] } },
+  );
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+  el.shadowRoot.querySelector(".point-row").click();
+  await el.updateComplete;
+  return el;
+}
+
+function chooseMode(el, mode) {
+  const modeSelect = el.shadowRoot.querySelector(".mode-label select");
+  modeSelect.value = mode;
+  modeSelect.dispatchEvent(new window.Event("change"));
+}
+
+function paramInput(el, name) {
+  return [...el.shadowRoot.querySelectorAll(".param-label")]
+    .find((l) => l.textContent.includes(name))
+    ?.querySelector("input");
+}
+
+test("a new time parameter starts at the lowest allowed value, shown in seconds", async () => {
+  const el = await openRangedPumpPoint({ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } });
+  chooseMode(el, "ShortPulse");
+  await el.updateComplete;
+
+  const time = paramInput(el, "Time");
+  assert.equal(time.value, "0.25");
+  assert.equal(time.min, "0.25");
+  assert.equal(time.max, "2");
+  assert.equal(el._workingPoint.params.Time, 250);
+  assert.ok(time.closest("label").textContent.includes("(s)"));
+});
+
+test("time values are stored in milliseconds and kept within the range", async () => {
+  const el = await openRangedPumpPoint({
+    time_minutes: 0,
+    flags: 1,
+    mode: "ShortPulse",
+    params: { MaxSpeed: 300, Time: 500 },
+  });
+  const time = paramInput(el, "Time");
+  time.value = "0.1";
+  time.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  assert.equal(el._workingPoint.params.Time, 250);
+
+  time.value = "1.234";
+  time.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  assert.equal(el._workingPoint.params.Time, 1230);
+});
+
+test("Gyre time is entered in seconds", async () => {
+  const el = await openRangedPumpPoint({ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } });
+  chooseMode(el, "Gyre");
+  await el.updateComplete;
+
+  const bigTime = paramInput(el, "BigTime");
+  assert.equal(bigTime.value, "2");
+  bigTime.value = "90";
+  bigTime.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  assert.equal(el._workingPoint.params.BigTime, 90000);
+});
+
+test("a speed below the allowed minimum is raised to it", async () => {
+  const el = await openRangedPumpPoint({ time_minutes: 0, flags: 1, mode: "ConstantSpeed", params: { MaxSpeed: 300 } });
+  const speed = paramInput(el, "MaxSpeed");
+  assert.equal(speed.min, "1");
+  speed.value = "0";
+  speed.dispatchEvent(new window.Event("change"));
+  await el.updateComplete;
+  assert.equal(el._workingPoint.params.MaxSpeed, 10);
+});
+
+test("a speed added by a new mode starts at 50 %", async () => {
+  const el = await openRangedPumpPoint({ time_minutes: 0, flags: 1, mode: "ShortPulse", params: { Time: 500 } });
+  assert.equal(el._workingPoint.params.MaxSpeed, undefined);
+  chooseMode(el, "Gyre");
+  await el.updateComplete;
+  assert.equal(el._workingPoint.params.MaxSpeed, 500);
+});

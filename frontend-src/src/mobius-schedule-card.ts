@@ -95,6 +95,19 @@ interface ScheduleGroupMember {
   supports_reverse?: boolean | null;
 }
 
+interface ParamRange {
+  min: number;
+  max: number;
+  step: number;
+}
+
+// Pump time parameters (milliseconds), edited in seconds.
+const TIME_PARAMS = new Set(["Time", "StartTime", "EndTime", "BigTime", "OnTime", "OffTime"]);
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 interface ScheduleGroup {
   kind: "light" | "pump";
   group_mask: number | null;
@@ -102,6 +115,9 @@ interface ScheduleGroup {
   channels?: string[];
   modes?: string[];
   mode_params?: Record<string, string[]>;
+  // Range the app allows per mode and parameter (python-mobius
+  // pump_param_range()), in the raw units of the params.
+  param_ranges?: Record<string, Record<string, ParamRange>>;
   active_scene: { name: string; duration_seconds: number; ends_at?: string | null } | null;
   scene_entity_id: string | null;
   schedule_intensity?: number | null;
@@ -569,7 +585,7 @@ export class MobiusScheduleCard extends LitElement {
       } else if (name === "ParentSerial") {
         params[name] = this._otherPumps[0]?.serial ?? "";
       } else {
-        params[name] = 0;
+        params[name] = this._defaultParamValue(realMode, name);
       }
     }
     this._workingPoint = { ...working, mode: realMode, params };
@@ -1433,6 +1449,19 @@ export class MobiusScheduleCard extends LitElement {
     `;
   }
 
+  private _paramRange(name: string): ParamRange | undefined {
+    const working = this._workingPoint as PumpScheduleEntry | undefined;
+    return working ? this._group?.param_ranges?.[working.mode]?.[name] : undefined;
+  }
+
+  // Value for a parameter a newly chosen mode adds: 50 % for speeds, the
+  // lowest allowed value for everything else.
+  private _defaultParamValue(mode: string, name: string): number {
+    const range = this._group?.param_ranges?.[mode]?.[name];
+    if (!range) return 0;
+    return name === "MaxSpeed" || name === "MinSpeed" ? clamp(500, range.min, range.max) : range.min;
+  }
+
   private _renderPumpParamInput(name: string, value: unknown) {
     if (name === "RampType") {
       return html`
@@ -1505,28 +1534,60 @@ export class MobiusScheduleCard extends LitElement {
     // A negative MaxSpeed/MinSpeed reverses rotation, only on pumps with
     // supports_reverse (AlpacaV1). Other pumps don't accept negative values.
     const isSpeedParam = name === "MaxSpeed" || name === "MinSpeed";
+    const range = this._paramRange(name);
     if (isSpeedParam) {
       const supportsReverse = this._group?.members?.[0]?.supports_reverse === true;
       // Shown as whole percent (the raw value is tenths of a percent); the sign
       // is kept.
       const raw = Number(value ?? 0);
       const displayPercent = Math.sign(raw) * Math.round(Math.abs(raw) / 10);
+      const minPercent = range ? range.min / 10 : 0;
+      const maxPercent = range ? range.max / 10 : 100;
       return html`
         <label class="param-label">
           ${name} (%)
           <input
             type="number"
-            min=${supportsReverse ? nothing : 0}
+            min=${supportsReverse ? -maxPercent : minPercent}
+            max=${maxPercent}
+            step="1"
             .value=${String(displayPercent)}
             title=${supportsReverse ? localize("schedule_card.reverse_hint") : nothing}
             @change=${(e: Event) => {
-              let percent = Number((e.target as HTMLInputElement).value);
+              const input = e.target as HTMLInputElement;
+              let percent = Number(input.value);
               // The device would ignore a negative value.
               if (!supportsReverse && percent < 0) percent = Math.abs(percent);
-              this._updateWorkingPumpParam(name, Math.sign(percent) * Math.round(Math.abs(percent) * 10));
+              const magnitude = clamp(Math.round(Math.abs(percent)), minPercent, maxPercent);
+              const signed = (percent < 0 ? -1 : 1) * magnitude;
+              input.value = String(signed);
+              this._updateWorkingPumpParam(name, signed * 10);
             }}
           />
           ${supportsReverse ? html`<span class="field-hint">${localize("schedule_card.reverse_hint")}</span>` : nothing}
+        </label>
+      `;
+    }
+    if (TIME_PARAMS.has(name)) {
+      // Milliseconds on the device, seconds in the editor.
+      const seconds = Number(value ?? 0) / 1000;
+      return html`
+        <label class="param-label">
+          ${name} (${localize("schedule_card.seconds_unit")})
+          <input
+            type="number"
+            min=${range ? range.min / 1000 : 0}
+            max=${range ? range.max / 1000 : nothing}
+            step=${range ? range.step / 1000 : "any"}
+            .value=${String(seconds)}
+            @change=${(e: Event) => {
+              const input = e.target as HTMLInputElement;
+              let ms = Math.round(Number(input.value) * 1000);
+              if (range) ms = clamp(Math.round(ms / range.step) * range.step, range.min, range.max);
+              input.value = String(ms / 1000);
+              this._updateWorkingPumpParam(name, ms);
+            }}
+          />
         </label>
       `;
     }
@@ -1535,8 +1596,17 @@ export class MobiusScheduleCard extends LitElement {
         ${name}
         <input
           type="number"
+          min=${range ? range.min : nothing}
+          max=${range ? range.max : nothing}
+          step=${range ? range.step : nothing}
           .value=${String(value ?? 0)}
-          @change=${(e: Event) => this._updateWorkingPumpParam(name, Number((e.target as HTMLInputElement).value))}
+          @change=${(e: Event) => {
+            const input = e.target as HTMLInputElement;
+            let n = Number(input.value);
+            if (range) n = clamp(n, range.min, range.max);
+            input.value = String(n);
+            this._updateWorkingPumpParam(name, n);
+          }}
         />
       </label>
     `;
