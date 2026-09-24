@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - Manual setup now runs an active Bluetooth scan when a Mobius device is
   nearby but its serial number can't be read yet, instead of reporting
@@ -32,7 +32,7 @@
   allows, times are entered in seconds, and parameters added by a new mode
   start at a valid value (they started at 0, which the pump doesn't
   accept). Out-of-range schedules are rejected before writing.
-- Internal cleanup. Requires the matching python-mobius release.
+- Internal cleanup. Requires python-mobius 0.9.0+.
 
 ## 0.8.0
 
