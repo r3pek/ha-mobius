@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv
 
 from mobius import (
     min_schedule_capacity, light_schedule_from_dict, pump_schedule_from_dict, primitive_type_from_name, support_tier,
+    SchedulePoint, LightPrimitive,
 )
 
 from .const import DOMAIN
@@ -137,13 +138,15 @@ async def _resolve_group(hass: HomeAssistant, device_id: str) -> tuple[str, Mobi
     return target_serial, target_coordinator, support, members
 
 
-async def _write_to_members(members: list[Member], write: Callable[[Any], Awaitable[None]], what: str) -> None:
-    """Runs `write` on every member; raises HomeAssistantError listing the
-    failures, if any."""
+async def _write_to_members(
+    members: list[Member], write: Callable[[str, Any], Awaitable[None]], what: str,
+) -> None:
+    """Runs `write(serial, device)` on every member; raises HomeAssistantError
+    listing the failures, if any."""
     errors: list[str] = []
     for serial, _coordinator, device in members:
         try:
-            await write(device)
+            await write(serial, device)
         except Exception as e:
             errors.append(f"{serial}: {e}")
     if errors:
@@ -151,6 +154,21 @@ async def _write_to_members(members: list[Member], write: Callable[[Any], Awaita
             f"{what} {len(members) - len(errors)}/{len(members)} device(s) "
             f"successfully; failed: {'; '.join(errors)}"
         )
+
+
+def _project_points_for(points, channels: set):
+    """Copies `points`, keeping on each point only the channels in `channels`,
+    plus Brightness (the per-point master dimmer, which every device uses).
+    An empty `channels` set means the device's channels aren't known yet;
+    the points are then written unchanged."""
+    if not channels:
+        return points
+    keep = channels | {"Brightness"}
+    projected = []
+    for p in points:
+        allowed = {vid: intensity for vid, intensity in p.light.channels.items() if vid.name in keep}
+        projected.append(SchedulePoint(p.time_minutes, p.flags, LightPrimitive(allowed)))
+    return projected
 
 
 async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -161,6 +179,10 @@ async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCa
     _target_serial, target_coordinator, support, members = await _resolve_group(hass, call.data["device_id"])
 
     if support == "light":
+        channels_by_serial = {
+            serial: set((coordinator.data or {}).get("channels") or [])
+            for serial, coordinator, _device in members
+        }
         points = light_schedule_from_dict(points_dict)
     else:
         _untranslate_parent_serial_to_master(points_dict, target_coordinator)
@@ -175,9 +197,17 @@ async def async_handle_write_schedule_group(hass: HomeAssistant, call: ServiceCa
         )
 
     if support == "light":
-        await _write_to_members(members, lambda d: d.set_light_schedule(points, which=1), "Wrote to")
+        # A light rejects a schedule unless every point holds exactly its own
+        # channels, so each device gets the points projected onto the channels
+        # it supports (extras dropped, Brightness always kept). In a group of
+        # different light models this writes each model what it can use.
+        await _write_to_members(
+            members,
+            lambda serial, d: d.set_light_schedule(_project_points_for(points, channels_by_serial[serial]), which=1),
+            "Wrote to",
+        )
     else:
-        await _write_to_members(members, lambda d: d.set_pump_schedule(points, which=1), "Wrote to")
+        await _write_to_members(members, lambda _serial, d: d.set_pump_schedule(points, which=1), "Wrote to")
 
 
 async def async_handle_set_schedule_intensity(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -193,7 +223,7 @@ async def async_handle_set_schedule_intensity(hass: HomeAssistant, call: Service
             f"this is a light-only concept."
         )
     fraction = call.data["intensity"] / 100.0
-    await _write_to_members(members, lambda d: d.set_schedule_intensity(fraction, which=1), "Set intensity on")
+    await _write_to_members(members, lambda _serial, d: d.set_schedule_intensity(fraction, which=1), "Set intensity on")
 
 
 def async_register_services(hass: HomeAssistant) -> None:

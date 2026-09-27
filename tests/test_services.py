@@ -480,3 +480,52 @@ def test_set_schedule_intensity_schema_rejects_out_of_range():
 def test_set_schedule_intensity_schema_accepts_valid_range():
     result = SET_SCHEDULE_INTENSITY_SCHEMA({"device_id": "abc", "intensity": 58.8})
     assert result == {"device_id": "abc", "intensity": 58.8}
+
+
+# --------------------------------------------------------------------------
+# Mixed-channel light groups: each light is written only its own channels.
+# --------------------------------------------------------------------------
+
+def _light_cached_ch(name: str, channels: list[str]) -> dict:
+    return {"support": "light", "name": name, "model": "RadionXR15wG6Pro", "channels": channels}
+
+
+PRO_CH = ["Brightness", "CoolWhite", "RoyalBlue", "Blue", "Red", "Green", "UV", "Violet", "WarmWhite", "Moonlight"]
+BLUE_CH = ["Brightness", "CoolWhite", "RoyalBlue", "Blue", "Red", "UV", "Violet", "WarmWhite", "Moonlight"]
+
+
+def _mixed_points_dict():
+    # One point holding a Pro-only channel (Green) plus a shared one.
+    return [{"time_minutes": 480, "flags": 1, "channels": {"RoyalBlue": 500, "Green": 400, "Brightness": 1000}}]
+
+
+async def _written_channels(coordinator) -> set:
+    points = coordinator._test_fake_device.set_light_schedule.call_args.args[0]
+    return {vid.name for vid in points[0].light.channels}
+
+
+async def test_mixed_group_strips_channels_each_light_lacks(hass):
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_light_cached_ch("Pro", PRO_CH), _light_live(1)),
+        "SN2": (_light_cached_ch("Blue", BLUE_CH), _light_live(1)),
+    })
+    c_pro = entry.runtime_data.coordinators["SN1"]
+    c_blue = entry.runtime_data.coordinators["SN2"]
+
+    await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _mixed_points_dict()))
+
+    # The Pro keeps Green; the Blue has it dropped (Brightness kept for both).
+    assert "Green" in await _written_channels(c_pro)
+    assert await _written_channels(c_blue) == {"RoyalBlue", "Brightness"}
+
+
+async def test_same_channel_group_is_unchanged(hass):
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": (_light_cached_ch("A", PRO_CH), _light_live(1)),
+        "SN2": (_light_cached_ch("B", PRO_CH), _light_live(1)),
+    })
+    c1 = entry.runtime_data.coordinators["SN1"]
+
+    await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _mixed_points_dict()))
+
+    assert "Green" in await _written_channels(c1)

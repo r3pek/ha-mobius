@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The schedule editor now handles light groups whose models have different
+  channels: it shows every channel any light in the group has, and when
+  saving, each light is written only the channels it supports (the app
+  refuses to edit such a group at all). A short note appears in the editor
+  for a mixed group.
+
 ## 0.9.0
 
 - Manual setup now runs an active Bluetooth scan when a Mobius device is

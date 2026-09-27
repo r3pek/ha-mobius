@@ -3579,3 +3579,37 @@ test("a speed added by a new mode starts at 50 %", async () => {
   await el.updateComplete;
   assert.equal(el._workingPoint.params.MaxSpeed, 500);
 });
+
+// --------------------------------------------------------------------------
+// Mixed-channel groups: a note in the editor; the card still shows every
+// channel (the union).
+// --------------------------------------------------------------------------
+
+test("a mixed-channel group shows a note in the editor", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeHass({
+    devices: { [LIGHT_DEVICE_ID]: { id: LIGHT_DEVICE_ID, via_device_id: TANK_DEVICE_ID } },
+    states: { "sensor.left_royalblue": { state: "60", attributes: {} } },
+    scheduleResponse: { points: [] },
+    wsResponse: { groups: [{ ...LIGHT_GROUP, mixed_channels: true }] },
+  });
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  const notes = [...el.shadowRoot.querySelectorAll(".app-cache-note")].map((n) => n.textContent);
+  assert.ok(notes.some((t) => t.includes("don't all have the same channels")));
+});
+
+test("a same-channel group shows no mixed-channel note", async () => {
+  const el = makeCard(LIGHT_DEVICE_ID);
+  el.hass = makeLightHass({ "sensor.left_royalblue": { state: "60", attributes: {} } }, undefined, {
+    scheduleResponse: { points: [] },
+  });
+  await settled(el);
+  el.shadowRoot.querySelector(".edit-button").click();
+  await settled(el);
+
+  const notes = [...el.shadowRoot.querySelectorAll(".app-cache-note")].map((n) => n.textContent);
+  assert.ok(!notes.some((t) => t.includes("don't all have the same channels")));
+});

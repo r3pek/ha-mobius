@@ -259,6 +259,28 @@ async def test_light_group_includes_channels(hass):
     assert "modes" not in groups[0].as_dict()
 
 
+async def test_light_group_channels_are_the_union_across_members(hass):
+    # A Pro (with Green) and a Blue (without) share a group. The card gets the
+    # union, ordered by the first member then any extra channels others add.
+    entry, tank_device_id = _setup_tank(hass, {
+        "SN1": _light_data("Pro", 1, channels=["RoyalBlue", "Green", "CoolWhite"]),
+        "SN2": _light_data("Blue", 1, channels=["RoyalBlue", "CoolWhite", "Violet"]),
+    })
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert groups[0].channels == ["RoyalBlue", "Green", "CoolWhite", "Violet"]
+    assert groups[0].mixed_channels is True
+    assert groups[0].as_dict()["mixed_channels"] is True
+
+
+async def test_light_group_not_mixed_when_channels_match(hass):
+    entry, tank_device_id = _setup_tank(hass, {
+        "SN1": _light_data("A", 1, channels=["RoyalBlue", "CoolWhite"]),
+        "SN2": _light_data("B", 1, channels=["CoolWhite", "RoyalBlue"]),
+    })
+    groups = _resolve_tank_groups(hass, tank_device_id)
+    assert groups[0].mixed_channels is False
+
+
 async def test_light_group_includes_schedule_intensity_from_representative_member(hass):
     data = _light_data("Left", None)
     data["schedule_intensity"] = 0.588

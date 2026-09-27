@@ -81,6 +81,9 @@ class ScheduleGroup:
     param_ranges: dict[str, dict[str, dict[str, int]]] | None = None
     active_scene: dict[str, Any] | None = None  # {"name": str, "duration_seconds": int} or None
     schedule_intensity: float | None = None  # light only -- 0.0-1.0, see Schedule1Intensity
+    # light only -- True when the group's lights don't all have the same
+    # channels (each light is still written only the channels it supports).
+    mixed_channels: bool = False
     scene_entity_id: str | None = None  # tank-wide -- same value for every group on the same tank
 
     def as_dict(self) -> dict[str, Any]:
@@ -107,6 +110,7 @@ class ScheduleGroup:
         if self.kind == "light":
             result["channels"] = self.channels
             result["schedule_intensity"] = self.schedule_intensity
+            result["mixed_channels"] = self.mixed_channels
         else:
             result["modes"] = self.modes
             result["mode_params"] = self.mode_params
@@ -181,6 +185,18 @@ def _device_runtime(hass: HomeAssistant, device_entry: dr.DeviceEntry, label: st
     return entry_id, runtime
 
 
+def _union_channels(channel_lists: list[list[str]]) -> list[str]:
+    """The union of the given per-device channel lists, keeping the order in
+    which channels first appear (the first device's channels, then any others
+    later devices add)."""
+    seen: list[str] = []
+    for channels in channel_lists:
+        for ch in channels:
+            if ch not in seen:
+                seen.append(ch)
+    return seen
+
+
 def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[ScheduleGroup]:
     """
     The schedule groups of a tank device's members. Lights with the same
@@ -221,13 +237,19 @@ def _resolve_tank_groups(hass: HomeAssistant, tank_device_id: str) -> list[Sched
     scene_entity_id = _scene_entity_id(hass, entry_id)
 
     for key, members in light_groups.items():
-        # Sorted by serial so the first member (whose channels and live
-        # values the card shows) is always the same device.
+        # Sorted by serial so the first member (whose live values the card
+        # follows) is always the same device.
         members = sorted(members, key=lambda m: m[0])
         first_data = members[0][1].data or {}
+        member_channel_sets = [set((c.data or {}).get("channels") or []) for _s, c in members]
+        # The card shows every channel any light in the group has (the union);
+        # each light is written only its own channels when saving. Ordered by
+        # the first member's list, then any extra channels other members add.
+        union_channels = _union_channels([(c.data or {}).get("channels") or [] for _s, c in members])
+        mixed_channels = any(s != member_channel_sets[0] for s in member_channel_sets[1:])
         groups.append(ScheduleGroup(
             kind="light", group_mask=key if isinstance(key, int) else None,
-            channels=first_data.get("channels") or [], active_scene=active_scene,
+            channels=union_channels, mixed_channels=mixed_channels, active_scene=active_scene,
             schedule_intensity=first_data.get("schedule_intensity"), scene_entity_id=scene_entity_id,
             members=[
                 ScheduleGroupMember(

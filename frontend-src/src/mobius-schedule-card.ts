@@ -113,6 +113,8 @@ interface ScheduleGroup {
   group_mask: number | null;
   members: ScheduleGroupMember[];
   channels?: string[];
+  // light only -- the group's lights don't all have the same channels.
+  mixed_channels?: boolean;
   modes?: string[];
   mode_params?: Record<string, string[]>;
   // Range the app allows per mode and parameter (python-mobius
@@ -1239,6 +1241,14 @@ export class MobiusScheduleCard extends LitElement {
         <ha-icon icon="mdi:information-outline"></ha-icon>
         <span>${localize("schedule_card.app_cache_note")}</span>
       </div>
+      ${
+        this._group?.mixed_channels
+          ? html`<div class="app-cache-note">
+              <ha-icon icon="mdi:information-outline"></ha-icon>
+              <span>${localize("schedule_card.mixed_channels_note")}</span>
+            </div>`
+          : nothing
+      }
     `;
   }
 
