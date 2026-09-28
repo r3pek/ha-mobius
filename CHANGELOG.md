@@ -2,34 +2,16 @@
 
 ## Unreleased
 
-- The tank's clock is now kept in sync automatically: after each poll, if
-  any device's clock is more than 60 seconds off, or its time zone differs
-  from Home Assistant's, the tank's time zone and time are set (at most
-  every 5 minutes; each correction is logged). This replaces the hourly
-  time sync. Requires the matching python-mobius release.
-- The schedule editor now handles light groups whose models have different
-  channels: it shows every channel any light in the group has, and when
-  saving, each light is written only the channels it supports (the app
-  refuses to edit such a group at all). A short note appears in the editor
-  for a mixed group.
-- Devices with a K32W radio are only chosen as a tank's gateway when no
-  other device is available, as the app does. The radio type is learned
-  from each device's first successful poll.
-- A device that can't be reached through the gateway is now restarted
-  automatically instead of switching gateway. After 3 failed polls in a
-  row the device is restarted; if it fails again, every device currently
-  failing is restarted; after that, the whole tank. Restarted devices get
-  60 seconds to come back before failures count again, and after a tank
-  restart no automatic restart happens for an hour. Every restart is
-  logged as a warning. Requires the matching python-mobius release (the
-  relay and fallback fixes).
-- Less Bluetooth traffic per poll: the scenes and schedules are read only
-  when the device's checksum of them changes (after an edit in the app or
-  in Home Assistant); every other poll reads 2-byte checksums instead.
-  Light intensities, pump speed and everything else are still refreshed
-  every poll. A firmware update is now noticed without restarting Home
-  Assistant. The diagnostics download shows what is cached. Requires the
-  matching python-mobius release.
+- The tank's clock and time zone are corrected automatically when they
+  drift, instead of an hourly sync.
+- The schedule editor now supports light groups with different channels.
+- K32W devices are chosen as gateway only when no other device is
+  available.
+- Devices unreachable through the gateway are restarted automatically
+  (escalating to the whole tank, at most once an hour).
+- Less Bluetooth traffic: scenes and schedules are read only when they
+  change.
+- Requires the matching python-mobius release.
 
 ## 0.9.0
 
