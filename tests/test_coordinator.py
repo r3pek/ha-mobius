@@ -23,8 +23,10 @@ from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE
 from custom_components.mobius.coordinator import (
     MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
     discover_mesh_address, discover_tank_for_serial, _fetch_all, moon_phase_icon, moon_phase_name,
+    async_run_restart,
 )
-from custom_components.mobius.gateway_registry import GatewayRegistry
+from custom_components.mobius.const import RELAY_FAILURE_THRESHOLD
+from custom_components.mobius.gateway_registry import GatewayRegistry, RestartAction
 from homeassistant.exceptions import HomeAssistantError
 from mobius import PrimitiveType, Tank, MeshPeer, Model, MetadataSnapshot, SupportedAttribute, LightPollResult, LightIntensityResult, FullPollResult, Scene, ActiveScene, SceneID, VectraInfo, PumpParam
 from mobius.relay import RelayedMobiusDevice
@@ -2555,3 +2557,80 @@ class TestMoonPhaseName:
     def test_22_through_28_is_waning_crescent(self):
         assert moon_phase_name(22) == "Waning Crescent"
         assert moon_phase_name(28) == "Waning Crescent"
+
+
+# --------------------------------------------------------------------------
+# Automatic restarts
+# --------------------------------------------------------------------------
+
+MESH_ADDRESS = bytes.fromhex("fd11223344556677000000fffe001234")
+
+
+async def _tank_with_relayed_pump(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-80, prefer_as_gateway=True)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    registry.update_mesh_address(PAN_ID, PUMP_SERIAL, MESH_ADDRESS)
+    return registry, registry.group(PAN_ID)
+
+
+class TestAutomaticRestart:
+    async def test_relay_failures_reaching_the_threshold_restart_the_target(self, hass):
+        registry, group = await _tank_with_relayed_pump(hass)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
+        gateway_device = MagicMock(is_connected=True)
+
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=gateway_device)), \
+                patch("custom_components.mobius.coordinator._fetch_all", AsyncMock(side_effect=IOError("timed out"))), \
+                patch("custom_components.mobius.coordinator.async_run_restart", AsyncMock()) as run_restart:
+            for _ in range(RELAY_FAILURE_THRESHOLD):
+                await coordinator.async_refresh()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+        run_restart.assert_awaited_once_with(hass, registry, RestartAction(PAN_ID, step=1, serials=(PUMP_SERIAL,)))
+        assert group.gateway_serial == LIGHT_SERIAL
+
+    async def test_member_is_restarted_through_a_direct_connection(self, hass):
+        registry, _group = await _tank_with_relayed_pump(hass)
+        direct_device = MagicMock()
+        direct_device.reboot = AsyncMock()
+
+        async def fake_temporary_connection(hass_, serial, semaphore, action, what):
+            assert serial == PUMP_SERIAL
+            return await action(direct_device)
+
+        with patch("custom_components.mobius.coordinator._with_temporary_connection", fake_temporary_connection), \
+                patch.object(RelayedMobiusDevice, "reboot", AsyncMock()) as relayed_reboot:
+            await async_run_restart(hass, registry, RestartAction(PAN_ID, step=1, serials=(PUMP_SERIAL,)))
+
+        direct_device.reboot.assert_awaited_once()
+        relayed_reboot.assert_not_awaited()
+
+    async def test_member_falls_back_to_the_gateway_when_not_directly_reachable(self, hass):
+        registry, group = await _tank_with_relayed_pump(hass)
+
+        with patch("custom_components.mobius.coordinator._with_temporary_connection", AsyncMock(return_value=None)), \
+                patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=MagicMock())), \
+                patch.object(RelayedMobiusDevice, "reboot", AsyncMock()) as relayed_reboot:
+            await async_run_restart(hass, registry, RestartAction(PAN_ID, step=1, serials=(PUMP_SERIAL,)))
+
+        relayed_reboot.assert_awaited_once()
+
+    async def test_failed_restart_is_logged_not_raised(self, hass, caplog):
+        registry, group = await _tank_with_relayed_pump(hass)
+
+        with patch("custom_components.mobius.coordinator._with_temporary_connection", AsyncMock(return_value=None)), \
+                patch.object(group.gateway_connection, "ensure_connected", AsyncMock(side_effect=IOError("down"))):
+            await async_run_restart(hass, registry, RestartAction(PAN_ID, step=1, serials=(PUMP_SERIAL,)))
+
+        assert "Automatic restart of 00000000000001 failed" in caplog.text
+
+    async def test_tank_restart_goes_through_the_gateway(self, hass):
+        registry, group = await _tank_with_relayed_pump(hass)
+        gateway_device = MagicMock()
+        gateway_device.reboot_all = AsyncMock()
+
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=gateway_device)):
+            await async_run_restart(hass, registry, RestartAction(PAN_ID, step=3))
+
+        gateway_device.reboot_all.assert_awaited_once()

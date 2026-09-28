@@ -15,6 +15,14 @@
 - Devices with a K32W radio are only chosen as a tank's gateway when no
   other device is available, as the app does. The radio type is learned
   from each device's first successful poll.
+- A device that can't be reached through the gateway is now restarted
+  automatically instead of switching gateway. After 3 failed polls in a
+  row the device is restarted; if it fails again, every device currently
+  failing is restarted; after that, the whole tank. Restarted devices get
+  60 seconds to come back before failures count again, and after a tank
+  restart no automatic restart happens for an hour. Every restart is
+  logged as a warning. Requires the matching python-mobius release (the
+  relay and fallback fixes).
 
 ## 0.9.0
 

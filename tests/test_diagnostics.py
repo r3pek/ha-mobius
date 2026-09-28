@@ -134,6 +134,9 @@ async def test_diagnostics_includes_generation_and_batch_state(hass):
     diagnostics = await async_get_config_entry_diagnostics(hass, entry)
 
     assert diagnostics["registry"]["generation"] == 1  # one join, one election -- one bump
+    assert diagnostics["registry"]["automatic_restarts_enabled"] is True
+    assert diagnostics["registry"]["restart_step"] == 0
+    assert diagnostics["registry"]["restart_lockout_until"] is None
     devices_by_serial = {d["serial"]: d for d in diagnostics["devices"]}
     pump_diag = devices_by_serial[PUMP_SERIAL]
     assert pump_diag["batch_disabled"] is False

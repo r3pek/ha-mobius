@@ -42,11 +42,24 @@ GATEWAY_ELECTION_SETTLE_SECONDS = 3.0
 GATEWAY_FAILURE_THRESHOLD = 3
 
 # Consecutive failed relayed reads to one target, through a gateway whose own
-# reads succeed, before another gateway is forced. A gateway can lose its mesh
-# route to a single target while everything else works; the protocol has no
-# runtime mesh reset, so switching gateway is the available remedy. Counted
-# separately from gateway failures so the logs show which problem occurred.
+# reads succeed, before the target is restarted (see "Automatic restarts" in
+# gateway_registry.py), or, with automatic restarts disabled, before another
+# gateway is forced. A gateway can lose its mesh route to a single target
+# while everything else works. Counted separately from gateway failures so
+# the logs show which problem occurred.
 RELAY_FAILURE_THRESHOLD = 3
+
+# After an automatic restart, failed reads of the restarted devices are not
+# counted for this long. A soft reboot takes about 10-20 s; the rest is for
+# the device to rejoin the mesh.
+RESTART_RECOVERY_WINDOW = timedelta(seconds=60)
+
+# Time without any failed relayed read after which the restart escalation
+# starts over from restarting single devices.
+RESTART_ESCALATION_RESET_AFTER = timedelta(minutes=10)
+
+# No automatic restart of any kind for this long after a tank restart.
+TANK_RESTART_LOCKOUT = timedelta(hours=1)
 
 # Consecutive polls in which the batched metadata read fails while the
 # individual-reads fallback succeeds, before batching is disabled for that
@@ -60,7 +73,7 @@ MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 
 # Extra attempts (and delay between them) for a relayed device's first,
 # non-blocking refresh at setup. Kept below RELAY_FAILURE_THRESHOLD so setup
-# alone can't trigger a gateway re-election. Missing entities are created
+# alone can't trigger an automatic restart or a gateway re-election. Missing entities are created
 # later anyway (see sensor.py's _async_ensure_sensors_exist()).
 SOFT_REFRESH_RETRY_ATTEMPTS = 1  # in addition to the first attempt
 SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds

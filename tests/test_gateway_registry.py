@@ -6,12 +6,16 @@ joiners), failover/promotion, pan_id moves, and cross-group isolation.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import MagicMock
 
-from custom_components.mobius.gateway_registry import K32W_RADIO_LABEL, GatewayRegistry
-from custom_components.mobius.const import GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
+from custom_components.mobius.gateway_registry import K32W_RADIO_LABEL, GatewayRegistry, RestartAction, RestartPolicy
+from custom_components.mobius.const import (
+    GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD, RESTART_ESCALATION_RESET_AFTER,
+    RESTART_RECOVERY_WINDOW, TANK_RESTART_LOCKOUT,
+)
 
 
 PAN_A = 0x3D0F
@@ -36,6 +40,10 @@ async def _fail_relay(registry, pan_id, target_serial):
     counterpart."""
     group = registry.group(pan_id)
     return await registry.record_relay_failure(pan_id, target_serial, group.generation if group else 0)
+
+
+def _disable_restarts(registry, pan_id):
+    registry.group(pan_id).restart_policy = RestartPolicy(enabled=False)
 
 
 @pytest.fixture
@@ -334,25 +342,20 @@ class TestGatewayFailover:
         registry.record_gateway_success(0x9999)  # must not raise
 
 
-class TestRelayFailover:
-    """A real, confirmed production incident is what this whole
-    mechanism addresses: a gateway can be perfectly healthy for its own
-    direct reads, and for relaying to SOME other group members, while
-    persistently failing to relay to ONE specific target for 40+
-    minutes straight -- see RELAY_FAILURE_THRESHOLD's own docstring in
-    const.py for the full reasoning, including why forcing a different
-    gateway is the available recovery (the protocol has no runtime
-    mesh reset)."""
+class TestRelayFailoverWithRestartsDisabled:
+    """With RestartPolicy(enabled=False), RELAY_FAILURE_THRESHOLD failed
+    relays to one target switch gateway."""
 
     @pytest.mark.asyncio
     async def test_below_threshold_does_not_promote(self, registry):
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "target", rssi=-40)
         await registry.join(PAN_A, "backup", rssi=-30)
+        _disable_restarts(registry, PAN_A)
 
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
             triggered = await _fail_relay(registry, PAN_A, "target")
-            assert triggered is False
+            assert triggered is None
 
         assert registry.group(PAN_A).gateway_serial == "gw"
 
@@ -366,6 +369,7 @@ class TestRelayFailover:
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "target", rssi=-40)
         await registry.join(PAN_A, "backup", rssi=-30)
+        _disable_restarts(registry, PAN_A)
 
         for _ in range(RELAY_FAILURE_THRESHOLD):
             registry.record_gateway_success(PAN_A)  # gateway's own reads keep succeeding
@@ -382,6 +386,7 @@ class TestRelayFailover:
         move consecutive_gateway_failures at all."""
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "target", rssi=-40)
+        _disable_restarts(registry, PAN_A)
 
         for _ in range(RELAY_FAILURE_THRESHOLD + 5):
             await _fail_relay(registry, PAN_A, "target")
@@ -393,6 +398,7 @@ class TestRelayFailover:
         await registry.join(PAN_A, "gw", rssi=-50)
         await registry.join(PAN_A, "target", rssi=-40)
         await registry.join(PAN_A, "backup", rssi=-30)
+        _disable_restarts(registry, PAN_A)
 
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
             await _fail_relay(registry, PAN_A, "target")
@@ -403,7 +409,7 @@ class TestRelayFailover:
         # actually reset, not just got close and stalled.
         for _ in range(RELAY_FAILURE_THRESHOLD - 1):
             triggered = await _fail_relay(registry, PAN_A, "target")
-            assert triggered is False
+            assert triggered is None
         assert registry.group(PAN_A).gateway_serial == "gw"
 
     @pytest.mark.asyncio
@@ -415,6 +421,7 @@ class TestRelayFailover:
         await registry.join(PAN_A, "target", rssi=-40)
         await registry.join(PAN_A, "other", rssi=-35)
         await registry.join(PAN_A, "backup", rssi=-30)
+        _disable_restarts(registry, PAN_A)
 
         # "other" has some accumulated (but not yet threshold-reached)
         # relay trouble of its own, separate from "target".
@@ -431,16 +438,126 @@ class TestRelayFailover:
     @pytest.mark.asyncio
     async def test_failure_on_nonexistent_group_is_a_safe_noop(self, registry):
         triggered = await _fail_relay(registry, 0x9999, "nobody")
-        assert triggered is False
+        assert triggered is None
 
     @pytest.mark.asyncio
     async def test_failure_for_nonexistent_member_is_a_safe_noop(self, registry):
         await registry.join(PAN_A, "gw", rssi=-50)
+        _disable_restarts(registry, PAN_A)
         triggered = await _fail_relay(registry, PAN_A, "nonexistent")
-        assert triggered is False
+        assert triggered is None
 
     def test_success_on_nonexistent_group_is_a_safe_noop(self, registry):
         registry.record_relay_success(0x9999, "nobody")  # must not raise
+
+
+T0 = datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
+
+
+async def _fail_relay_times(registry, pan_id, target_serial, times, now):
+    """Records `times` relay failures for `target_serial` at `now`, returning
+    the last result."""
+    result = None
+    for _ in range(times):
+        group = registry.group(pan_id)
+        result = await registry.record_relay_failure(pan_id, target_serial, group.generation, now=now)
+    return result
+
+
+class TestAutomaticRestarts:
+    @pytest.fixture
+    async def tank(self, registry):
+        for serial, rssi in (("gw", -80), ("pump1", -50), ("pump2", -50), ("light", -85)):
+            await registry.join(PAN_A, serial, rssi=rssi)
+        group = registry.group(PAN_A)
+        group.gateway_serial = "gw"
+        return group
+
+    @pytest.mark.asyncio
+    async def test_step_1_restarts_only_the_failing_target(self, registry, tank):
+        assert await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD - 1, T0) is None
+        action = await _fail_relay_times(registry, PAN_A, "pump1", 1, T0)
+
+        assert action == RestartAction(PAN_A, step=1, serials=("pump1",))
+        assert tank.gateway_serial == "gw"
+        assert tank.members["pump1"].consecutive_relay_failures == 0
+        assert tank.members["pump1"].is_recovering(T0)
+        assert not tank.members["pump2"].is_recovering(T0)
+
+    @pytest.mark.asyncio
+    async def test_failures_during_recovery_are_not_counted(self, registry, tank):
+        await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0)
+        during = T0 + RESTART_RECOVERY_WINDOW - timedelta(seconds=1)
+
+        assert await _fail_relay_times(registry, PAN_A, "pump1", 5, during) is None
+        assert tank.members["pump1"].consecutive_relay_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_another_target_gets_its_own_step_1(self, registry, tank):
+        await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0)
+        action = await _fail_relay_times(registry, PAN_A, "pump2", RELAY_FAILURE_THRESHOLD, T0)
+
+        assert action == RestartAction(PAN_A, step=1, serials=("pump2",))
+
+    @pytest.mark.asyncio
+    async def test_escalates_to_every_failing_member_then_the_tank(self, registry, tank):
+        await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0)
+        after_recovery = T0 + RESTART_RECOVERY_WINDOW
+        await _fail_relay_times(registry, PAN_A, "light", 1, after_recovery)
+
+        action = await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, after_recovery)
+        assert action == RestartAction(PAN_A, step=2, serials=("light", "pump1"))
+
+        later = after_recovery + RESTART_RECOVERY_WINDOW
+        action = await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, later)
+        assert action == RestartAction(PAN_A, step=3)
+        assert action.tank
+        assert all(m.is_recovering(later) for m in tank.members.values())
+        assert tank.restart_lockout_until == later + TANK_RESTART_LOCKOUT
+
+    @pytest.mark.asyncio
+    async def test_gateway_failures_are_ignored_while_the_gateway_recovers(self, registry, tank):
+        tank.members["gw"].recovering_until = T0 + RESTART_RECOVERY_WINDOW
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            assert await registry.record_gateway_failure(PAN_A, tank.generation, now=T0) is False
+        assert tank.gateway_serial == "gw"
+        assert tank.consecutive_gateway_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_no_restart_during_the_lockout_then_step_1_again(self, registry, tank):
+        tank.restarted_individually.add("pump1")
+        tank.restart_step = 3
+        tank.restart_lockout_until = T0 + TANK_RESTART_LOCKOUT
+
+        assert await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0) is None
+        assert tank.gateway_serial == "gw"
+
+        after = T0 + TANK_RESTART_LOCKOUT
+        action = await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, after)
+        assert action == RestartAction(PAN_A, step=1, serials=("pump1",))
+
+    @pytest.mark.asyncio
+    async def test_episode_ends_after_a_quiet_period(self, registry, tank):
+        await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0)
+
+        registry.record_relay_success(PAN_A, "pump1", now=T0 + RESTART_ESCALATION_RESET_AFTER - timedelta(seconds=1))
+        assert tank.restarted_individually == {"pump1"}
+
+        quiet = T0 + RESTART_ESCALATION_RESET_AFTER
+        registry.record_relay_success(PAN_A, "pump1", now=quiet)
+        assert tank.restarted_individually == set()
+
+        action = await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, quiet)
+        assert action.step == 1
+
+    @pytest.mark.asyncio
+    async def test_episode_does_not_end_while_a_member_is_failing(self, registry, tank):
+        await _fail_relay_times(registry, PAN_A, "pump1", RELAY_FAILURE_THRESHOLD, T0)
+        await _fail_relay_times(registry, PAN_A, "pump2", 1, T0)
+
+        registry.record_gateway_success(PAN_A, now=T0 + timedelta(hours=1))
+
+        assert tank.restarted_individually == {"pump1"}
 
 
 class TestLeave:
@@ -606,7 +723,7 @@ class TestGenerationFencing:
 
         for _ in range(RELAY_FAILURE_THRESHOLD):
             triggered = await registry.record_relay_failure(PAN_A, "target", stale_generation)
-            assert triggered is False
+            assert triggered is None
 
         group = registry.group(PAN_A)
         assert group.gateway_serial == "gw"  # never promoted away
@@ -642,7 +759,7 @@ class TestGenerationFencing:
         # generation it captured back at its own start -- stale by now.
         for _ in range(RELAY_FAILURE_THRESHOLD):
             triggered = await registry.record_relay_failure(PAN_A, "BBBB", captured_generation)
-            assert triggered is False
+            assert triggered is None
 
         # The actual point: BBBB must still be gateway -- the stale
         # relay failure must NOT have promoted anyone else (which, in

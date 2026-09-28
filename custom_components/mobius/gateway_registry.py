@@ -16,8 +16,9 @@ which device of a tank to connect to. A member's radio type is known after
 its first successful poll (update_radio_type()); until then it counts as
 not K32W. A member that joins later never
 replaces a working gateway; only GATEWAY_FAILURE_THRESHOLD consecutive
-gateway failures, RELAY_FAILURE_THRESHOLD failed relays to one target, or
-the gateway leaving the group change it.
+gateway failures, the gateway leaving the group, or (with automatic
+restarts disabled) RELAY_FAILURE_THRESHOLD failed relays to one target
+change it.
 
 ## Failover
 
@@ -25,6 +26,28 @@ A failing gateway is replaced by the best-RSSI member that hasn't failed as
 gateway in the current round (recently_failed_gateways), and becomes a
 relayed member. When every member has failed once, a new round starts. A
 group with no other member is left without a gateway.
+
+## Automatic restarts
+
+A target that fails RELAY_FAILURE_THRESHOLD consecutive relayed reads while
+the gateway works is restarted rather than switching gateway, escalating
+within an episode:
+
+1. The target alone, the first time it reaches the threshold.
+2. Every member currently failing, when a target that was already
+   restarted reaches the threshold again.
+3. The whole tank (reboot_all() through the gateway), when a target
+   reaches the threshold after step 2. No automatic restart follows for
+   TANK_RESTART_LOCKOUT.
+
+Restarted devices get RESTART_RECOVERY_WINDOW during which their failed
+reads (relayed, or as gateway) are not counted. The episode ends, and the
+next failure starts again at step 1, after RESTART_ESCALATION_RESET_AFTER
+without a failed relayed read, or when the lockout ends.
+
+record_relay_failure() only decides and returns a RestartAction; the caller
+carries it out (coordinator.py's async_run_restart()). The settings are a
+RestartPolicy per group, so they can be set per tank.
 
 ## Moving between tanks
 
@@ -38,14 +61,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from mobius import RADIO_TYPE_LABELS, RadioType, format_mesh_address
 
-from .const import GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
+from .const import (
+    GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD,
+    RESTART_ESCALATION_RESET_AFTER, RESTART_RECOVERY_WINDOW, TANK_RESTART_LOCKOUT,
+)
 
 if TYPE_CHECKING:
     from .coordinator import MobiusConnectionManager
@@ -59,6 +86,31 @@ K32W_RADIO_LABEL = RADIO_TYPE_LABELS[RadioType.K32W]
 
 def _log_address(address: Optional[bytes]) -> str:
     return format_mesh_address(address) or "unknown"
+
+
+@dataclass(frozen=True)
+class RestartPolicy:
+    """Automatic restart settings of one PanGroup (see "Automatic restarts"
+    in the module docstring). enabled=False keeps the gateway switch on
+    RELAY_FAILURE_THRESHOLD instead."""
+    enabled: bool = True
+    recovery_window: timedelta = RESTART_RECOVERY_WINDOW
+    escalation_reset_after: timedelta = RESTART_ESCALATION_RESET_AFTER
+    tank_restart_lockout: timedelta = TANK_RESTART_LOCKOUT
+
+
+@dataclass(frozen=True)
+class RestartAction:
+    """A restart decided by GatewayRegistry.record_relay_failure()."""
+    pan_id: int
+    # 1: one target, 2: every failing member, 3: the whole tank.
+    step: int
+    # Members to restart one by one (steps 1 and 2); empty for step 3.
+    serials: tuple[str, ...] = ()
+
+    @property
+    def tank(self) -> bool:
+        return self.step == 3
 
 
 @dataclass
@@ -77,6 +129,12 @@ class MemberState:
     # HardwareInfo "RadioType" label, from the device's own poll. None
     # until known.
     radio_type: Optional[str] = None
+    # End of the recovery window after an automatic restart; failed reads
+    # before then are not counted.
+    recovering_until: Optional[datetime] = None
+
+    def is_recovering(self, now: datetime) -> bool:
+        return self.recovering_until is not None and now < self.recovering_until
 
 
 @dataclass
@@ -99,6 +157,12 @@ class PanGroup:
     # when it starts; a failure reported under an older generation belongs
     # to a gateway that has already been replaced and is ignored.
     generation: int = 0
+    restart_policy: RestartPolicy = field(default_factory=RestartPolicy)
+    # Restart escalation of the current episode (see "Automatic restarts").
+    restarted_individually: set[str] = field(default_factory=set)
+    restart_step: int = 0
+    last_relay_failure_at: Optional[datetime] = None
+    restart_lockout_until: Optional[datetime] = None
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -256,12 +320,13 @@ class GatewayRegistry:
             if not group.members:
                 self._groups.pop(pan_id, None)
 
-    def record_gateway_success(self, pan_id: int) -> None:
+    def record_gateway_success(self, pan_id: int, now: Optional[datetime] = None) -> None:
         """Resets the gateway's consecutive-failure counter.
         recently_failed_gateways is kept (see PanGroup).
         """
         group = self._groups.get(pan_id)
         if group is not None:
+            self._maybe_end_restart_episode(group, now or dt_util.utcnow())
             if group.consecutive_gateway_failures > 0:
                 _LOGGER.debug(
                     "Gateway %r for pan_id %#06x recovered after %d consecutive failure(s)",
@@ -300,19 +365,30 @@ class GatewayRegistry:
             await old_connection.disconnect()
         return new_gateway
 
-    async def record_gateway_failure(self, pan_id: int, expected_generation: int) -> bool:
+    async def record_gateway_failure(
+        self, pan_id: int, expected_generation: int, now: Optional[datetime] = None,
+    ) -> bool:
         """Records a failed read of the gateway itself. After
         GATEWAY_FAILURE_THRESHOLD consecutive failures another member is promoted
         and True is returned.
 
         expected_generation is the group.generation captured when the failing
         fetch started; if the gateway has changed since, the failure is ignored
-        (returns False).
+        (returns False). A failure during the gateway's restart recovery
+        window is ignored too.
         """
+        now = now or dt_util.utcnow()
         group = self._groups.get(pan_id)
         if group is None:
             return False
         async with group.lock:
+            gateway_member = group.members.get(group.gateway_serial) if group.gateway_serial else None
+            if gateway_member is not None and gateway_member.is_recovering(now):
+                _LOGGER.debug(
+                    "Ignoring gateway failure for pan_id %#06x -- %r is recovering from a restart",
+                    pan_id, group.gateway_serial,
+                )
+                return False
             if group.generation != expected_generation:
                 _LOGGER.debug(
                     "Ignoring stale gateway failure for pan_id %#06x -- the group has "
@@ -335,16 +411,23 @@ class GatewayRegistry:
             )
             return True
 
-    async def record_relay_failure(self, pan_id: int, target_serial: str, expected_generation: int) -> bool:
+    async def record_relay_failure(
+        self, pan_id: int, target_serial: str, expected_generation: int,
+        now: Optional[datetime] = None,
+    ) -> Optional[RestartAction]:
         """Records a failed relayed read to `target_serial` through a gateway whose
-        own reads succeed. After RELAY_FAILURE_THRESHOLD consecutive failures for
-        the same target, another gateway is promoted (it may have a working route)
-        and every member's relay failure count is reset. Returns True when a
-        promotion happened. `expected_generation` as in record_gateway_failure().
+        own reads succeed. When the target reaches RELAY_FAILURE_THRESHOLD
+        consecutive failures, returns the RestartAction to carry out (see
+        "Automatic restarts"), or, with the group's restart policy disabled,
+        promotes another gateway and resets every member's relay failure
+        count. Returns None otherwise. Failures during the target's recovery
+        window are not counted. `expected_generation` as in
+        record_gateway_failure().
         """
+        now = now or dt_util.utcnow()
         group = self._groups.get(pan_id)
         if group is None:
-            return False
+            return None
         async with group.lock:
             if group.generation != expected_generation:
                 _LOGGER.debug(
@@ -353,10 +436,17 @@ class GatewayRegistry:
                     "generation %d, whatever gateway was current back then)",
                     target_serial, pan_id, group.generation, expected_generation,
                 )
-                return False
+                return None
             member = group.members.get(target_serial)
             if member is None:
-                return False
+                return None
+            if member.is_recovering(now):
+                _LOGGER.debug(
+                    "Ignoring relay failure to %s for pan_id %#06x -- recovering from a restart",
+                    target_serial, pan_id,
+                )
+                return None
+            group.last_relay_failure_at = now
             member.consecutive_relay_failures += 1
             if member.consecutive_relay_failures < RELAY_FAILURE_THRESHOLD:
                 _LOGGER.debug(
@@ -364,16 +454,98 @@ class GatewayRegistry:
                     target_serial, group.gateway_serial, pan_id,
                     member.consecutive_relay_failures, RELAY_FAILURE_THRESHOLD,
                 )
-                return False
+                return None
+
+            if group.restart_policy.enabled:
+                return self._next_restart(group, target_serial, now)
 
             await self._promote_away_from_current_gateway(
                 group, f"failed to relay to {target_serial!r} {RELAY_FAILURE_THRESHOLD} consecutive times",
             )
             for other_member in group.members.values():
                 other_member.consecutive_relay_failures = 0
-            return True
+            return None
 
-    def record_relay_success(self, pan_id: int, target_serial: str) -> None:
+    def _next_restart(self, group: PanGroup, target_serial: str, now: datetime) -> Optional[RestartAction]:
+        """The next escalation step for `target_serial`, which just reached
+        RELAY_FAILURE_THRESHOLD, with the group's state updated for it (see
+        "Automatic restarts"). None during a tank restart lockout. Must be
+        called with group.lock held.
+        """
+        policy = group.restart_policy
+        if group.restart_lockout_until is not None:
+            if now < group.restart_lockout_until:
+                group.members[target_serial].consecutive_relay_failures = 0
+                _LOGGER.debug(
+                    "%s unreachable through gateway %r for pan_id %#06x -- no automatic "
+                    "restart until %s (tank restarted recently)",
+                    target_serial, group.gateway_serial, group.pan_id, group.restart_lockout_until,
+                )
+                return None
+            self._end_restart_episode(group, "the tank restart lockout ended")
+
+        if target_serial not in group.restarted_individually:
+            group.restarted_individually.add(target_serial)
+            action = RestartAction(group.pan_id, step=1, serials=(target_serial,))
+            restarted = [target_serial]
+            what = f"restarting {target_serial!r}"
+        elif group.restart_step < 2:
+            group.restart_step = 2
+            failing = sorted(
+                serial for serial, m in group.members.items()
+                if serial != group.gateway_serial
+                and m.consecutive_relay_failures > 0 and not m.is_recovering(now)
+            )
+            action = RestartAction(group.pan_id, step=2, serials=tuple(failing))
+            restarted = failing
+            what = f"restarting every failing member ({', '.join(failing)})"
+        else:
+            group.restart_step = 3
+            group.restart_lockout_until = now + policy.tank_restart_lockout
+            action = RestartAction(group.pan_id, step=3)
+            restarted = list(group.members)
+            what = (
+                "restarting the whole tank (no further automatic restart for "
+                f"{policy.tank_restart_lockout})"
+            )
+
+        for serial in restarted:
+            member = group.members[serial]
+            member.consecutive_relay_failures = 0
+            member.recovering_until = now + policy.recovery_window
+        _LOGGER.warning(
+            "%s unreachable through gateway %r for pan_id %#06x (%d consecutive failed "
+            "polls); %s",
+            target_serial, group.gateway_serial, group.pan_id, RELAY_FAILURE_THRESHOLD, what,
+        )
+        return action
+
+    def _end_restart_episode(self, group: PanGroup, reason: str) -> None:
+        _LOGGER.info(
+            "Automatic restart escalation for pan_id %#06x starts over: %s", group.pan_id, reason,
+        )
+        group.restarted_individually.clear()
+        group.restart_step = 0
+        group.restart_lockout_until = None
+
+    def _maybe_end_restart_episode(self, group: PanGroup, now: datetime) -> None:
+        """Ends the restart episode once RestartPolicy.escalation_reset_after
+        has passed without a failed relayed read (not during a lockout,
+        which ends the episode itself)."""
+        if not group.restarted_individually and group.restart_step == 0:
+            return
+        if group.restart_lockout_until is not None and now < group.restart_lockout_until:
+            return
+        if any(m.consecutive_relay_failures > 0 for m in group.members.values()):
+            return
+        last_failure = group.last_relay_failure_at
+        if last_failure is not None and now - last_failure < group.restart_policy.escalation_reset_after:
+            return
+        self._end_restart_episode(
+            group, f"no failed relayed read for {group.restart_policy.escalation_reset_after}",
+        )
+
+    def record_relay_success(self, pan_id: int, target_serial: str, now: Optional[datetime] = None) -> None:
         """Resets the relay failure count of `target_serial`."""
         group = self._groups.get(pan_id)
         if group is not None and target_serial in group.members:
@@ -385,6 +557,7 @@ class GatewayRegistry:
                     target_serial, group.gateway_serial, pan_id, member.consecutive_relay_failures,
                 )
             member.consecutive_relay_failures = 0
+            self._maybe_end_restart_episode(group, now or dt_util.utcnow())
 
     def update_mesh_address(self, pan_id: int, serial: str, address: bytes) -> None:
         """Stores a member's mesh-local address. Does nothing for an unknown group

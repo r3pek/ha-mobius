@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from typing import Any
+from datetime import datetime
+from typing import Any, Optional
 
 from homeassistant.components import bluetooth
 from homeassistant.components.diagnostics import async_redact_data
@@ -45,6 +46,10 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "name") and isinstance(getattr(value, "name"), str):
         return value.name
     return str(value)
+
+
+def _isoformat(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value is not None else None
 
 
 def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> dict[str, Any]:
@@ -97,6 +102,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "is_current_gateway": (group.gateway_serial == serial) if group is not None else None,
             "registry_rssi": member.rssi if member is not None else None,
             "registry_mesh_address": format_mesh_address(member.mesh_address) if member is not None else None,
+            "registry_radio_type": member.radio_type if member is not None else None,
+            "consecutive_relay_failures": member.consecutive_relay_failures if member is not None else None,
+            "restart_recovering_until": _isoformat(member.recovering_until) if member is not None else None,
             "bluetooth_cache": _bluetooth_cache_snapshot(hass, serial, now),
             "batch_disabled": coordinator._batch_disabled if coordinator is not None else None,
             "consecutive_batch_failures": coordinator._consecutive_batch_failures if coordinator is not None else None,
@@ -119,6 +127,11 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "gateway_serial": group.gateway_serial if group is not None else None,
             "consecutive_gateway_failures": group.consecutive_gateway_failures if group is not None else None,
             "generation": group.generation if group is not None else None,
+            "automatic_restarts_enabled": group.restart_policy.enabled,
+            "restarted_individually": sorted(group.restarted_individually),
+            "restart_step": group.restart_step,
+            "last_relay_failure_at": _isoformat(group.last_relay_failure_at),
+            "restart_lockout_until": _isoformat(group.restart_lockout_until),
         } if group is not None else None,
         "bluetooth_cache_total_connectable_devices": connectable_count,
         "bluetooth_connectable_scanners_registered": connectable_scanner_count,

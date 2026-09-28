@@ -26,7 +26,8 @@ Gateway read failures are reported to the registry
 (record_gateway_failure()), which promotes another member after
 GATEWAY_FAILURE_THRESHOLD failures. Relayed read failures are counted per
 target (record_relay_failure(), RELAY_FAILURE_THRESHOLD) and never mark the
-shared connection disconnected.
+shared connection disconnected. When the registry decides on an automatic
+restart, it runs in the background (async_run_restart()).
 
 Reconnecting resolves the device's current address from its serial using
 Home Assistant's Bluetooth cache (not an independent BleakScanner, which
@@ -60,7 +61,7 @@ from mobius import (
 )
 
 from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
-from .gateway_registry import GatewayRegistry, PanGroup
+from .gateway_registry import GatewayRegistry, PanGroup, RestartAction
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -178,6 +179,66 @@ async def _with_temporary_connection(
     except Exception as err:
         _LOGGER.debug("%s failed for %s: %s", what, serial, err)
         return None
+
+
+async def async_run_restart(hass: HomeAssistant, registry: GatewayRegistry, action: RestartAction) -> None:
+    """
+    Carries out a RestartAction from GatewayRegistry.record_relay_failure().
+    Failures are logged, not raised: the escalation continues from the
+    failure counts of later polls.
+
+    Step 3 sends reboot_all() through the gateway. Steps 1 and 2 restart
+    each device through a brief direct connection, since the gateway can't
+    reach it; if that fails, through the gateway.
+    """
+    group = registry.group(action.pan_id)
+    if group is None or group.gateway_connection is None:
+        _LOGGER.warning(
+            "Automatic restart for pan_id %#06x skipped: the tank has no gateway", action.pan_id,
+        )
+        return
+    if action.tank:
+        try:
+            gateway_device = await group.gateway_connection.ensure_connected()
+            await gateway_device.reboot_all()
+            _LOGGER.info("Tank restart sent through %s (pan_id %#06x)", group.gateway_serial, action.pan_id)
+        except Exception as err:
+            _LOGGER.warning("Tank restart for pan_id %#06x failed: %s", action.pan_id, err)
+        return
+    for serial in action.serials:
+        await _restart_member(hass, registry, group, serial)
+
+
+async def _restart_member(hass: HomeAssistant, registry: GatewayRegistry, group: PanGroup, serial: str) -> None:
+    """reboot() on one member, directly if possible, else through the gateway."""
+    restarted = False
+
+    async def reboot(mdevice: MobiusDevice) -> None:
+        nonlocal restarted
+        await mdevice.reboot()
+        # Set before the disconnect: the device may drop the connection
+        # while rebooting, which is not a failure.
+        restarted = True
+
+    await _with_temporary_connection(hass, serial, registry.semaphore, reboot, f"Restart of {serial}")
+    if restarted:
+        _LOGGER.info("Restarted %s through a direct connection", serial)
+        return
+
+    member = group.members.get(serial)
+    if member is not None and member.mesh_address is not None and group.gateway_serial not in (None, serial):
+        try:
+            gateway_device = await group.gateway_connection.ensure_connected()
+            peer = MeshPeer(
+                serial=serial, model_raw=0, model=None,
+                short_address=extract_short_address(member.mesh_address), address=member.mesh_address,
+            )
+            await RelayedMobiusDevice(gateway_device, peer).reboot()
+            _LOGGER.info("Restarted %s through gateway %s", serial, group.gateway_serial)
+            return
+        except Exception as err:
+            _LOGGER.debug("Restart of %s through gateway %s failed: %s", serial, group.gateway_serial, err)
+    _LOGGER.warning("Automatic restart of %s failed: not reachable directly or through the gateway", serial)
 
 
 class MobiusConnectionManager:
@@ -728,7 +789,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # May be specific to this target, so the shared connection is
                 # left alone; the failure counts towards
                 # RELAY_FAILURE_THRESHOLD for this target.
-                await self.registry.record_relay_failure(self.pan_id, self.serial, expected_generation)
+                action = await self.registry.record_relay_failure(self.pan_id, self.serial, expected_generation)
+                if action is not None:
+                    self.hass.async_create_background_task(
+                        async_run_restart(self.hass, self.registry, action),
+                        f"mobius automatic restart for pan_id {self.pan_id:#06x}",
+                    )
             raise
 
         # Written to the registry by the gateway's poll

@@ -15,8 +15,11 @@ Not affiliated with or endorsed by any of these companies.
 - **Tanks**: the devices of one tank are added together, under one tank
   device, and share a single Bluetooth connection: one device (the
   gateway) is connected and the others are reached through it. The
-  gateway moves to another device automatically when it fails. New
-  devices of a configured tank are added to it automatically.
+  gateway moves to another device automatically when it fails. A device
+  that can't be reached through the gateway is restarted automatically,
+  escalating to every unreachable device and then the whole tank if
+  needed (at most one tank restart per hour). New devices of a configured
+  tank are added to it automatically.
 - **Lights**: current intensity per channel, schedule intensity, lunar
   phases, calibration status.
 - **Pumps**: speed, flow (only when the pump reports it reliably),
@@ -139,6 +142,7 @@ serial numbers, so a passive-only proxy isn't enough.
   use the app (a notification says the same whenever the tank loads).
 - **Debug logging**: *Settings → Devices & services → Mobius → Enable
   debug logging* logs connections, gateway changes and mesh scans.
+  Automatic restarts are logged as warnings.
 - **Diagnostics**: the entry's menu → *Download diagnostics* includes the
   gateway state and whether Home Assistant currently sees each device over
   Bluetooth. Attach it to bug reports.
