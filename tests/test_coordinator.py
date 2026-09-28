@@ -527,6 +527,20 @@ async def test_gateway_coordinator_fetches_merged_status_and_schedule(hass):
     assert coordinator.data["current_pump_mode"] == "TidalSwell"
 
 
+
+async def test_successful_poll_stores_the_radio_type_in_the_registry(hass):
+    registry = _make_registry(hass)
+    await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+    coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
+
+    fake_device = _make_fake_pump_device()
+    fake_device.get_metadata_batch.return_value.hardware_info["RadioType"] = "KW41"
+    group = registry.group(PAN_ID)
+    with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        await coordinator.async_refresh()
+
+    assert group.members[PUMP_SERIAL].radio_type == "KW41"
+
 class TestSupportedAttributeIdCaching:
     """The actual new behavior get_metadata_batch() wiring introduces:
     a device's own confirmed attribute support essentially never

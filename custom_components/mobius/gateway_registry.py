@@ -10,7 +10,11 @@ membership and which member is the gateway.
 ## Gateway selection
 
 A new group waits GATEWAY_ELECTION_SETTLE_SECONDS for members to join and
-then picks the one with the best RSSI. A member that joins later never
+then picks the one with the best RSSI. Members with a K32W radio are only
+picked when no other member is available, as the app does when choosing
+which device of a tank to connect to. A member's radio type is known after
+its first successful poll (update_radio_type()); until then it counts as
+not K32W. A member that joins later never
 replaces a working gateway; only GATEWAY_FAILURE_THRESHOLD consecutive
 gateway failures, RELAY_FAILURE_THRESHOLD failed relays to one target, or
 the gateway leaving the group change it.
@@ -39,7 +43,7 @@ from typing import TYPE_CHECKING, Optional
 
 from homeassistant.core import HomeAssistant
 
-from mobius import format_mesh_address
+from mobius import RADIO_TYPE_LABELS, RadioType, format_mesh_address
 
 from .const import GATEWAY_ELECTION_SETTLE_SECONDS, GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
 
@@ -47,6 +51,10 @@ if TYPE_CHECKING:
     from .coordinator import MobiusConnectionManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# HardwareInfo "RadioType" label of the radio avoided as gateway.
+K32W_RADIO_LABEL = RADIO_TYPE_LABELS[RadioType.K32W]
 
 
 def _log_address(address: Optional[bytes]) -> str:
@@ -66,6 +74,9 @@ class MemberState:
     # Consecutive failed relayed reads to this device (see
     # GatewayRegistry.record_relay_failure()).
     consecutive_relay_failures: int = 0
+    # HardwareInfo "RadioType" label, from the device's own poll. None
+    # until known.
+    radio_type: Optional[str] = None
 
 
 @dataclass
@@ -92,11 +103,12 @@ class PanGroup:
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
 
     def member_rssi_items(self, exclude_serials: Optional[set[str]] = None):
+        """(serial, rssi) of every member not in `exclude_serials`. K32W
+        members are left out when any other member remains."""
         exclude_serials = exclude_serials or set()
-        return [
-            (serial, m.rssi) for serial, m in self.members.items()
-            if serial not in exclude_serials
-        ]
+        members = [m for serial, m in self.members.items() if serial not in exclude_serials]
+        preferred = [m for m in members if m.radio_type != K32W_RADIO_LABEL]
+        return [(m.serial, m.rssi) for m in (preferred or members)]
 
     def serial_for_mesh_suffix(self, suffix: bytes) -> Optional[str]:
         """The member whose mesh_address ends with `suffix` (the
@@ -188,8 +200,9 @@ class GatewayRegistry:
             group._gateway_elected.set()
 
     def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:
-        """The member with the highest known RSSI (excluding exclude_serials), or
-        the first member if none has an RSSI.
+        """The member with the highest known RSSI (excluding exclude_serials, and
+        K32W members while any other remains; see member_rssi_items()), or
+        the first of them if none has an RSSI.
         """
         candidates = group.member_rssi_items(exclude_serials=exclude_serials)
         if not candidates:
@@ -387,6 +400,19 @@ class GatewayRegistry:
                     _log_address(member.mesh_address), _log_address(address),
                 )
             member.mesh_address = address
+
+    def update_radio_type(self, pan_id: int, serial: str, radio_type: Optional[str]) -> None:
+        """Stores a member's HardwareInfo "RadioType" label, used by gateway
+        selection from the next election or promotion on. None (unknown)
+        leaves the stored value. Not locked, like update_mesh_address().
+        """
+        group = self._groups.get(pan_id)
+        if radio_type is None or group is None or serial not in group.members:
+            return
+        member = group.members[serial]
+        if member.radio_type != radio_type:
+            _LOGGER.debug("Radio type for %s (pan_id %#06x): %s", serial, pan_id, radio_type)
+        member.radio_type = radio_type
 
     def update_mesh_last_seen(self, pan_id: int, serial: str, last_seen_at: datetime) -> None:
         """Stores when a member was last heard from on the mesh (see

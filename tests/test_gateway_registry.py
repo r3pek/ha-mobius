@@ -10,7 +10,7 @@ import logging
 import pytest
 from unittest.mock import MagicMock
 
-from custom_components.mobius.gateway_registry import GatewayRegistry
+from custom_components.mobius.gateway_registry import K32W_RADIO_LABEL, GatewayRegistry
 from custom_components.mobius.const import GATEWAY_FAILURE_THRESHOLD, RELAY_FAILURE_THRESHOLD
 
 
@@ -498,6 +498,62 @@ class TestUpdateMeshAddress:
     async def test_new_member_starts_with_no_cached_address(self, registry):
         await registry.join(PAN_A, "gw", rssi=-50)
         assert registry.group(PAN_A).members["gw"].mesh_address is None
+
+
+class TestRadioTypePreference:
+    @pytest.mark.asyncio
+    async def test_k32w_member_is_skipped_when_another_member_exists(self, registry):
+        await registry.join(PAN_A, "light", rssi=-80)
+        await registry.join(PAN_A, "pump", rssi=-40)
+        registry.update_radio_type(PAN_A, "light", "KW41")
+        registry.update_radio_type(PAN_A, "pump", K32W_RADIO_LABEL)
+        group = registry.group(PAN_A)
+        group.gateway_serial = "light"
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await _fail_gateway(registry, PAN_A)
+
+        # The only other member is K32W, so it is picked.
+        assert group.gateway_serial == "pump"
+
+    @pytest.mark.asyncio
+    async def test_non_k32w_member_is_preferred_over_better_rssi(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-60)
+        await registry.join(PAN_A, "pump", rssi=-40)
+        await registry.join(PAN_A, "light", rssi=-85)
+        registry.update_radio_type(PAN_A, "pump", K32W_RADIO_LABEL)
+        registry.update_radio_type(PAN_A, "light", "KW41")
+        group = registry.group(PAN_A)
+        group.gateway_serial = "gw"
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await _fail_gateway(registry, PAN_A)
+
+        assert group.gateway_serial == "light"
+
+    @pytest.mark.asyncio
+    async def test_unknown_radio_type_is_not_treated_as_k32w(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-60)
+        await registry.join(PAN_A, "unknown", rssi=-40)
+        await registry.join(PAN_A, "light", rssi=-85)
+        registry.update_radio_type(PAN_A, "light", "KW41")
+        group = registry.group(PAN_A)
+        group.gateway_serial = "gw"
+
+        for _ in range(GATEWAY_FAILURE_THRESHOLD):
+            await _fail_gateway(registry, PAN_A)
+
+        assert group.gateway_serial == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_none_keeps_the_stored_radio_type(self, registry):
+        await registry.join(PAN_A, "gw", rssi=-50)
+        registry.update_radio_type(PAN_A, "gw", "KW41")
+        registry.update_radio_type(PAN_A, "gw", None)
+        assert registry.group(PAN_A).members["gw"].radio_type == "KW41"
+
+    def test_unknown_group_or_member_is_a_noop(self, registry):
+        registry.update_radio_type(0x9999, "nobody", "KW41")  # must not raise
 
 
 class TestGenerationFencing:

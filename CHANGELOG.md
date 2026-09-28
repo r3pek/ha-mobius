@@ -12,6 +12,9 @@
   saving, each light is written only the channels it supports (the app
   refuses to edit such a group at all). A short note appears in the editor
   for a mixed group.
+- Devices with a K32W radio are only chosen as a tank's gateway when no
+  other device is available, as the app does. The radio type is learned
+  from each device's first successful poll.
 
 ## 0.9.0
 

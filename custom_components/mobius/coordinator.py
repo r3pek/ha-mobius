@@ -689,6 +689,9 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
             )
             self._record_batch_result(used_batch)
+            self.registry.update_radio_type(
+                self.pan_id, self.serial, (data.get("hardware_info") or {}).get("RadioType"),
+            )
             if is_gateway:
                 self.registry.record_gateway_success(self.pan_id)
                 await self._refresh_mesh_last_seen(group, device)
