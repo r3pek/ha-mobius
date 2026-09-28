@@ -1413,30 +1413,60 @@ async def test_setup_entry_registers_periodic_revalidation(hass):
         mock_track_interval.return_value = lambda: None
         await hass.config_entries.async_setup(entry.entry_id)
 
-    # Two independent periodic tasks now -- see _async_sync_tank_time()'s
-    # own docstring for why that one is separate rather than folded into
-    # revalidation.
-    assert mock_track_interval.call_count == 2
+    assert mock_track_interval.call_count == 1
     revalidation_call = next(
         c for c in mock_track_interval.call_args_list if c[0][2] == TANK_REVALIDATION_INTERVAL
     )
     assert revalidation_call[0][0] is hass
 
 
-async def test_setup_entry_registers_periodic_time_sync(hass):
-    """Same confirmation as test_setup_entry_registers_periodic_revalidation
-    above, for the separate time-sync periodic task."""
-    from custom_components.mobius.const import TANK_TIME_SYNC_INTERVAL
+# --------------------------------------------------------------------------
+# _async_check_tank_time() -- clock and time zone sync after each poll, when
+# a device drifts more than CLOCK_DRIFT_THRESHOLD or reports another zone.
+# --------------------------------------------------------------------------
 
+from custom_components.mobius import _async_check_tank_time
+
+
+def _clock_entry(hass, coordinator_data: dict, **runtime_kwargs):
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    fake_device = group.gateway_connection._device
+    fake_device.set_time_to_now = AsyncMock()
+    fake_device.set_time_zone = AsyncMock()
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
+        unique_id=PUMP_SERIAL,
+        title="Reef Tank",
+    )
+    entry.add_to_hass(hass)
+    coordinator = MagicMock()
+    coordinator.data = coordinator_data
+    entry.runtime_data = MobiusRuntimeData(coordinators={PUMP_SERIAL: coordinator}, **runtime_kwargs)
+    return entry, fake_device
+
+
+async def test_a_poll_with_a_drifting_clock_triggers_a_sync(hass):
+    """The check runs after polls: a device reporting a clock 10 minutes
+    behind gets the tank's time set during setup's first refresh."""
+    import time as _time
+    from mobius import MetadataSnapshot
+
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    fake_device = _fake_pump_device()
+    fake_device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
+        supported_channels=[], error_state=None, epoch=int(_time.time()) - 600, local_time=None,
+        tz_offset=None, olson_tz="Europe/Lisbon",
+    ))
+    fake_device.set_time_to_now = AsyncMock()
+    fake_device.set_time_zone = AsyncMock()
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL, CONF_ADDRESS: PUMP_ADDRESS}]},
         unique_id=PUMP_SERIAL,
     )
     entry.add_to_hass(hass)
-
-    fake_device = _fake_pump_device()
-
     with patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_device),
@@ -1448,157 +1478,113 @@ async def test_setup_entry_registers_periodic_time_sync(hass):
         "custom_components.mobius._current_rssi", return_value=-50,
     ), patch(
         "homeassistant.config_entries.ConfigEntries.async_forward_entry_setups", AsyncMock(),
-    ), patch(
-        "custom_components.mobius.async_track_time_interval",
-    ) as mock_track_interval:
-        mock_track_interval.return_value = lambda: None
+    ):
         await hass.config_entries.async_setup(entry.entry_id)
-
-    time_sync_call = next(
-        c for c in mock_track_interval.call_args_list if c[0][2] == TANK_TIME_SYNC_INTERVAL
-    )
-    assert time_sync_call[0][0] is hass
-
-
-# --------------------------------------------------------------------------
-# _async_sync_tank_time() -- the hourly per-tank time-sync write. See its
-# own docstring for the full reasoning; these tests confirm it actually
-# writes via the tank's own gateway connection, fails soft (log and skip,
-# no raise) on every real-world failure mode, and runs for a single-device
-# tank exactly the same way as a multi-device one.
-# --------------------------------------------------------------------------
-
-from custom_components.mobius import _async_sync_tank_time
-
-
-async def test_sync_tank_time_writes_via_the_gateway_connection(hass):
-    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
-    fake_device = group.gateway_connection._device
-    fake_device.set_time_to_now = AsyncMock()
-
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
-
-    await _async_sync_tank_time(hass, entry)
+        await hass.async_block_till_done()
+        # A later poll notifies the listener.
+        await entry.runtime_data.coordinators[PUMP_SERIAL].async_refresh()
+        await hass.async_block_till_done()
 
     fake_device.set_time_to_now.assert_awaited_once()
+    fake_device.set_time_zone.assert_not_awaited()
 
 
-async def test_sync_tank_time_works_for_a_single_device_tank(hass):
-    """Explicitly confirms a single-device ("ad-hoc") tank still gets
-    its own clock synced -- not just multi-device tanks with something
-    to propagate to. The registry helper already only ever registers
-    one member as it is, but this makes the requirement explicit rather
-    than incidental."""
-    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
-    assert len(group.members) == 1  # confirms this really is single-device
-    fake_device = group.gateway_connection._device
-    fake_device.set_time_to_now = AsyncMock()
+async def test_clock_within_threshold_is_left_alone(hass):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 30, "olson_tz": "Europe/Lisbon"})
 
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
+    await _async_check_tank_time(hass, entry)
 
-    await _async_sync_tank_time(hass, entry)
-
-    fake_device.set_time_to_now.assert_awaited_once()
+    device.set_time_to_now.assert_not_awaited()
+    device.set_time_zone.assert_not_awaited()
 
 
-async def test_sync_tank_time_skips_cleanly_if_no_group_exists_at_all(hass):
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN]["gateway_registry"] = GatewayRegistry(hass, asyncio.Semaphore(2))
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
+async def test_drift_is_detected_logged_and_corrected(hass, caplog):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 125, "olson_tz": "Europe/Lisbon"})
 
-    await _async_sync_tank_time(hass, entry)  # must not raise
+    with caplog.at_level(logging.INFO):
+        await _async_check_tank_time(hass, entry)
 
-
-async def test_sync_tank_time_skips_cleanly_if_no_gateway_currently_available(hass):
-    hass.data.setdefault(DOMAIN, {})
-    registry = GatewayRegistry(hass, asyncio.Semaphore(2))
-    hass.data[DOMAIN]["gateway_registry"] = registry
-    registry._groups[PAN_ID] = PanGroup(pan_id=PAN_ID, gateway_serial=None)
-
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
-
-    await _async_sync_tank_time(hass, entry)  # must not raise
+    device.set_time_to_now.assert_awaited_once()
+    device.set_time_zone.assert_not_awaited()
+    assert "clock drift of +125 s detected on 00000000000001" in caplog.text
+    assert "clock synced" in caplog.text
 
 
-async def test_sync_tank_time_logs_and_skips_on_write_failure(hass):
-    """A failed write (device rejected it, connection dropped mid-write,
-    anything) must not raise out of this function -- same "log and
-    skip, next scheduled run retries" philosophy as
-    _async_revalidate_tank() itself already uses."""
-    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
-    fake_device = group.gateway_connection._device
-    fake_device.set_time_to_now = AsyncMock(side_effect=IOError("device rejected the write"))
+async def test_time_zone_mismatch_sets_zone_then_time(hass, caplog):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 0, "olson_tz": "America/New_York"})
+    calls = []
+    device.set_time_zone.side_effect = lambda tz: calls.append(("zone", tz))
+    device.set_time_to_now.side_effect = lambda: calls.append(("time",))
 
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
+    with caplog.at_level(logging.INFO):
+        await _async_check_tank_time(hass, entry)
 
-    await _async_sync_tank_time(hass, entry)  # must not raise despite the failure
+    assert calls == [("zone", "Europe/Lisbon"), ("time",)]
+    assert "uses time zone 'America/New_York' instead of 'Europe/Lisbon'" in caplog.text
 
 
-async def test_sync_tank_time_skips_cleanly_on_connection_failure(hass):
-    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
-    group.gateway_connection.ensure_connected = AsyncMock(side_effect=IOError("connect failed"))
+async def test_unset_time_zone_is_set(hass):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 0, "olson_tz": ""})
 
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={})
+    await _async_check_tank_time(hass, entry)
 
-    await _async_sync_tank_time(hass, entry)  # must not raise
+    device.set_time_zone.assert_awaited_once_with("Europe/Lisbon")
 
 
-async def test_sync_tank_time_skips_entirely_when_disabled(hass):
-    """The actual point of switch.py's own TimeSyncSwitch: when a user
-    has toggled it off (MobiusRuntimeData.time_sync_enabled == False),
-    this function must not even attempt a connection/write, not just
-    handle a failure gracefully."""
-    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
-    fake_device = group.gateway_connection._device
-    fake_device.set_time_to_now = AsyncMock()
+async def test_unknown_time_zone_is_not_written(hass):
+    """A device that doesn't report its zone (None) isn't given one."""
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 0, "olson_tz": None})
 
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]},
-        unique_id=PUMP_SERIAL,
-    )
-    entry.add_to_hass(hass)
-    entry.runtime_data = MobiusRuntimeData(coordinators={}, time_sync_enabled=False)
+    await _async_check_tank_time(hass, entry)
 
-    await _async_sync_tank_time(hass, entry)
+    device.set_time_zone.assert_not_awaited()
+    device.set_time_to_now.assert_not_awaited()
 
-    fake_device.set_time_to_now.assert_not_awaited()
+
+async def test_sync_is_rate_limited(hass):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 500, "olson_tz": "Europe/Lisbon"})
+
+    await _async_check_tank_time(hass, entry)
+    await _async_check_tank_time(hass, entry)
+
+    device.set_time_to_now.assert_awaited_once()
+
+
+async def test_sync_skipped_when_disabled(hass):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 500, "olson_tz": "Europe/Lisbon"}, time_sync_enabled=False)
+
+    await _async_check_tank_time(hass, entry)
+
+    device.set_time_to_now.assert_not_awaited()
+
+
+async def test_time_zone_failure_still_sets_the_time(hass, caplog):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 0, "olson_tz": "Etc/UTC"})
+    device.set_time_zone.side_effect = ValueError("no POSIX time zone string found")
+
+    await _async_check_tank_time(hass, entry)
+
+    device.set_time_to_now.assert_awaited_once()
+    assert "setting the time zone" in caplog.text
+
+
+async def test_sync_failure_is_logged_and_does_not_raise(hass, caplog):
+    await hass.config.async_set_time_zone("Europe/Lisbon")
+    entry, device = _clock_entry(hass, {"clock_drift": 500, "olson_tz": "Europe/Lisbon"})
+    device.set_time_to_now.side_effect = IOError("relay timed out")
+
+    await _async_check_tank_time(hass, entry)  # must not raise
+
+    assert "clock sync via gateway" in caplog.text and "relay timed out" in caplog.text
+    assert entry.runtime_data.time_sync_running is False
 
 
 # --------------------------------------------------------------------------

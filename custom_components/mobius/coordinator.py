@@ -448,6 +448,10 @@ async def _fetch_all(
             + (f" ({size} byte primitive)." if size is not None else ".")
         )
 
+    # Device clock versus Home Assistant's (seconds; positive = device
+    # behind) and its time zone, for _async_check_tank_time() in __init__.py.
+    info["clock_drift"] = int(now.timestamp()) - metadata.epoch if metadata.epoch is not None else None
+    info["olson_tz"] = metadata.olson_tz
     info["firmware_versions"] = metadata.firmware_versions
     info["hardware_info"] = metadata.hardware_info
 

@@ -56,8 +56,8 @@ def _build_advanced_feature_switches(coordinator, serial, device_info, data) -> 
 
 class TimeSyncSwitch(SwitchEntity, RestoreEntity):
     """
-    Enables the tank's periodic clock sync (__init__.py's
-    _async_sync_tank_time(), which reads MobiusRuntimeData.time_sync_enabled).
+    Enables the tank's automatic clock and time zone sync (__init__.py's
+    _async_check_tank_time(), which reads MobiusRuntimeData.time_sync_enabled).
     On the tank device. A local setting, restored after a restart; on by
     default.
     """

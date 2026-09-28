@@ -71,9 +71,14 @@ SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds
 # check is retried on the next run.
 TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 
-# How often each tank's clock is set to the current time (see
-# _async_sync_tank_time()).
-TANK_TIME_SYNC_INTERVAL = timedelta(hours=1)
+# A tank's clock is set when any of its devices drifts more than this many
+# seconds from Home Assistant's clock, or reports a different time zone
+# (checked after every poll, see __init__.py's _async_check_tank_time()).
+CLOCK_DRIFT_THRESHOLD = 60
+
+# Minimum time between two automatic clock syncs of a tank, so a device that
+# doesn't take the time can't cause a write on every poll.
+TIME_SYNC_COOLDOWN = timedelta(minutes=5)
 
 # --------------------------------------------------------------------------
 # Tank config entries: one per Thread mesh ("tank"), not one per device:

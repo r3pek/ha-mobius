@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The tank's clock is now kept in sync automatically: after each poll, if
+  any device's clock is more than 60 seconds off, or its time zone differs
+  from Home Assistant's, the tank's time zone and time are set (at most
+  every 5 minutes; each correction is logged). This replaces the hourly
+  time sync. Requires the matching python-mobius release.
 - The schedule editor now handles light groups whose models have different
   channels: it shows every channel any light in the group has, and when
   saving, each light is written only the channels it supports (the app

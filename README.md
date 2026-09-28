@@ -26,7 +26,7 @@ Not affiliated with or endorsed by any of these companies.
 - **Settings**: Local control, LED auto-dim, max fan speed and fan
   shutdown, where the device supports them.
 - **Dashboard cards** for editing schedules and starting scenes.
-- **Maintenance**: reboot buttons, hourly clock sync, diagnostics
+- **Maintenance**: reboot buttons, automatic clock and time zone sync, diagnostics
   download.
 
 ## Entities

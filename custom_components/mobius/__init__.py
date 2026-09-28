@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Optional
@@ -24,7 +25,7 @@ from mobius import parse_advertisement
 
 from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
-    TANK_REVALIDATION_INTERVAL, TANK_TIME_SYNC_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS,
+    TANK_REVALIDATION_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS, CLOCK_DRIFT_THRESHOLD, TIME_SYNC_COOLDOWN,
     SOFT_REFRESH_RETRY_DELAY,
 )
 from .coordinator import (
@@ -67,8 +68,12 @@ def resolve_tank_device_id(hass: HomeAssistant, entry_id: str, tank_identifier: 
 class MobiusRuntimeData:
     """Runtime state of one config entry (one tank, one or more devices)."""
     coordinators: dict[str, MobiusDeviceCoordinator] = field(default_factory=dict)
-    # Whether _async_sync_tank_time() writes the time (TimeSyncSwitch).
+    # Whether _async_check_tank_time() may set the clock (TimeSyncSwitch).
     time_sync_enabled: bool = True
+    # Monotonic time of the last automatic clock sync (TIME_SYNC_COOLDOWN),
+    # and whether one is running.
+    last_time_sync: Optional[float] = None
+    time_sync_running: bool = False
     # Set by sensor.py's async_setup_entry(); used by
     # _async_ensure_sensors_exist().
     sensor_add_entities: Optional[AddEntitiesCallback] = None
@@ -322,47 +327,80 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         await _merge_device_into_entry(hass, entry, peer.serial)
 
 
-async def _async_sync_tank_time(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
+def _clock_problems(hass: HomeAssistant, runtime: "MobiusRuntimeData"):
+    """(worst drift as (serial, seconds) or None, time zone mismatch as
+    (serial, device zone) or None) across the tank's devices."""
+    worst = None
+    mismatch = None
+    for serial, coordinator in runtime.coordinators.items():
+        data = coordinator.data or {}
+        drift = data.get("clock_drift")
+        if drift is not None and abs(drift) > CLOCK_DRIFT_THRESHOLD:
+            if worst is None or abs(drift) > abs(worst[1]):
+                worst = (serial, drift)
+        # None: the device doesn't report a time zone; "" means it isn't set.
+        olson = data.get("olson_tz")
+        if olson is not None and olson != hass.config.time_zone and mismatch is None:
+            mismatch = (serial, olson)
+    return worst, mismatch
+
+
+async def _async_check_tank_time(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
-    Periodic per-entry time sync (TANK_TIME_SYNC_INTERVAL): one
-    set_time_to_now() on the tank's gateway, which propagates the time to
-    the rest of the mesh. Skipped while the entry's TimeSyncSwitch is off
-    or there is no gateway; a failure is retried on the next run.
+    Runs after every poll of any device of the tank. When a device's clock
+    is more than CLOCK_DRIFT_THRESHOLD seconds off Home Assistant's, or its
+    time zone differs from Home Assistant's, sets the tank's time zone and
+    time through the gateway (group writes that reach every device, like
+    the app's "set time to now"). At most once per TIME_SYNC_COOLDOWN;
+    skipped while the entry's TimeSyncSwitch is off.
     """
-    runtime: MobiusRuntimeData = entry.runtime_data
-    if not runtime.time_sync_enabled:
-        _LOGGER.debug(
-            "Tank %r: time sync is disabled (see its own switch entity) -- skipping this cycle",
-            entry.title,
-        )
+    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime is None or not runtime.time_sync_enabled or runtime.time_sync_running:
+        return
+    now = time.monotonic()
+    if runtime.last_time_sync is not None and now - runtime.last_time_sync < TIME_SYNC_COOLDOWN.total_seconds():
         return
 
+    worst, mismatch = _clock_problems(hass, runtime)
+    if worst is None and mismatch is None:
+        return
     found = _entry_group(hass, entry)
     if found is None or found[2].gateway_serial is None:
-        if found is not None:
-            _LOGGER.debug(
-                "Tank %r: no gateway currently available for time sync this cycle "
-                "-- will retry next scheduled run", entry.title,
-            )
         return
-    _registry, pan_id, group = found
+    _registry, _pan_id, group = found
 
-    _LOGGER.debug(
-        "Tank %r: syncing time via gateway %s (pan_id %#06x)",
-        entry.title, group.gateway_serial, pan_id,
-    )
+    if worst is not None:
+        _LOGGER.info(
+            "Tank %r: clock drift of %+d s detected on %s (threshold %d s) -- syncing the tank's time",
+            entry.title, worst[1], worst[0], CLOCK_DRIFT_THRESHOLD,
+        )
+    if mismatch is not None:
+        _LOGGER.info(
+            "Tank %r: %s uses time zone %r instead of %r -- setting the tank's time zone",
+            entry.title, mismatch[0], mismatch[1] or "(not set)", hass.config.time_zone,
+        )
+
+    runtime.time_sync_running = True
+    runtime.last_time_sync = now
     try:
         device = await group.gateway_connection.ensure_connected()
+        if mismatch is not None:
+            try:
+                await device.set_time_zone(hass.config.time_zone)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Tank %r: setting the time zone %r failed (%s)", entry.title, hass.config.time_zone, err,
+                )
         await device.set_time_to_now()
     except Exception as err:
         _LOGGER.warning(
-            "Tank %r: time sync via gateway %s failed (%s) -- will retry next "
-            "scheduled run", entry.title, group.gateway_serial, err,
+            "Tank %r: clock sync via gateway %s failed (%s) -- will retry after %s",
+            entry.title, group.gateway_serial, err, TIME_SYNC_COOLDOWN,
         )
         return
-    _LOGGER.debug(
-        "Tank %r: time sync via gateway %s succeeded", entry.title, group.gateway_serial,
-    )
+    finally:
+        runtime.time_sync_running = False
+    _LOGGER.info("Tank %r: clock synced via gateway %s", entry.title, group.gateway_serial)
 
 
 async def _async_soft_first_refresh(coordinator: MobiusDeviceCoordinator, serial: str) -> None:
@@ -500,17 +538,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         len(coordinators), working_serial,
     )
 
-    # Periodic tasks, cancelled on unload. hass.create_task() (not
+    # Periodic task, cancelled on unload. hass.create_task() (not
     # async_create_task()) because the interval callback isn't guaranteed to
     # run on the event loop thread.
-    for task, interval in (
-        (_async_revalidate_tank, TANK_REVALIDATION_INTERVAL),
-        (_async_sync_tank_time, TANK_TIME_SYNC_INTERVAL),
-    ):
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, lambda now: hass.create_task(_async_revalidate_tank(hass, entry, now)),
+            TANK_REVALIDATION_INTERVAL,
+        )
+    )
+    # The clock is checked after every poll of any device of the tank.
+    for coordinator in coordinators.values():
         entry.async_on_unload(
-            async_track_time_interval(
-                hass, lambda now, task=task: hass.create_task(task(hass, entry, now)), interval,
-            )
+            coordinator.async_add_listener(lambda: hass.async_create_task(_async_check_tank_time(hass, entry)))
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
