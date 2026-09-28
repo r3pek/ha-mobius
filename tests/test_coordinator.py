@@ -8,6 +8,7 @@ failure handling.
 """
 
 import asyncio
+import dataclasses
 import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
@@ -830,6 +831,7 @@ class TestFullPollBatchWiring:
             primitive=PrimitiveType.VorTechV1, model=Model.VorTechMP40wG3QD,
             which=1, minute_of_day=ANY, now=ANY,
             supported_attribute_ids=ANY, force_individual_reads=False,
+            cache=coordinator.configuration_cache,
         )
         assert coordinator.data["telemetry"]["speed"] == 447
         assert coordinator.data["schedule_point_count"] == 11
@@ -852,9 +854,29 @@ class TestFullPollBatchWiring:
             primitive=PrimitiveType.VisualV1, model=Model.RadionXR15wG6Pro,
             which=1, minute_of_day=ANY, now=ANY,
             supported_attribute_ids=ANY, force_individual_reads=False,
+            cache=coordinator.configuration_cache,
         )
 
 
+
+    async def test_attribute_table_change_rereads_the_supported_attributes(self, hass):
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
+
+        fake_device = _make_fake_pump_device()
+        fake_device.get_supported_attributes = AsyncMock(return_value=[])
+        unchanged = fake_device.get_full_poll_batch.return_value
+        fake_device.get_full_poll_batch.side_effect = [
+            dataclasses.replace(unchanged, attribute_table_changed=True), unchanged,
+        ]
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            await coordinator.async_refresh()  # first poll: reads the supported attributes
+            await coordinator.async_refresh()  # full poll reports a changed table
+            await coordinator.async_refresh()  # reads them again
+
+        assert fake_device.get_supported_attributes.await_count == 2
 
 class TestVectraClosedLoopCaching:
     """closed_loop only matters for VectraV1 -- see coordinator.py's own

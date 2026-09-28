@@ -54,7 +54,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
+    ConfigurationCache, MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
     parse_advertisement, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, extract_short_address, C2Attribute,
     PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
@@ -382,6 +382,7 @@ def _format_pump_params(params: dict, group: Optional[PanGroup]) -> dict[str, ob
 async def _fetch_all(
     device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
     cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
+    configuration_cache: Optional[ConfigurationCache] = None,
 ) -> tuple[dict[str, Any], set[int], bool, Optional[PrimitiveType], Optional[Model]]:
     """
     One poll: identity, telemetry, schedule and metadata. `device` is a
@@ -392,8 +393,9 @@ async def _fetch_all(
     keeps between polls and must not appear in diagnostics.
 
     cached_supported_attribute_ids: the supported attribute set from an
-      earlier poll (None to read it). Attribute support doesn't change at
-      runtime.
+      earlier poll (None to read it). It changes only with a firmware
+      update, which the full poll reports (attribute_table_changed); the
+      set is then read again on the next poll.
     batch_disabled: passed as force_individual_reads once batching has
       failed BATCH_FAILURE_THRESHOLD times.
     cached_primitive_type / cached_model: known once the first poll
@@ -402,6 +404,10 @@ async def _fetch_all(
       get_device_info() and then the separate metadata/light/pump reads.
     group: the device's PanGroup, used to resolve a pump's Master parameter
       to a serial. Optional.
+    configuration_cache: the device's ConfigurationCache: with it, the
+      scenes and the schedule are read only when their checksum changed
+      (light intensities are still computed every poll, from the cached
+      schedule). Optional.
     """
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
@@ -434,8 +440,20 @@ async def _fetch_all(
         full_poll = await device.get_full_poll_batch(
             primitive=primitive, model=model, which=1, minute_of_day=minute_of_day, now=now,
             supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
+            cache=configuration_cache,
         )
         used_batch = full_poll.used_batch
+        if configuration_cache is not None and full_poll.used_batch and full_poll.configuration_read:
+            _LOGGER.debug(
+                "%s: read %s this poll (not cached, or its checksum changed)",
+                full_poll.device_info.get("serial"), ", ".join(full_poll.configuration_read),
+            )
+        if full_poll.attribute_table_changed:
+            _LOGGER.info(
+                "%s: supported attribute table changed (firmware update?) -- reading it again "
+                "on the next poll", full_poll.device_info.get("serial"),
+            )
+            supported_attribute_ids_to_cache = None
         info = dict(full_poll.device_info)
         info["primitive_type"] = primitive.name
         metadata = full_poll.metadata
@@ -579,8 +597,11 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.serial = serial
         self.pan_id = pan_id
         self._last_success: Optional[Any] = None
-        # Supported attribute ids, read once (see _fetch_all()).
+        # Supported attribute ids, read once and again after the device's
+        # attribute table changes (see _fetch_all()).
         self._supported_attribute_ids: Optional[set[int]] = None
+        # Scenes and schedule with their checksums, kept between polls.
+        self.configuration_cache = ConfigurationCache()
         # Batch failure tracking (see _record_batch_result()). Reset when the
         # group's gateway changes, since batch failures can be specific to
         # one relay path.
@@ -748,6 +769,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device, cached_supported_attribute_ids=self._supported_attribute_ids,
                 batch_disabled=self._batch_disabled,
                 cached_primitive_type=self._primitive_type, cached_model=self._model, group=group,
+                configuration_cache=self.configuration_cache,
             )
             self._record_batch_result(used_batch)
             self.registry.update_radio_type(

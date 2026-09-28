@@ -23,6 +23,13 @@
   restart no automatic restart happens for an hour. Every restart is
   logged as a warning. Requires the matching python-mobius release (the
   relay and fallback fixes).
+- Less Bluetooth traffic per poll: the scenes and schedules are read only
+  when the device's checksum of them changes (after an edit in the app or
+  in Home Assistant); every other poll reads 2-byte checksums instead.
+  Light intensities, pump speed and everything else are still refreshed
+  every poll. A firmware update is now noticed without restarting Home
+  Assistant. The diagnostics download shows what is cached. Requires the
+  matching python-mobius release.
 
 ## 0.9.0
 

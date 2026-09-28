@@ -18,7 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
-from mobius import format_mesh_address
+from mobius import C2Attribute, ConfigurationCache, enum_or_none, format_mesh_address
 
 from .const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES
 from .coordinator import _find_in_bluetooth_cache
@@ -50,6 +50,20 @@ def _json_safe(value: Any) -> Any:
 
 def _isoformat(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value is not None else None
+
+
+def _configuration_cache_snapshot(cache: ConfigurationCache) -> dict[str, Any]:
+    """Which data the device's ConfigurationCache holds, with the checksum of each."""
+    return {
+        "entries": {
+            enum_or_none(C2Attribute, attr_id).name if enum_or_none(C2Attribute, attr_id) else str(attr_id):
+                f"0x{checksum:04X}"
+            for attr_id, (checksum, _blocks) in sorted(cache.entries.items())
+        },
+        "supported_attributes_crc": (
+            f"0x{cache.supported_attributes_crc:04X}" if cache.supported_attributes_crc is not None else None
+        ),
+    }
 
 
 def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> dict[str, Any]:
@@ -108,6 +122,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "bluetooth_cache": _bluetooth_cache_snapshot(hass, serial, now),
             "batch_disabled": coordinator._batch_disabled if coordinator is not None else None,
             "consecutive_batch_failures": coordinator._consecutive_batch_failures if coordinator is not None else None,
+            "configuration_cache": _configuration_cache_snapshot(coordinator.configuration_cache) if coordinator is not None else None,
             "supported_attributes": coordinator.supported_attribute_names if coordinator is not None else None,
             "coordinator": coordinator_diag,
         })

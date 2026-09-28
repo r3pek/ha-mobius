@@ -146,6 +146,7 @@ async def test_diagnostics_includes_generation_and_batch_state(hass):
     # real support -- confirms the field is present and None, not that
     # it's silently missing from the dump entirely.
     assert "supported_attributes" in pump_diag
+    assert pump_diag["configuration_cache"] == {"entries": {}, "supported_attributes_crc": None}
 
 
 async def test_diagnostics_redacts_mac_addresses(hass):
@@ -290,3 +291,19 @@ def test_json_safe_falls_back_to_str_for_unrecognized_types():
             return "unrecognized-repr"
 
     assert _json_safe(Unrecognized()) == "unrecognized-repr"
+
+
+async def test_diagnostics_shows_the_configuration_cache_contents(hass):
+    entry = await _setup_multi_device_tank_entry(hass)
+    coordinator = next(
+        c for c in entry.runtime_data.coordinators.values() if c.serial == PUMP_SERIAL
+    )
+    coordinator.configuration_cache.entries[500] = (0xCFB6, [])
+    coordinator.configuration_cache.supported_attributes_crc = 0x3EA9
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+
+    pump_diag = {d["serial"]: d for d in diagnostics["devices"]}[PUMP_SERIAL]
+    assert pump_diag["configuration_cache"] == {
+        "entries": {"Schedule1": "0xCFB6"}, "supported_attributes_crc": "0x3EA9",
+    }
