@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData
-from .coordinator import MobiusDeviceCoordinator
+from .coordinator import MobiusDeviceCoordinator, async_tank_broadcast
 from .entity import async_run_on_device, entry_tank_identifier, iter_entry_devices
 
 
@@ -45,9 +45,9 @@ class RebootButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEntity):
 
 class RestartAllButton(ButtonEntity):
     """
-    Soft-reboots every device of the mesh (reboot_all(), the app's "Restart
-    all Devices"), from the tank device. The write is a group broadcast, so
-    it is sent through the first device that accepts it.
+    Soft-reboots every device of the tank (reboot_all(), the app's "Restart
+    all Devices"), from the tank device: one group write through the mesh
+    and one to each Bluetooth-only device (async_tank_broadcast()).
     """
 
     _attr_has_entity_name = True
@@ -64,17 +64,11 @@ class RestartAllButton(ButtonEntity):
     async def async_press(self) -> None:
         """Raises HomeAssistantError when every device failed to send it."""
         runtime: MobiusRuntimeData = self._entry.runtime_data
-        errors: list[str] = []
-        for coordinator in runtime.coordinators.values():
-            try:
-                device = await coordinator.async_get_connected_device()
-                await device.reboot_all()
-                return
-            except Exception as err:
-                errors.append(f"{coordinator.serial}: {err}")
-        raise HomeAssistantError(
-            f"Failed to restart all devices -- every device tried failed: {'; '.join(errors)}"
+        _sent, errors = await async_tank_broadcast(
+            runtime.coordinators.values(), lambda device: device.reboot_all(),
         )
+        if errors:
+            raise HomeAssistantError(f"Failed to restart all devices on: {'; '.join(errors)}")
 
 
 async def async_setup_entry(

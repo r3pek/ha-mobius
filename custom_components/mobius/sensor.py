@@ -525,8 +525,10 @@ async def async_setup_entry(
             SchedulePointCountSensor(coordinator, serial, device_info),
             FirmwareVersionSensor(coordinator, serial, device_info),
             HardwareRevisionSensor(coordinator, serial, device_info),
-            MeshAddressSensor(coordinator, serial, device_info),
         ]
+        # A Bluetooth-only device has no mesh address.
+        if not coordinator.bluetooth_only:
+            entities.append(MeshAddressSensor(coordinator, serial, device_info))
         # Devices without scene support report no slots at all.
         if data.get("configured_scenes"):
             entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))

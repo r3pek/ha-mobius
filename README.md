@@ -19,7 +19,10 @@ Not affiliated with or endorsed by any of these companies.
   that can't be reached through the gateway is restarted automatically,
   escalating to every unreachable device and then the whole tank if
   needed (at most one tank restart per hour). New devices of a configured
-  tank are added to it automatically.
+  tank are added to it automatically. AI Blades are not on the tank's
+  mesh: each is polled over a short connection of its own, one device at
+  a time, and tank-wide actions (scenes, restart all, clock) reach them
+  too.
 - **Lights**: current intensity per channel, schedule intensity, lunar
   phases, calibration status.
 - **Pumps**: speed, flow (only when the pump reports it reliably),

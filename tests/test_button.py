@@ -155,6 +155,9 @@ async def test_async_press_raises_homeassistanterror_on_reboot_failure(hass):
 def _fake_entry_with_coordinators(*coordinators):
     entry = MagicMock()
     entry.entry_id = "test_entry"
+    for coordinator in coordinators:
+        if not isinstance(coordinator.bluetooth_only, bool):
+            coordinator.bluetooth_only = False
     entry.runtime_data.coordinators = {f"serial{i}": c for i, c in enumerate(coordinators)}
     return entry
 

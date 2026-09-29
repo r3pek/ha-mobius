@@ -29,7 +29,8 @@ from .const import (
     SOFT_REFRESH_RETRY_DELAY,
 )
 from .coordinator import (
-    MobiusDeviceCoordinator, _find_in_bluetooth_cache, discover_mesh_address, discover_tank_for_serial,
+    MobiusDeviceCoordinator, _find_in_bluetooth_cache, advertised_as_bluetooth_only, async_tank_broadcast,
+    discover_mesh_address, discover_tank_for_serial,
 )
 from .gateway_registry import GatewayRegistry, PanGroup
 
@@ -235,7 +236,8 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
 
     1. Creates sensors missed at setup (_async_ensure_sensors_exist()).
     2. Without a gateway, re-triggers the gateway election through
-       registry.join().
+       registry.join(). Bluetooth-only devices take no part in this or the
+       steps below.
     3. If the gateway isn't connected and isn't in Home Assistant's
        Bluetooth cache, requests an active scan before using it.
     4. Reads the mesh peers through the gateway and updates the mesh
@@ -247,14 +249,20 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     unavailable after MARK_UNAVAILABLE_AFTER), and new devices are left to
     Bluetooth discovery. A failed check is retried on the next run.
     """
+    await _async_ensure_sensors_exist(hass, entry)
+
     found = _entry_group(hass, entry)
     if found is None:
         return
     registry, pan_id, group = found
 
-    await _async_ensure_sensors_exist(hass, entry)
-
-    known_devices = entry.data.get(CONF_DEVICES, [])
+    # Bluetooth-only devices are never on the mesh: they are neither
+    # expected in its peer list nor candidates for the election below.
+    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+    bluetooth_only = {
+        serial for serial, c in (runtime.coordinators.items() if runtime is not None else []) if c.bluetooth_only
+    }
+    known_devices = [d for d in entry.data.get(CONF_DEVICES, []) if d[CONF_SERIAL] not in bluetooth_only]
     if group.gateway_serial is None:
         if not known_devices:
             return
@@ -350,8 +358,8 @@ async def _async_check_tank_time(hass: HomeAssistant, entry: ConfigEntry) -> Non
     Runs after every poll of any device of the tank. When a device's clock
     is more than CLOCK_DRIFT_THRESHOLD seconds off Home Assistant's, or its
     time zone differs from Home Assistant's, sets the tank's time zone and
-    time through the gateway (group writes that reach every device, like
-    the app's "set time to now"). At most once per TIME_SYNC_COOLDOWN;
+    time with group writes through the mesh and to each Bluetooth-only
+    device (async_tank_broadcast()), like the app's "set time to now". At most once per TIME_SYNC_COOLDOWN;
     skipped while the entry's TimeSyncSwitch is off.
     """
     runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
@@ -364,11 +372,6 @@ async def _async_check_tank_time(hass: HomeAssistant, entry: ConfigEntry) -> Non
     worst, mismatch = _clock_problems(hass, runtime)
     if worst is None and mismatch is None:
         return
-    found = _entry_group(hass, entry)
-    if found is None or found[2].gateway_serial is None:
-        return
-    _registry, _pan_id, group = found
-
     if worst is not None:
         _LOGGER.info(
             "Tank %r: clock drift of %+d s detected on %s (threshold %d s) -- syncing the tank's time",
@@ -380,10 +383,7 @@ async def _async_check_tank_time(hass: HomeAssistant, entry: ConfigEntry) -> Non
             entry.title, mismatch[0], mismatch[1] or "(not set)", hass.config.time_zone,
         )
 
-    runtime.time_sync_running = True
-    runtime.last_time_sync = now
-    try:
-        device = await group.gateway_connection.ensure_connected()
+    async def sync(device) -> None:
         if mismatch is not None:
             try:
                 await device.set_time_zone(hass.config.time_zone)
@@ -392,15 +392,20 @@ async def _async_check_tank_time(hass: HomeAssistant, entry: ConfigEntry) -> Non
                     "Tank %r: setting the time zone %r failed (%s)", entry.title, hass.config.time_zone, err,
                 )
         await device.set_time_to_now()
-    except Exception as err:
-        _LOGGER.warning(
-            "Tank %r: clock sync via gateway %s failed (%s) -- will retry after %s",
-            entry.title, group.gateway_serial, err, TIME_SYNC_COOLDOWN,
-        )
-        return
+
+    runtime.time_sync_running = True
+    runtime.last_time_sync = now
+    try:
+        sent, errors = await async_tank_broadcast(runtime.coordinators.values(), sync)
     finally:
         runtime.time_sync_running = False
-    _LOGGER.info("Tank %r: clock synced via gateway %s", entry.title, group.gateway_serial)
+    if errors:
+        _LOGGER.warning(
+            "Tank %r: clock sync failed on %s -- will retry after %s",
+            entry.title, "; ".join(errors), TIME_SYNC_COOLDOWN,
+        )
+    if sent:
+        _LOGGER.info("Tank %r: clock synced via %s", entry.title, ", ".join(sent))
 
 
 async def _async_soft_first_refresh(coordinator: MobiusDeviceCoordinator, serial: str) -> None:
@@ -463,12 +468,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _notify_single_device_tank(hass, entry)
 
     rssi_by_serial = {d[CONF_SERIAL]: _current_rssi(hass, d[CONF_SERIAL]) for d in devices}
+    # Bluetooth-only devices (not on the mesh) are set up separately below:
+    # never probed as gateway, never joined to the registry's group.
+    bluetooth_only = {d[CONF_SERIAL] for d in devices if advertised_as_bluetooth_only(hass, d[CONF_SERIAL])}
+    mesh_devices = [d for d in devices if d[CONF_SERIAL] not in bluetooth_only]
     devices_by_rssi = sorted(
-        devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
+        mesh_devices, key=lambda d: rssi_by_serial[d[CONF_SERIAL]] or -999, reverse=True,
     )
     _LOGGER.debug(
         "Probing %r's %d device(s) in RSSI order: %s",
-        entry.title, len(devices),
+        entry.title, len(devices_by_rssi),
         [(d[CONF_SERIAL], rssi_by_serial[d[CONF_SERIAL]]) for d in devices_by_rssi],
     )
     working_serial: str | None = None
@@ -497,16 +506,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         break
 
-    if working_serial is None:
+    if working_serial is None and mesh_devices:
         raise ConfigEntryNotReady(
-            f"Could not connect to any of {len(devices)} device(s) in {entry.title!r}"
+            f"Could not connect to any of {len(mesh_devices)} device(s) in {entry.title!r}"
             + (f": {last_probe_error}" if last_probe_error else "")
         )
 
     coordinators: dict[str, MobiusDeviceCoordinator] = {}
     # The working device joins first: another member joining first would
     # start the RSSI election, and prefer_as_gateway would then be ignored.
-    ordered_devices = sorted(devices, key=lambda d: d[CONF_SERIAL] != working_serial)
+    ordered_devices = sorted(mesh_devices, key=lambda d: d[CONF_SERIAL] != working_serial)
     for device in ordered_devices:
         serial = device[CONF_SERIAL]
         group = await registry.join(pan_id, serial, rssi_by_serial[serial], prefer_as_gateway=(serial == working_serial))
@@ -525,6 +534,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
         if serial == working_serial:
+            await coordinator.async_config_entry_first_refresh()
+        else:
+            await _async_soft_first_refresh(coordinator, serial)
+        coordinators[serial] = coordinator
+
+    for device in devices:
+        serial = device[CONF_SERIAL]
+        if serial not in bluetooth_only:
+            continue
+        coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id, bluetooth_only=True)
+        if not mesh_devices and not coordinators:
+            # A tank of Bluetooth-only devices: the first one decides
+            # whether the entry is ready.
             await coordinator.async_config_entry_first_refresh()
         else:
             await _async_soft_first_refresh(coordinator, serial)
@@ -559,7 +581,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unloads an entry. Each device leaves the registry, which promotes a
-    new gateway (and disconnects the old one) when needed."""
+    new gateway (and disconnects the old one) when needed; a Bluetooth-only
+    device closes its own connection."""
     # The warning only applies while the entry is running; disabling it is
     # one of the ways out of it.
     _dismiss_single_device_notification(hass, entry)
@@ -570,7 +593,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     registry: GatewayRegistry | None = hass.data.get(DOMAIN, {}).get("gateway_registry")
     if runtime is not None and registry is not None:
         for coordinator in runtime.coordinators.values():
-            await registry.leave(coordinator.pan_id, coordinator.serial)
+            if coordinator.bluetooth_only:
+                await coordinator.direct_connection.disconnect()
+            else:
+                await registry.leave(coordinator.pan_id, coordinator.serial)
 
     return unload_ok
 

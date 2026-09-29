@@ -39,11 +39,12 @@ documentation/12-device-identity-and-address-stability.md).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import asdict
 from datetime import timedelta
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -54,7 +55,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from mobius import (
-    ConfigurationCache, MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank,
+    ConfigurationCache, MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank, is_bluetooth_only,
     parse_advertisement, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, extract_short_address, C2Attribute,
     PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
@@ -113,6 +114,16 @@ def _find_in_bluetooth_cache(hass: HomeAssistant, serial: str):
         if parsed and parsed.serial == serial:
             return info
     return None
+
+
+def advertised_as_bluetooth_only(hass: HomeAssistant, serial: str) -> Optional[bool]:
+    """Whether the device advertising `serial` is Bluetooth-only (not on its
+    tank's Thread mesh, see python-mobius is_bluetooth_only()), from its
+    advertisement in Home Assistant's Bluetooth cache. None when it isn't
+    in the cache."""
+    info = _find_in_bluetooth_cache(hass, serial)
+    parsed = parse_advertisement(info.manufacturer_data) if info is not None else None
+    return None if parsed is None else parsed.bluetooth_only
 
 
 async def _find_in_bluetooth_cache_with_active_scan_fallback(hass: HomeAssistant, serial: str):
@@ -241,6 +252,54 @@ async def _restart_member(hass: HomeAssistant, registry: GatewayRegistry, group:
     _LOGGER.warning("Automatic restart of %s failed: not reachable directly or through the gateway", serial)
 
 
+async def async_tank_broadcast(
+    coordinators: Iterable["MobiusDeviceCoordinator"],
+    action: Callable[[MobiusDevice], Awaitable[Any]],
+    applies: Optional[Callable[["MobiusDeviceCoordinator"], bool]] = None,
+) -> tuple[list[str], list[str]]:
+    """
+    A tank-wide write, sent the way the app sends one: `action` (a group
+    write, e.g. start_scene(broadcast=True)) once through the first mesh
+    device that accepts it, the gateway first, which reaches every device
+    on the mesh; and once on each Bluetooth-only device, which the mesh
+    write doesn't reach. `applies` limits the devices used.
+
+    Returns (serials the action succeeded on, error messages). Mesh errors
+    are only reported when every mesh device failed. Never raises.
+    """
+    selected = [c for c in coordinators if applies is None or applies(c)]
+    mesh = sorted(
+        (c for c in selected if not c.bluetooth_only),
+        key=lambda c: not _is_current_gateway(c),
+    )
+    sent: list[str] = []
+    errors: list[str] = []
+
+    mesh_errors: list[str] = []
+    for coordinator in mesh:
+        try:
+            await action(await coordinator.async_get_connected_device())
+            sent.append(coordinator.serial)
+            mesh_errors = []
+            break
+        except Exception as err:
+            mesh_errors.append(f"{coordinator.serial}: {err}")
+    errors += mesh_errors
+
+    for coordinator in (c for c in selected if c.bluetooth_only):
+        try:
+            await action(await coordinator.async_get_connected_device())
+            sent.append(coordinator.serial)
+        except Exception as err:
+            errors.append(f"{coordinator.serial}: {err}")
+    return sent, errors
+
+
+def _is_current_gateway(coordinator: "MobiusDeviceCoordinator") -> bool:
+    group = coordinator.registry.group(coordinator.pan_id)
+    return group is not None and group.gateway_serial == coordinator.serial
+
+
 class MobiusConnectionManager:
     """The persistent MobiusDevice connection of a pan_id group's gateway,
     shared by every coordinator in the group (PanGroup.gateway_connection)."""
@@ -270,10 +329,11 @@ class MobiusConnectionManager:
         failed while the client may still report being connected."""
         self._device = None
 
-    async def ensure_connected(self) -> MobiusDevice:
+    async def ensure_connected(self, acquire_semaphore: bool = True) -> MobiusDevice:
         """Returns the connected MobiusDevice, reconnecting first (address
         resolved from the serial via Home Assistant's Bluetooth cache) if
-        needed."""
+        needed. acquire_semaphore=False: the caller already holds the
+        shared connection semaphore."""
         if self.is_connected:
             return self._device
 
@@ -291,7 +351,7 @@ class MobiusConnectionManager:
                 )
 
             semaphore_wait_start = time.monotonic()
-            async with self._semaphore:
+            async with (self._semaphore if acquire_semaphore else contextlib.nullcontext()):
                 semaphore_wait_seconds = time.monotonic() - semaphore_wait_start
                 if semaphore_wait_seconds > 1.0:
                     _LOGGER.debug(
@@ -589,13 +649,21 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def __init__(
         self, hass: HomeAssistant, entry: ConfigEntry, registry: GatewayRegistry,
-        serial: str, pan_id: int,
+        serial: str, pan_id: int, bluetooth_only: bool = False,
     ):
         super().__init__(hass, _LOGGER, name=f"mobius_{serial}", update_interval=POLL_INTERVAL)
         self.config_entry = entry
         self.registry = registry
         self.serial = serial
         self.pan_id = pan_id
+        # A Bluetooth-only device (not on the tank's Thread mesh) is not a
+        # member of the registry's group: it is polled over a connection of
+        # its own, opened for each poll, and is never a gateway or relay
+        # target.
+        self.bluetooth_only = False
+        self.direct_connection: Optional[MobiusConnectionManager] = None
+        if bluetooth_only:
+            self._become_bluetooth_only()
         self._last_success: Optional[Any] = None
         # Supported attribute ids, read once and again after the device's
         # attribute table changes (see _fetch_all()).
@@ -673,8 +741,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         For one-off actions (buttons, services); unlike _fetch(), failures
         are not recorded against the gateway.
 
+        A Bluetooth-only device returns its own connection, which stays
+        open until its next poll closes it.
+
         Raises HomeAssistantError if the group has no gateway.
         """
+        if self.bluetooth_only:
+            return await self.direct_connection.ensure_connected()
         group = self.registry.group(self.pan_id)
         if group is None or group.gateway_serial is None:
             raise HomeAssistantError(
@@ -735,7 +808,73 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             names.append(attr.name if attr is not None else f"unknown({attr_id})")
         return names
 
+    def _become_bluetooth_only(self) -> None:
+        """Switches this coordinator to its own connection (see
+        self.bluetooth_only). Leaving the registry's group is up to the
+        caller (async, see _check_bluetooth_only())."""
+        self.bluetooth_only = True
+        if self.direct_connection is None:
+            self.direct_connection = MobiusConnectionManager(self.hass, self.serial, self.registry.semaphore)
+
+    async def _check_bluetooth_only(self) -> None:
+        """
+        Switches a device set up as a mesh member to Bluetooth-only once its
+        model says so: from its advertisement, or from its model read by a
+        poll (e.g. when it was the gateway). Setup normally decides this
+        already; this covers a device that wasn't advertising then.
+        """
+        if self.bluetooth_only or (self._model is not None and not is_bluetooth_only(self._model)):
+            return
+        detected = is_bluetooth_only(self._model) or bool(advertised_as_bluetooth_only(self.hass, self.serial))
+        if not detected:
+            return
+        _LOGGER.info(
+            "%s is a Bluetooth-only device (not on the tank's Thread mesh) -- polling it over its "
+            "own connection from now on", self.serial,
+        )
+        self._become_bluetooth_only()
+        group = self.registry.group(self.pan_id)
+        if group is not None and self.serial in group.members:
+            await self.registry.leave(self.pan_id, self.serial)
+
+    async def _fetch_direct(self) -> dict[str, Any]:
+        """
+        _fetch() of a Bluetooth-only device: connects, polls and disconnects
+        while holding the shared connection semaphore, so polls of several
+        Bluetooth-only devices never hold connections at the same time. A
+        connection opened by an action in between (async_get_connected_device())
+        is reused and closed here.
+        """
+        async with self.registry.semaphore:
+            try:
+                return await self._fetch_direct_connected()
+            finally:
+                await self.direct_connection.disconnect()
+
+    async def _fetch_direct_connected(self) -> dict[str, Any]:
+        _LOGGER.debug("%s polling as Bluetooth-only (direct)", self.serial)
+        try:
+            device = await self.direct_connection.ensure_connected(acquire_semaphore=False)
+            data, self._supported_attribute_ids, used_batch, self._primitive_type, self._model = await _fetch_all(
+                device, cached_supported_attribute_ids=self._supported_attribute_ids,
+                batch_disabled=self._batch_disabled,
+                cached_primitive_type=self._primitive_type, cached_model=self._model,
+                group=self.registry.group(self.pan_id),
+                configuration_cache=self.configuration_cache,
+            )
+            self._record_batch_result(used_batch)
+        except Exception as err:
+            _LOGGER.debug("%s poll (Bluetooth-only) failed: %s", self.serial, err)
+            self.direct_connection.mark_disconnected()
+            raise
+        data["closed_loop"] = self._closed_loop
+        data["mesh_last_seen_at"] = None
+        return data
+
     async def _fetch(self) -> dict[str, Any]:
+        await self._check_bluetooth_only()
+        if self.bluetooth_only:
+            return await self._fetch_direct()
         group = self.registry.group(self.pan_id)
         if group is None or group.gateway_serial is None:
             raise UpdateFailed(
@@ -786,6 +925,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if vectra_info is not None:
                     self._closed_loop = vectra_info.closed_loop
             data["closed_loop"] = self._closed_loop
+            if is_bluetooth_only(self._model):
+                # Read over the gateway connection, i.e. this device was
+                # the gateway: switch now (the data itself is fine).
+                await self._check_bluetooth_only()
+                data["mesh_last_seen_at"] = None
+                return data
         except Exception as err:
             _LOGGER.debug(
                 "%s poll (%s) failed: %s", self.serial,

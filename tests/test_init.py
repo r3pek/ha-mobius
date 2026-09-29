@@ -1440,7 +1440,10 @@ def _clock_entry(hass, coordinator_data: dict, **runtime_kwargs):
         title="Reef Tank",
     )
     entry.add_to_hass(hass)
-    coordinator = MagicMock()
+    coordinator = MagicMock(
+        serial=PUMP_SERIAL, pan_id=PAN_ID, registry=registry, bluetooth_only=False,
+        async_get_connected_device=AsyncMock(return_value=fake_device),
+    )
     coordinator.data = coordinator_data
     entry.runtime_data = MobiusRuntimeData(coordinators={PUMP_SERIAL: coordinator}, **runtime_kwargs)
     return entry, fake_device
@@ -1583,7 +1586,7 @@ async def test_sync_failure_is_logged_and_does_not_raise(hass, caplog):
 
     await _async_check_tank_time(hass, entry)  # must not raise
 
-    assert "clock sync via gateway" in caplog.text and "relay timed out" in caplog.text
+    assert "clock sync failed on 00000000000001" in caplog.text and "relay timed out" in caplog.text
     assert entry.runtime_data.time_sync_running is False
 
 

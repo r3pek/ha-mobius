@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MobiusRuntimeData
-from .coordinator import used_scenes
+from .coordinator import async_tank_broadcast, used_scenes
 from .entity import (
     MobiusAdvancedFeatureEntity, build_advanced_feature_entities, entry_tank_identifier, iter_entry_devices,
 )
@@ -74,8 +74,9 @@ def _build_advanced_feature_selects(coordinator, serial, device_info, data) -> l
 class SceneSelectionSelect(SelectEntity):
     """
     Activates a scene on the whole tank, from the tank device: one
-    start_scene(broadcast=True) write, sent to a device that has the scene
-    configured.
+    start_scene(broadcast=True) write through a mesh device that has the
+    scene configured, plus one to each Bluetooth-only device that has it
+    (async_tank_broadcast()).
 
     Options are the named scenes configured on any device of the tank (not
     every device necessarily has every scene), plus "None", which cancels
@@ -157,40 +158,39 @@ class SceneSelectionSelect(SelectEntity):
 
         if option == self.NONE_OPTION:
             # One write to the tank's group returns every device to its
-            # schedule, like the app. Sent through the first device that
-            # accepts it.
-            errors: list[str] = []
-            for coordinator in runtime.coordinators.values():
-                try:
-                    device = await coordinator.async_get_connected_device()
-                    await device.resume_schedule(broadcast=True)
-                    break
-                except Exception as err:
-                    errors.append(f"{coordinator.serial}: {err}")
-            else:
-                raise HomeAssistantError(f"Failed to resume the normal schedule: {'; '.join(errors)}")
-            for other in runtime.coordinators.values():
-                await other.async_request_refresh()
+            # schedule, like the app (async_tank_broadcast()).
+            sent, errors = await async_tank_broadcast(
+                runtime.coordinators.values(), lambda device: device.resume_schedule(broadcast=True),
+            )
+            if sent:
+                await self._refresh_all(runtime)
+            if errors:
+                raise HomeAssistantError(f"Failed to resume the normal schedule on: {'; '.join(errors)}")
             return
 
         scene_id = self._scene_name_to_id().get(option)
         if scene_id is None:
             raise HomeAssistantError(f"Unknown scene {option!r}")
 
-        for coordinator in runtime.coordinators.values():
+        def has_scene(coordinator) -> bool:
             scenes = (coordinator.data or {}).get("configured_scenes") or []
-            if not any(s.id == scene_id for s in scenes):
-                continue
-            try:
-                device = await coordinator.async_get_connected_device()
-                await device.start_scene(scene_id, broadcast=True)
-            except Exception as err:
-                raise HomeAssistantError(f"Failed to activate scene {option!r}: {err}") from err
-            for other in runtime.coordinators.values():
-                await other.async_request_refresh()
-            return
+            return any(s.id == scene_id for s in scenes)
 
-        raise HomeAssistantError(f"No connected device currently has scene {option!r} configured")
+        sent, errors = await async_tank_broadcast(
+            runtime.coordinators.values(), lambda device: device.start_scene(scene_id, broadcast=True),
+            applies=has_scene,
+        )
+        if sent:
+            await self._refresh_all(runtime)
+        if errors:
+            raise HomeAssistantError(f"Failed to activate scene {option!r} on: {'; '.join(errors)}")
+        if not sent:
+            raise HomeAssistantError(f"No connected device currently has scene {option!r} configured")
+
+    @staticmethod
+    async def _refresh_all(runtime: MobiusRuntimeData) -> None:
+        for coordinator in runtime.coordinators.values():
+            await coordinator.async_request_refresh()
 
 
 async def async_setup_entry(

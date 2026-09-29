@@ -174,9 +174,10 @@ from custom_components.mobius.select import SceneSelectionSelect
 from mobius import Scene, ActiveScene, SceneID
 
 
-def _fake_coordinator(serial, scenes=None, current_scene=None):
+def _fake_coordinator(serial, scenes=None, current_scene=None, bluetooth_only=False):
     coordinator = MagicMock()
     coordinator.serial = serial
+    coordinator.bluetooth_only = bluetooth_only
     coordinator.data = {"configured_scenes": scenes or [], "current_scene": current_scene}
     coordinator.async_get_connected_device = AsyncMock(return_value=AsyncMock())
     coordinator.async_request_refresh = AsyncMock()
@@ -279,6 +280,27 @@ async def test_selecting_a_scene_writes_only_to_the_device_that_has_it():
     pump_coord.async_get_connected_device.assert_awaited_once()
     written_device = pump_coord.async_get_connected_device.return_value
     written_device.start_scene.assert_awaited_once_with(int(SceneID.FeedMode), broadcast=True)
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_scene_also_writes_to_bluetooth_only_devices_that_have_it():
+    """The mesh write doesn't reach Bluetooth-only devices: each one that
+    has the scene gets the write directly."""
+    scene = Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+                  name="Feed", timeout=30, light=None, pump=None)
+    pump_coord = _fake_coordinator("pump1", scenes=[scene])
+    blade_coord = _fake_coordinator("blade1", scenes=[scene], bluetooth_only=True)
+    other_blade = _fake_coordinator("blade2", bluetooth_only=True)  # no such scene
+    entry = _entry_with_coordinators(pump_coord, blade_coord, other_blade)
+    select = SceneSelectionSelect(entry, ("mobius", "tank_1234"))
+
+    await select.async_select_option("Feed")
+
+    for coordinator in (pump_coord, blade_coord):
+        coordinator.async_get_connected_device.return_value.start_scene.assert_awaited_once_with(
+            int(SceneID.FeedMode), broadcast=True,
+        )
+    other_blade.async_get_connected_device.assert_not_awaited()
 
 
 @pytest.mark.asyncio

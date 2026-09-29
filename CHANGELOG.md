@@ -11,6 +11,8 @@
   (escalating to the whole tank, at most once an hour).
 - Less Bluetooth traffic: scenes and schedules are read only when they
   change.
+- Support for AI Blades (Bluetooth-only, not on the tank's mesh): polled
+  directly, and included in tank-wide scenes, restart and clock sync.
 - Requires the matching python-mobius release.
 
 ## 0.9.0

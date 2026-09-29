@@ -114,6 +114,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
         devices_diag.append({
             "serial": serial,
             "is_current_gateway": (group.gateway_serial == serial) if group is not None else None,
+            "bluetooth_only": coordinator.bluetooth_only if coordinator is not None else None,
             "registry_rssi": member.rssi if member is not None else None,
             "registry_mesh_address": format_mesh_address(member.mesh_address) if member is not None else None,
             "registry_radio_type": member.radio_type if member is not None else None,
