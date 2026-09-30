@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.1
 
 - A device that still answers small requests is no longer restarted
   when its poll fails.
+- Fixed lights not being read through a pump gateway (requires
+  python-mobius 0.10.1).
 
 ## 0.10.0
 
