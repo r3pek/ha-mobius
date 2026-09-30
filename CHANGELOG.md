@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 - The tank's clock and time zone are corrected automatically when they
   drift, instead of an hourly sync.
@@ -17,7 +17,7 @@
   every 10 minutes (and after changes made in Home Assistant); the mesh
   peer list every 5 minutes.
 - New "Refresh all data" button on the tank reads everything again.
-- Requires the matching python-mobius release.
+- Requires python-mobius 0.10.0.
 
 ## 0.9.0
 
