@@ -81,6 +81,9 @@
       },
       "restart_all": {
         "name": "Restart all devices"
+      },
+      "refresh_all": {
+        "name": "Refresh all data"
       }
     },
     "switch": {

@@ -61,7 +61,9 @@ from mobius import (
     PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
 )
 
-from .const import CONNECT_TIMEOUT, POLL_INTERVAL, MARK_UNAVAILABLE_AFTER, DOMAIN, BATCH_FAILURE_THRESHOLD
+from .const import (
+    BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, MARK_UNAVAILABLE_AFTER, POLL_INTERVAL, STATIC_REFRESH_INTERVAL,
+)
 from .gateway_registry import GatewayRegistry, PanGroup, RestartAction
 
 _LOGGER = logging.getLogger(__name__)
@@ -673,8 +675,11 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Supported attribute ids, read once and again after the device's
         # attribute table changes (see _fetch_all()).
         self._supported_attribute_ids: Optional[set[int]] = None
-        # Scenes and schedule with their checksums, kept between polls.
-        self.configuration_cache = ConfigurationCache()
+        # Scenes and schedule with their checksums, and the attributes that
+        # rarely change, kept between polls.
+        self.configuration_cache = ConfigurationCache(
+            static_refresh_interval=STATIC_REFRESH_INTERVAL.total_seconds(),
+        )
         # Batch failure tracking (see _record_batch_result()). Reset when the
         # group's gateway changes, since batch failures can be specific to
         # one relay path.
@@ -812,6 +817,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             attr = enum_or_none(C2Attribute, attr_id)
             names.append(attr.name if attr is not None else f"unknown({attr_id})")
         return names
+
+    def forget_cached_data(self) -> None:
+        """Makes the next poll read everything again: the supported
+        attributes, the scenes and schedule, and the attributes that
+        rarely change (the tank's "Refresh all data" button)."""
+        self._supported_attribute_ids = None
+        self.configuration_cache.clear()
 
     def _become_bluetooth_only(self) -> None:
         """Switches this coordinator to its own connection (see

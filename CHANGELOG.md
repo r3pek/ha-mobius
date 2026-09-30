@@ -13,7 +13,10 @@
   change.
 - Support for AI Blades (Bluetooth-only, not on the tank's mesh): polled
   directly, and included in tank-wide scenes, restart and clock sync.
-- Less Bluetooth traffic: the mesh peer list is read every 5 minutes.
+- Less Bluetooth traffic: device info, firmware and settings are read
+  every 10 minutes (and after changes made in Home Assistant); the mesh
+  peer list every 5 minutes.
+- New "Refresh all data" button on the tank reads everything again.
 - Requires the matching python-mobius release.
 
 ## 0.9.0

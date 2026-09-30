@@ -88,14 +88,20 @@ async def async_run_on_device(
     coordinator: MobiusDeviceCoordinator, action: Callable[[Any], Awaitable[_T]], failure: str,
 ) -> _T:
     """Runs `action` on the coordinator's connected device (direct or
-    relayed). Errors are raised as HomeAssistantError(f"{failure}: {err}")."""
+    relayed). Errors are raised as HomeAssistantError(f"{failure}: {err}").
+
+    The action may have written a setting that is only read every
+    STATIC_REFRESH_INTERVAL, so the next poll reads those again."""
     try:
         device = await coordinator.async_get_connected_device()
-        return await action(device)
+        result = await action(device)
     except HomeAssistantError:
         raise
     except Exception as err:
         raise HomeAssistantError(f"{failure}: {err}") from err
+    finally:
+        coordinator.configuration_cache.invalidate_static()
+    return result
 
 
 class MobiusAdvancedFeatureEntity(CoordinatorEntity[MobiusDeviceCoordinator]):

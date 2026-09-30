@@ -49,7 +49,7 @@ Not affiliated with or endorsed by any of these companies.
 | Support tier, Error state, Schedule points, Firmware version, Hardware revision, Mesh address, Configured scenes | Every device | Diagnostic |
 | Reboot button | Every device | |
 | Scene selection | Tank | |
-| Restart all devices button, Time sync switch, Poll interval (10-300 s) | Tank | |
+| Restart all devices and Refresh all data buttons, Time sync switch, Poll interval (10-300 s) | Tank | |
 | Gateway device, Mesh prefix | Tanks with several devices | Diagnostic |
 
 ## Dashboard cards

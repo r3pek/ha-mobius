@@ -71,10 +71,39 @@ class RestartAllButton(ButtonEntity):
             raise HomeAssistantError(f"Failed to restart all devices on: {'; '.join(errors)}")
 
 
+class RefreshAllDataButton(ButtonEntity):
+    """
+    Makes every device of the tank read everything again right away: the
+    data that is otherwise only read when it changes (scenes, schedules) or
+    every STATIC_REFRESH_INTERVAL (identity, firmware, settings), the
+    supported attributes, and, at the tank's next check, the mesh peer list.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_should_poll = False
+    _attr_icon = "mdi:refresh"
+
+    def __init__(self, entry: ConfigEntry, tank_identifier: tuple[str, str]) -> None:
+        self._attr_unique_id = f"{entry.entry_id}_refresh_all"
+        self._attr_translation_key = "refresh_all"
+        self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
+        self._entry = entry
+
+    async def async_press(self) -> None:
+        runtime: MobiusRuntimeData = self._entry.runtime_data
+        runtime.last_mesh_refresh = None
+        for coordinator in runtime.coordinators.values():
+            coordinator.forget_cached_data()
+        for coordinator in runtime.coordinators.values():
+            await coordinator.async_request_refresh()
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    entities: list[ButtonEntity] = [RestartAllButton(entry, entry_tank_identifier(entry))]
+    tank_identifier = entry_tank_identifier(entry)
+    entities: list[ButtonEntity] = [RestartAllButton(entry, tank_identifier), RefreshAllDataButton(entry, tank_identifier)]
     for serial, coordinator, device_info, _data in iter_entry_devices(hass, entry):
         entities.append(RebootButton(coordinator, serial, device_info))
     async_add_entities(entities)

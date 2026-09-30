@@ -90,6 +90,13 @@ TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 # TANK_REVALIDATION_INTERVAL.
 MESH_PEER_REFRESH_INTERVAL = timedelta(minutes=5)
 
+# How often each device's rarely-changing attributes (identity, firmware and
+# hardware, color channels, calibration, advanced settings, pump flow range
+# and battery settings) are read. They are also read on the first poll,
+# after Home Assistant writes one of them, after a firmware update, and
+# when the tank's "Refresh all data" button is pressed.
+STATIC_REFRESH_INTERVAL = timedelta(minutes=10)
+
 # A tank's clock is set when any of its devices drifts more than this many
 # seconds from Home Assistant's clock, or reports a different time zone
 # (checked after every poll, see __init__.py's _async_check_tank_time()).
