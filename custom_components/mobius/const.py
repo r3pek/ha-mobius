@@ -84,6 +84,12 @@ SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds
 # check is retried on the next run.
 TANK_REVALIDATION_INTERVAL = timedelta(minutes=1)
 
+# How often the tank check reads the mesh peer list through the gateway
+# (mesh addresses, each device's last-seen time on the mesh, devices that
+# moved between tanks). The other parts of the check run every
+# TANK_REVALIDATION_INTERVAL.
+MESH_PEER_REFRESH_INTERVAL = timedelta(minutes=5)
+
 # A tank's clock is set when any of its devices drifts more than this many
 # seconds from Home Assistant's clock, or reports a different time zone
 # (checked after every poll, see __init__.py's _async_check_tank_time()).

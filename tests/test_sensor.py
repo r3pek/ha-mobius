@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute, LightPollResult
 
 from custom_components.mobius import tank_device_identifier
+from custom_components.mobius import _async_revalidate_tank
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 
 PAN_ID = 0x3D0F
@@ -466,8 +467,7 @@ async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):
     """End-to-end confirmation that mesh last-seen is now a plain
     attribute of the mesh_address sensor -- not its own entity (folded
     in, see MeshAddressSensor's own docstring for why) -- and shows a
-    real, freshly-computed timestamp, refreshed on every regular poll
-    cycle rather than a one-time snapshot captured at setup."""
+    real, freshly-computed timestamp from the tank check's mesh read."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -500,6 +500,10 @@ async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):
         "custom_components.mobius.coordinator.dt_util.utcnow", return_value=frozen_now,
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        # The tank check reads the mesh peer list and updates the entities.
+        fake_device.discover_mesh_peers_auto = fake_device.discover_networked_thread_devices
+        await _async_revalidate_tank(hass, entry)
         await hass.async_block_till_done()
 
     # No standalone mesh-last-seen entity at all anymore.

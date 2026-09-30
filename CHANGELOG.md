@@ -13,6 +13,7 @@
   change.
 - Support for AI Blades (Bluetooth-only, not on the tank's mesh): polled
   directly, and included in tank-wide scenes, restart and clock sync.
+- Less Bluetooth traffic: the mesh peer list is read every 5 minutes.
 - Requires the matching python-mobius release.
 
 ## 0.9.0

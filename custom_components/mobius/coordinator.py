@@ -921,7 +921,6 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if is_gateway:
                 self.registry.record_gateway_success(self.pan_id)
-                await self._refresh_mesh_last_seen(group, device)
             else:
                 self.registry.record_relay_success(self.pan_id, self.serial)
 
@@ -969,32 +968,11 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
             raise
 
-        # Written to the registry by the gateway's poll
-        # (_refresh_mesh_last_seen()), so it is up to one poll old for
-        # relayed devices.
+        # Written to the registry by the tank check (__init__.py's
+        # _async_revalidate_tank(), every MESH_PEER_REFRESH_INTERVAL).
         member = group.members.get(self.serial)
         data["mesh_last_seen_at"] = member.mesh_last_seen_at if member else None
         return data
-
-    async def _refresh_mesh_last_seen(self, group: PanGroup, device: MobiusDevice) -> None:
-        """Updates every member's "last heard on the mesh" time from one
-        NetworkedThreadDevices read on the gateway. Failures are ignored and
-        leave the previous values."""
-        try:
-            peers = await device.discover_networked_thread_devices()
-        except Exception as err:
-            _LOGGER.debug(
-                "Could not refresh mesh last-seen data via gateway %s this cycle: %s",
-                self.serial, err,
-            )
-            return
-        now = dt_util.utcnow()
-        for peer in peers:
-            if peer.age is None:
-                continue
-            self.registry.update_mesh_last_seen(
-                self.pan_id, peer.serial, now - timedelta(milliseconds=peer.age),
-            )
 
     async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
         """A MeshPeer for this device, from the cached mesh address (usually

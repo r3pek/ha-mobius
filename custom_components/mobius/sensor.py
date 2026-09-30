@@ -394,10 +394,13 @@ class MeshAddressSensor(MobiusEntity):
 
     @property
     def extra_state_attributes(self):
-        last_seen = (self.coordinator.data or {}).get("mesh_last_seen_at")
-        if last_seen is None:
+        # From the registry, updated by the tank check's mesh read (which
+        # then updates the tank's entities), not by this device's poll.
+        group = self.coordinator.registry.group(self.coordinator.pan_id)
+        member = group.members.get(self.coordinator.serial) if group is not None else None
+        if member is None or member.mesh_last_seen_at is None:
             return {}
-        return {"last_seen": last_seen}
+        return {"last_seen": member.mesh_last_seen_at}
 
 
 class MeshPrefixSensor(SensorEntity):

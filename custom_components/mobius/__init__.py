@@ -26,7 +26,7 @@ from mobius import parse_advertisement
 from .const import (
     DOMAIN, MAX_CONCURRENT_CONNECTIONS, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX,
     TANK_REVALIDATION_INTERVAL, SOFT_REFRESH_RETRY_ATTEMPTS, CLOCK_DRIFT_THRESHOLD, TIME_SYNC_COOLDOWN,
-    SOFT_REFRESH_RETRY_DELAY,
+    SOFT_REFRESH_RETRY_DELAY, MESH_PEER_REFRESH_INTERVAL,
 )
 from .coordinator import (
     MobiusDeviceCoordinator, _find_in_bluetooth_cache, advertised_as_bluetooth_only, async_tank_broadcast,
@@ -75,6 +75,9 @@ class MobiusRuntimeData:
     # and whether one is running.
     last_time_sync: Optional[float] = None
     time_sync_running: bool = False
+    # Monotonic time of the tank check's last mesh peer list read
+    # (MESH_PEER_REFRESH_INTERVAL).
+    last_mesh_refresh: Optional[float] = None
     # Set by sensor.py's async_setup_entry(); used by
     # _async_ensure_sensors_exist().
     sensor_add_entities: Optional[AddEntitiesCallback] = None
@@ -240,8 +243,9 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
        steps below.
     3. If the gateway isn't connected and isn't in Home Assistant's
        Bluetooth cache, requests an active scan before using it.
-    4. Reads the mesh peers through the gateway and updates the mesh
-       address and last-seen time of every known member.
+    4. Every MESH_PEER_REFRESH_INTERVAL: reads the mesh peers through the
+       gateway and updates the mesh address and last-seen time of every
+       known member.
     5. Moves a device that is now on this tank's mesh but belongs to
        another entry into this entry (both entries are reloaded).
 
@@ -276,6 +280,16 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         )
         return
 
+    # The mesh peer list is read less often than the rest of the check runs.
+    if runtime is not None:
+        now_monotonic = time.monotonic()
+        if (
+            runtime.last_mesh_refresh is not None
+            and now_monotonic - runtime.last_mesh_refresh < MESH_PEER_REFRESH_INTERVAL.total_seconds()
+        ):
+            return
+        runtime.last_mesh_refresh = now_monotonic
+
     # A connected device doesn't advertise, so the cache is only checked
     # while the gateway is disconnected.
     if not group.gateway_connection.is_connected and _find_in_bluetooth_cache(hass, group.gateway_serial) is None:
@@ -307,6 +321,12 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
             registry.update_mesh_last_seen(
                 pan_id, peer.serial, now_utc - timedelta(milliseconds=peer.age),
             )
+
+    # Entities showing mesh data (the mesh address sensor's last_seen)
+    # update now rather than at their device's next poll.
+    if runtime is not None:
+        for coordinator in runtime.coordinators.values():
+            coordinator.async_update_listeners()
 
     reported_serials = {p.serial for p in peers}
     _LOGGER.debug(
