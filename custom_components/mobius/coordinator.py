@@ -524,6 +524,7 @@ async def _fetch_all(
         current_scene = full_poll.current_scene
         battery_backup = full_poll.battery_backup
         boosted_battery = full_poll.boosted_battery
+        operation_state = full_poll.operation_state
     else:
         # First poll: learn primitive type and model.
         info = await device.get_device_info()
@@ -539,6 +540,7 @@ async def _fetch_all(
         pump_telemetry_result = None
         battery_backup = None
         boosted_battery = None
+        operation_state = None
         if primitive in LIGHT_PRIMITIVES:
             light_poll = await device.get_light_poll_batch(
                 which=1, minute_of_day=minute_of_day, now=now,
@@ -572,7 +574,10 @@ async def _fetch_all(
                 "won't be created for this reason if it's missing",
                 info.get("serial"), info["telemetry"]["gph"], model, primitive,
             )
-        info["operation_state"] = (await device.get_operation_state()).name
+        if operation_state is None:
+            # First poll, or not in the batch response.
+            operation_state = await device.get_operation_state()
+        info["operation_state"] = operation_state.name
         # "BatteryBackup" while the pump runs on battery.
         info["operation_mode"] = info["telemetry"].get("operation_mode")
         # None when the pump doesn't support the setting.
