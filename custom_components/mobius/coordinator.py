@@ -62,7 +62,8 @@ from mobius import (
 )
 
 from .const import (
-    BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, MARK_UNAVAILABLE_AFTER, POLL_INTERVAL, STATIC_REFRESH_INTERVAL,
+    BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, MARK_UNAVAILABLE_AFTER, POLL_INTERVAL, RELAY_PROBE_TIMEOUT,
+    STATIC_REFRESH_INTERVAL,
 )
 from .gateway_registry import GatewayRegistry, PanGroup, RestartAction
 
@@ -122,8 +123,12 @@ def advertised_as_bluetooth_only(hass: HomeAssistant, serial: str) -> Optional[b
     """Whether the device advertising `serial` is Bluetooth-only (not on its
     tank's Thread mesh, see python-mobius is_bluetooth_only()), from its
     advertisement in Home Assistant's Bluetooth cache. None when it isn't
-    in the cache."""
-    info = _find_in_bluetooth_cache(hass, serial)
+    in the cache, or when the cache can't be read (a poll doesn't depend
+    on this lookup)."""
+    try:
+        info = _find_in_bluetooth_cache(hass, serial)
+    except Exception:
+        return None
     parsed = parse_advertisement(info.manufacturer_data) if info is not None else None
     return None if parsed is None else parsed.bluetooth_only
 
@@ -688,6 +693,9 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # PanGroup.generation seen by the previous fetch; None before the
         # first one.
         self._last_seen_gateway_generation: Optional[int] = None
+        # A failed poll was followed by a small read that answered (see
+        # _answers_small_read()); logged once per streak of such polls.
+        self._reachable_but_poll_failing = False
         # Read on the first successful poll; neither changes for a device.
         self._primitive_type: Optional[PrimitiveType] = None
         self._model: Optional[Model] = None
@@ -968,6 +976,16 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # succeeded; force a reconnect on the next poll.
                 group.gateway_connection.mark_disconnected()
                 await self.registry.record_gateway_failure(self.pan_id, expected_generation)
+            elif await self._answers_small_read(group):
+                # Reachable: the poll failed for another reason (a reply
+                # too large to relay, for example), which a restart can't
+                # fix, so it isn't counted.
+                log = _LOGGER.debug if self._reachable_but_poll_failing else _LOGGER.warning
+                log(
+                    "%s answers a small read through gateway %r, but its poll failed (%s) -- "
+                    "not counting it as unreachable", self.serial, group.gateway_serial, err,
+                )
+                self._reachable_but_poll_failing = True
             else:
                 # May be specific to this target, so the shared connection is
                 # left alone; the failure counts towards
@@ -979,12 +997,25 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         f"mobius automatic restart for pan_id {self.pan_id:#06x}",
                     )
             raise
+        self._reachable_but_poll_failing = False
 
         # Written to the registry by the tank check (__init__.py's
         # _async_revalidate_tank(), every MESH_PEER_REFRESH_INTERVAL).
         member = group.members.get(self.serial)
         data["mesh_last_seen_at"] = member.mesh_last_seen_at if member else None
         return data
+
+    async def _answers_small_read(self, group: PanGroup) -> bool:
+        """Whether this relayed device answers a small read (its Model)
+        through the gateway, with RELAY_PROBE_TIMEOUT per send."""
+        try:
+            gateway_device = await group.gateway_connection.ensure_connected()
+            peer = await self._resolve_own_mesh_peer(group)
+            await RelayedMobiusDevice(gateway_device, peer, timeout=RELAY_PROBE_TIMEOUT).get_attribute(C2Attribute.Model)
+            return True
+        except Exception as err:
+            _LOGGER.debug("%s: small read through gateway %r failed too: %s", self.serial, group.gateway_serial, err)
+            return False
 
     async def _resolve_own_mesh_peer(self, group: PanGroup) -> MeshPeer:
         """A MeshPeer for this device, from the cached mesh address (usually

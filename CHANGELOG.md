@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A device that still answers small requests is no longer restarted
+  when its poll fails.
+
 ## 0.10.0
 
 - The tank's clock and time zone are corrected automatically when they

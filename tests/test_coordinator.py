@@ -2569,6 +2569,38 @@ class TestAutomaticRestart:
         run_restart.assert_awaited_once_with(hass, registry, RestartAction(PAN_ID, step=1, serials=(PUMP_SERIAL,)))
         assert group.gateway_serial == LIGHT_SERIAL
 
+    async def test_poll_failure_of_a_device_that_answers_a_small_read_is_not_counted(self, hass, caplog):
+        """A reply too large to relay fails every poll; the device answers a
+        small read, so it isn't restarted."""
+        registry, group = await _tank_with_relayed_pump(hass)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
+        probe = AsyncMock(return_value=[b"\x2a\x00"])
+
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=MagicMock())), \
+                patch("custom_components.mobius.coordinator._fetch_all", AsyncMock(side_effect=IOError("timed out"))), \
+                patch.object(RelayedMobiusDevice, "get_attribute", probe), \
+                patch("custom_components.mobius.coordinator.async_run_restart", AsyncMock()) as run_restart:
+            for _ in range(RELAY_FAILURE_THRESHOLD + 1):
+                await coordinator.async_refresh()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+        run_restart.assert_not_awaited()
+        assert group.members[PUMP_SERIAL].consecutive_relay_failures == 0
+        assert probe.await_count == RELAY_FAILURE_THRESHOLD + 1
+        warnings = [r for r in caplog.records if r.levelname == "WARNING" and "answers a small read" in r.message]
+        assert len(warnings) == 1  # one warning per streak
+
+    async def test_poll_failure_counts_when_the_small_read_fails_too(self, hass):
+        registry, group = await _tank_with_relayed_pump(hass)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
+
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=MagicMock())), \
+                patch("custom_components.mobius.coordinator._fetch_all", AsyncMock(side_effect=IOError("timed out"))), \
+                patch.object(RelayedMobiusDevice, "get_attribute", AsyncMock(side_effect=IOError("timed out"))):
+            await coordinator.async_refresh()
+
+        assert group.members[PUMP_SERIAL].consecutive_relay_failures == 1
+
     async def test_member_is_restarted_through_a_direct_connection(self, hass):
         registry, _group = await _tank_with_relayed_pump(hass)
         direct_device = MagicMock()

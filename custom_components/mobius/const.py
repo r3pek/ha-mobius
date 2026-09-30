@@ -49,6 +49,12 @@ GATEWAY_FAILURE_THRESHOLD = 3
 # the logs show which problem occurred.
 RELAY_FAILURE_THRESHOLD = 3
 
+# A relayed poll that fails is followed by a small read of the same device
+# (its Model) with this timeout per send. When that answers, the device is
+# reachable and the failure is not counted towards RELAY_FAILURE_THRESHOLD:
+# a restart can't fix a reply that is too large to relay.
+RELAY_PROBE_TIMEOUT = 2.5
+
 # After an automatic restart, failed reads of the restarted devices are not
 # counted for this long. A soft reboot takes about 10-20 s; the rest is for
 # the device to rejoin the mesh.
