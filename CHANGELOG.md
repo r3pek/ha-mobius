@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The restart lockout log message shows local time and the minutes left.
+
 ## 0.10.1
 
 - A device that still answers small requests is no longer restarted

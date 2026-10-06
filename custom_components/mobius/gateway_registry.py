@@ -59,6 +59,7 @@ between config entries; reloading those entries calls leave() and join().
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -82,6 +83,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # HardwareInfo "RadioType" label of the radio avoided as gateway.
 K32W_RADIO_LABEL = RADIO_TYPE_LABELS[RadioType.K32W]
+
+
+def format_local_until(until: datetime, now: datetime) -> str:
+    """`until` for a log line: Home Assistant's local time (as the log's own
+    timestamps) and the minutes left, e.g. "09:36:47 (52 min left)"."""
+    minutes_left = max(0, math.ceil((until - now).total_seconds() / 60))
+    return f"{dt_util.as_local(until).strftime('%H:%M:%S')} ({minutes_left} min left)"
 
 
 def _log_address(address: Optional[bytes]) -> str:
@@ -479,7 +487,8 @@ class GatewayRegistry:
                 _LOGGER.debug(
                     "%s unreachable through gateway %r for pan_id %#06x -- no automatic "
                     "restart until %s (tank restarted recently)",
-                    target_serial, group.gateway_serial, group.pan_id, group.restart_lockout_until,
+                    target_serial, group.gateway_serial, group.pan_id,
+                    format_local_until(group.restart_lockout_until, now),
                 )
                 return None
             self._end_restart_episode(group, "the tank restart lockout ended")

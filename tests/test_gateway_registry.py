@@ -858,3 +858,39 @@ class TestPreferAsGateway:
         change for every existing join() call site."""
         group = await registry.join(PAN_A, "solo", rssi=-70)
         assert group.gateway_serial == "solo"  # still elected normally, no regression
+
+
+class TestLocalTimeInLogs:
+    @pytest.fixture
+    def lisbon(self):
+        from zoneinfo import ZoneInfo
+        from homeassistant.util import dt as dt_util
+        previous = dt_util.get_default_time_zone()
+        dt_util.set_default_time_zone(ZoneInfo("Europe/Lisbon"))
+        yield
+        dt_util.set_default_time_zone(previous)
+
+    def test_format_local_until_uses_local_time_and_minutes_left(self, lisbon):
+        from custom_components.mobius.gateway_registry import format_local_until
+        until = datetime(2026, 10, 6, 8, 36, 47, tzinfo=timezone.utc)  # 09:36:47 in Lisbon (UTC+1)
+        now = datetime(2026, 10, 6, 7, 44, 17, tzinfo=timezone.utc)
+
+        assert format_local_until(until, now) == "09:36:47 (53 min left)"
+        assert format_local_until(until, until) == "09:36:47 (0 min left)"
+
+    @pytest.mark.asyncio
+    async def test_lockout_message_shows_local_time(self, registry, lisbon, caplog):
+        import logging
+        caplog.set_level(logging.DEBUG, logger="custom_components.mobius.gateway_registry")
+        await registry.join(PAN_A, "gw", rssi=-60)
+        await registry.join(PAN_A, "pump", rssi=-50)
+        group = registry.group(PAN_A)
+        group.gateway_serial = "gw"
+        group.restarted_individually.add("pump")
+        group.restart_step = 3
+        group.restart_lockout_until = T0 + TANK_RESTART_LOCKOUT
+
+        await _fail_relay_times(registry, PAN_A, "pump", RELAY_FAILURE_THRESHOLD, T0)
+
+        # T0 is 06:00 UTC: the lockout ends at 07:00 UTC, 08:00 in Lisbon.
+        assert "no automatic restart until 08:00:00 (60 min left)" in caplog.text
