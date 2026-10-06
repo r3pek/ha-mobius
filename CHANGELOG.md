@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.10.3
 
 - A failed mesh peer list read is logged with its error (it was logged as
   "0 devices reported") and retried at the next tank check.
+- Requires python-mobius 0.10.2.
 
 ## 0.10.2
 
