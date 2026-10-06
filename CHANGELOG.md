@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A failed mesh peer list read is logged with its error (it was logged as
+  "0 devices reported") and retried at the next tank check.
+
 ## 0.10.2
 
 - The restart lockout log message shows local time and the minutes left.

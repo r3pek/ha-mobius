@@ -95,3 +95,24 @@ async def test_tank_check_reads_the_mesh_peer_list_once_per_interval(hass):
     entry.runtime_data.last_mesh_refresh -= 301
     await _async_revalidate_tank(hass, entry)
     assert mesh_read.await_count == 2
+
+
+async def test_tank_check_reports_a_failed_mesh_read_and_retries_at_the_next_check(hass, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG, logger="custom_components.mobius")
+    registry, group = _make_registry_with_gateway(hass, PAN_ID, PUMP_SERIAL, [])
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_PAN_ID: PAN_ID, CONF_DEVICES: [{CONF_SERIAL: PUMP_SERIAL}]})
+    entry.add_to_hass(hass)
+    entry.runtime_data = MobiusRuntimeData(coordinators={})
+    mesh_read = group.gateway_connection._device.discover_mesh_peers_auto
+    mesh_read.side_effect = IOError("NetworkedThreadDevices: timed out; peer arrays: unsupported")
+
+    await _async_revalidate_tank(hass, entry)
+    await _async_revalidate_tank(hass, entry)
+
+    assert mesh_read.await_count == 2  # not held back for MESH_PEER_REFRESH_INTERVAL
+    mesh_read.assert_awaited_with(raise_errors=True)
+    assert entry.runtime_data.last_mesh_refresh is None
+    assert "reading the mesh peer list from gateway" in caplog.text
+    assert "NetworkedThreadDevices: timed out" in caplog.text
+    assert "revalidated: 0/1" not in caplog.text

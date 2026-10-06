@@ -280,15 +280,12 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
         )
         return
 
-    # The mesh peer list is read less often than the rest of the check runs.
-    if runtime is not None:
-        now_monotonic = time.monotonic()
-        if (
-            runtime.last_mesh_refresh is not None
-            and now_monotonic - runtime.last_mesh_refresh < MESH_PEER_REFRESH_INTERVAL.total_seconds()
-        ):
-            return
-        runtime.last_mesh_refresh = now_monotonic
+    # The mesh peer list is read less often than the rest of the check runs
+    # (a failed read is retried at the next check).
+    if runtime is not None and runtime.last_mesh_refresh is not None and (
+        time.monotonic() - runtime.last_mesh_refresh < MESH_PEER_REFRESH_INTERVAL.total_seconds()
+    ):
+        return
 
     # A connected device doesn't advertise, so the cache is only checked
     # while the gateway is disconnected.
@@ -302,13 +299,17 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
 
     try:
         mdevice = await group.gateway_connection.ensure_connected()
-        peers = await mdevice.discover_mesh_peers_auto()
+        # raise_errors: a failed read must not look like an empty mesh.
+        peers = await mdevice.discover_mesh_peers_auto(raise_errors=True)
     except Exception as err:
         _LOGGER.debug(
-            "Tank revalidation for %r failed (will retry at the next scheduled "
-            "check, in %s): %s", entry.title, TANK_REVALIDATION_INTERVAL, err,
+            "Tank revalidation for %r: reading the mesh peer list from gateway %r failed "
+            "(retried at the next check, in %s): %s",
+            entry.title, group.gateway_serial, TANK_REVALIDATION_INTERVAL, err or type(err).__name__,
         )
         return
+    if runtime is not None:
+        runtime.last_mesh_refresh = time.monotonic()
 
     known_serials = {d[CONF_SERIAL] for d in known_devices}
     now_utc = dt_util.utcnow()
