@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.2
 
 - The restart lockout log message shows local time and the minutes left.
 
