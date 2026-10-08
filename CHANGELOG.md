@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.4
 
 - Fixed a deprecation warning about `DeviceEntry.config_entries`.
 - Requires Home Assistant 2026.8.0 or newer.
