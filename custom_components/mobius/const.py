@@ -77,6 +77,23 @@ BATCH_FAILURE_THRESHOLD = 2
 # unavailable.
 MARK_UNAVAILABLE_AFTER = timedelta(minutes=5)
 
+# An advertisement older than this doesn't count as the device currently
+# advertising: Home Assistant keeps advertisements of devices that have
+# gone away for several minutes. Mobius devices advertise every second or
+# so while nobody is connected to them.
+ADVERTISEMENT_MAX_AGE = timedelta(seconds=60)
+
+# A gateway that is disconnected and hasn't advertised for this long is
+# gone (powered off or out of range): another member is promoted at once
+# instead of after GATEWAY_FAILURE_THRESHOLD failed polls.
+GATEWAY_GONE_AFTER = timedelta(seconds=20)
+
+# A relayed device whose relay fails while it isn't advertising is only
+# counted as failing when the mesh peer list read this recently still
+# lists it (it is on the mesh, only out of Bluetooth range). Otherwise the
+# peer list is read again first, to tell whether it is absent.
+MESH_LIST_FRESH_FOR_FAILURES = timedelta(minutes=2)
+
 # Extra attempts (and delay between them) for a relayed device's first,
 # non-blocking refresh at setup. Kept below RELAY_FAILURE_THRESHOLD so setup
 # alone can't trigger an automatic restart or a gateway re-election. Missing entities are created

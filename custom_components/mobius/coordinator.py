@@ -48,7 +48,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -61,8 +61,12 @@ from mobius import (
     PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
 )
 
+from bleak.exc import BleakCharacteristicNotFoundError
+from bleak_retry_connector import clear_cache as clear_bluez_service_cache
+
 from .const import (
-    BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, MARK_UNAVAILABLE_AFTER, POLL_INTERVAL, RELAY_PROBE_TIMEOUT,
+    ADVERTISEMENT_MAX_AGE, BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, GATEWAY_GONE_AFTER,
+    MARK_UNAVAILABLE_AFTER, MESH_LIST_FRESH_FOR_FAILURES, POLL_INTERVAL, RELAY_PROBE_TIMEOUT,
     STATIC_REFRESH_INTERVAL,
 )
 from .gateway_registry import GatewayRegistry, PanGroup, RestartAction
@@ -109,14 +113,45 @@ def moon_phase_name(current_day: int) -> str:
     return _MOON_PHASE_NAMES[_moon_phase_bucket(current_day)]
 
 
-def _find_in_bluetooth_cache(hass: HomeAssistant, serial: str):
-    """The connectable BluetoothServiceInfoBleak currently advertising
-    `serial`, or None."""
+_ADVERTISEMENT_MAX_AGE_SECONDS = ADVERTISEMENT_MAX_AGE.total_seconds()
+
+
+def _find_in_bluetooth_cache(
+    hass: HomeAssistant, serial: str, max_age: Optional[float] = _ADVERTISEMENT_MAX_AGE_SECONDS,
+):
+    """The connectable BluetoothServiceInfoBleak most recently advertising
+    `serial`, or None. Only advertisements received within `max_age`
+    seconds count (ADVERTISEMENT_MAX_AGE; None: any age): Home Assistant
+    keeps a device's last advertisement for minutes after it is gone, and
+    connecting to such an entry fails only after a long timeout."""
+    now = bluetooth.MONOTONIC_TIME()
+    newest, newest_time = None, None
     for info in bluetooth.async_discovered_service_info(hass, connectable=True):
         parsed = parse_advertisement(info.manufacturer_data)
-        if parsed and parsed.serial == serial:
-            return info
-    return None
+        if not parsed or parsed.serial != serial:
+            continue
+        received = info.time if isinstance(info.time, (int, float)) else None
+        if max_age is not None and received is not None and now - received > max_age:
+            continue
+        if newest is None or (received is not None and (newest_time is None or received > newest_time)):
+            newest, newest_time = info, received
+    return newest
+
+
+def advertising_rssi(hass: HomeAssistant, serial: str) -> Optional[int]:
+    """RSSI of `serial`'s advertisement if it is advertising now (see
+    _find_in_bluetooth_cache()), else None. Also None when the Bluetooth
+    cache can't be read."""
+    try:
+        info = _find_in_bluetooth_cache(hass, serial)
+    except Exception:
+        return None
+    return info.rssi if info is not None else None
+
+
+def is_advertising(hass: HomeAssistant, serial: str) -> bool:
+    """Whether `serial` advertised within ADVERTISEMENT_MAX_AGE."""
+    return advertising_rssi(hass, serial) is not None
 
 
 def advertised_as_bluetooth_only(hass: HomeAssistant, serial: str) -> Optional[bool]:
@@ -126,7 +161,7 @@ def advertised_as_bluetooth_only(hass: HomeAssistant, serial: str) -> Optional[b
     in the cache, or when the cache can't be read (a poll doesn't depend
     on this lookup)."""
     try:
-        info = _find_in_bluetooth_cache(hass, serial)
+        info = _find_in_bluetooth_cache(hass, serial, max_age=None)
     except Exception:
         return None
     parsed = parse_advertisement(info.manufacturer_data) if info is not None else None
@@ -173,6 +208,69 @@ async def _resolve_connectable_ble_device(hass: HomeAssistant, serial: str):
     return ble_device
 
 
+class DeviceNotAdvertising(UpdateFailed):
+    """The device isn't advertising (powered off or out of Bluetooth range),
+    so there is nothing to connect to."""
+
+
+class GatewayReplaced(UpdateFailed):
+    """A connection was requested from a gateway connection that has been
+    replaced by another gateway's."""
+
+
+class GatewayDown(UpdateFailed):
+    """A relayed poll was skipped because the gateway isn't connected; the
+    gateway's own poll reconnects it."""
+
+
+class DeviceAbsent(UpdateFailed):
+    """The poll was skipped because the device is absent (see
+    MobiusDeviceCoordinator._is_absent())."""
+
+
+def _is_missing_characteristic(err: BaseException) -> bool:
+    """Whether `err` (or its cause) is a Mobius characteristic missing from
+    the connected device's services, which a stale BlueZ service cache
+    causes."""
+    while err is not None:
+        if isinstance(err, BleakCharacteristicNotFoundError) or (
+            "Characteristic" in str(err) and "was not found" in str(err)
+        ):
+            return True
+        err = err.__cause__
+    return False
+
+
+async def _connect(ble_device, serial: Optional[str]) -> MobiusDevice:
+    """
+    A connected MobiusDevice for `ble_device`. When the Mobius
+    characteristics are missing after connecting, the adapter's cached
+    services for the address are out of date (seen with a local BlueZ
+    adapter): the cache is cleared and the connection tried once more.
+    Clearing only works for local BlueZ adapters; through a proxy the
+    second attempt meets the same cache.
+    """
+    device = MobiusDevice(ble_device, serial=serial, connect_timeout=CONNECT_TIMEOUT)
+    try:
+        await device.connect()
+        return device
+    except Exception as err:
+        if not _is_missing_characteristic(err):
+            raise
+        cleared = False
+        with contextlib.suppress(Exception):
+            cleared = await clear_bluez_service_cache(ble_device.address)
+        _LOGGER.info(
+            "%s (%s): the Mobius characteristics were missing after connecting -- %s and "
+            "connecting once more", serial or ble_device.address, ble_device.address,
+            "cleared the adapter's cached services" if cleared
+            else "couldn't clear the cached services (not a local BlueZ adapter?)",
+        )
+    device = MobiusDevice(ble_device, serial=serial, connect_timeout=CONNECT_TIMEOUT)
+    await device.connect()
+    return device
+
+
 async def _with_temporary_connection(
     hass: HomeAssistant, serial: str, semaphore: asyncio.Semaphore,
     action: Callable[[MobiusDevice], Awaitable[_T]], what: str,
@@ -192,8 +290,12 @@ async def _with_temporary_connection(
         return None
     try:
         async with semaphore:
-            async with MobiusDevice(ble_device, connect_timeout=CONNECT_TIMEOUT) as mdevice:
+            mdevice = await _connect(ble_device, None)
+            try:
                 return await action(mdevice)
+            finally:
+                with contextlib.suppress(Exception):
+                    await mdevice.disconnect()
     except Exception as err:
         _LOGGER.debug("%s failed for %s: %s", what, serial, err)
         return None
@@ -319,6 +421,21 @@ class MobiusConnectionManager:
         # Coordinators relaying through this gateway must not reconnect it
         # concurrently.
         self._lock = asyncio.Lock()
+        # Set when another gateway replaces this one (GatewayRegistry.
+        # _assign_gateway()): no more connection attempts, so work started
+        # for the old gateway doesn't keep trying a device that is gone.
+        self.retired = False
+        # time.monotonic() since when the device has been disconnected (no
+        # connection yet, or a connection that was lost); None while
+        # connected.
+        self._lost_since: Optional[float] = time.monotonic()
+
+    def lost_for(self) -> float:
+        """Seconds since the connection was lost (or since this manager was
+        created, before a first connection); 0 while connected."""
+        if self.is_connected or self._lost_since is None:
+            return 0.0
+        return time.monotonic() - self._lost_since
 
     @property
     def is_connected(self) -> bool:
@@ -331,9 +448,15 @@ class MobiusConnectionManager:
         """The BLEDevice currently advertising self.serial, or None."""
         return await _resolve_connectable_ble_device(self.hass, self.serial)
 
+    def _raise_if_retired(self) -> None:
+        if self.retired:
+            raise GatewayReplaced(f"{self.serial} is no longer the gateway -- not reconnecting it")
+
     def mark_disconnected(self) -> None:
         """Forces the next ensure_connected() to reconnect, for when a read
         failed while the client may still report being connected."""
+        if self._device is not None and self._lost_since is None:
+            self._lost_since = time.monotonic()
         self._device = None
 
     async def ensure_connected(self, acquire_semaphore: bool = True) -> MobiusDevice:
@@ -343,16 +466,20 @@ class MobiusConnectionManager:
         shared connection semaphore."""
         if self.is_connected:
             return self._device
+        if self._lost_since is None:
+            self._lost_since = time.monotonic()
+        self._raise_if_retired()
 
         async with self._lock:
             # Another coordinator may have reconnected while we waited.
             if self.is_connected:
                 return self._device
+            self._raise_if_retired()
 
             _LOGGER.debug("%s needs a fresh connection -- resolving its current address", self.serial)
             ble_device = await self._resolve_current_ble_device()
             if ble_device is None:
-                raise UpdateFailed(
+                raise DeviceNotAdvertising(
                     f"No device currently advertising serial {self.serial!r} was "
                     "found in Home Assistant's Bluetooth cache"
                 )
@@ -366,12 +493,10 @@ class MobiusConnectionManager:
                         "(MAX_CONCURRENT_CONNECTIONS reached)",
                         self.serial, semaphore_wait_seconds,
                     )
-                new_device = MobiusDevice(
-                    ble_device, serial=self.serial, connect_timeout=CONNECT_TIMEOUT
-                )
+                self._raise_if_retired()
                 connect_start = time.monotonic()
                 try:
-                    await new_device.connect()
+                    new_device = await _connect(ble_device, self.serial)
                 except Exception as err:
                     _LOGGER.debug(
                         "%s connection attempt failed after %.1fs: %s",
@@ -385,6 +510,7 @@ class MobiusConnectionManager:
                 )
 
             self._device = new_device
+            self._lost_since = None
             return self._device
 
     async def disconnect(self) -> None:
@@ -395,6 +521,8 @@ class MobiusConnectionManager:
             except Exception as err:
                 _LOGGER.debug("Disconnecting %s raised (ignored, tearing down anyway): %s", self.serial, err)
             self._device = None
+            if self._lost_since is None:
+                self._lost_since = time.monotonic()
 
 
 # Firmware labels tried, in order, for the device's sw_version. "Firmware"
@@ -696,6 +824,9 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # A failed poll was followed by a small read that answered (see
         # _answers_small_read()); logged once per streak of such polls.
         self._reachable_but_poll_failing = False
+        # Powered off or gone: not polled until seen again (see
+        # _is_absent()).
+        self.absent = False
         # Read on the first successful poll; neither changes for a device.
         self._primitive_type: Optional[PrimitiveType] = None
         self._model: Optional[Model] = None
@@ -896,8 +1027,64 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["mesh_last_seen_at"] = None
         return data
 
+    def _is_absent(self) -> bool:
+        """
+        Whether this device is absent (powered off or gone):
+        - Bluetooth-only: not advertising (ADVERTISEMENT_MAX_AGE) and not
+          connected.
+        - On the mesh, other than the gateway: missing from the last mesh
+          peer list and not advertising (GatewayRegistry.is_absent()).
+        The gateway itself is never absent here: a gateway that is gone is
+        replaced (see record_gateway_failure(gone=True)).
+        """
+        if self.bluetooth_only:
+            return not self.direct_connection.is_connected and not is_advertising(self.hass, self.serial)
+        group = self.registry.group(self.pan_id)
+        if group is None or group.gateway_serial == self.serial:
+            return False
+        return self.registry.is_absent(self.pan_id, self.serial)
+
+    def _set_absent(self, absent: bool, reason: str) -> None:
+        if absent == self.absent:
+            return
+        self.absent = absent
+        if absent:
+            _LOGGER.info(
+                "%s is absent (%s) -- powered off or out of range; not polling it until it's "
+                "seen again", self.serial, reason,
+            )
+            group = self.registry.group(self.pan_id)
+            member = group.members.get(self.serial) if group is not None else None
+            if member is not None:
+                member.consecutive_relay_failures = 0
+        else:
+            _LOGGER.info("%s is back (%s) -- polling it again", self.serial, reason)
+
+    @callback
+    def async_seen_advertising(self) -> None:
+        """An advertisement of this device was received: an absent device is
+        polled again right away, and the tank's mesh peer list is read at
+        its next check."""
+        if not self.absent:
+            return
+        self._set_absent(False, "advertising")
+        if not self.bluetooth_only:
+            self._request_mesh_peer_read()
+        self.hass.async_create_task(self.async_request_refresh())
+
+    def _request_mesh_peer_read(self) -> None:
+        """Makes the tank's next check (within TANK_REVALIDATION_INTERVAL)
+        read the mesh peer list."""
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        if runtime is not None and hasattr(runtime, "last_mesh_refresh"):
+            runtime.last_mesh_refresh = None
+
     async def _fetch(self) -> dict[str, Any]:
         await self._check_bluetooth_only()
+        if self._is_absent():
+            self._set_absent(True, "not advertising" if self.bluetooth_only else "not on the mesh and not advertising")
+            raise DeviceAbsent(f"{self.serial} is absent (powered off or out of range) -- not polling it")
+        self._set_absent(False, "present")
         if self.bluetooth_only:
             return await self._fetch_direct()
         group = self.registry.group(self.pan_id)
@@ -907,6 +1094,14 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         is_gateway = group.gateway_serial == self.serial
+        if not is_gateway and not group.gateway_connection.is_connected:
+            # Only the gateway's own poll reconnects it: relayed polls
+            # reconnecting a gateway that is gone would each wait for the
+            # scan and connection timeouts, holding the connection slot.
+            raise GatewayDown(
+                f"gateway {group.gateway_serial!r} isn't connected -- skipping this poll "
+                "(the gateway's own poll reconnects it)"
+            )
         # The gateway state this fetch acts on. A read through a torn-down
         # connection only fails at its timeout, possibly after another
         # gateway was promoted; such a failure is not recorded against the
@@ -975,7 +1170,17 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # The connection may have dropped after ensure_connected()
                 # succeeded; force a reconnect on the next poll.
                 group.gateway_connection.mark_disconnected()
-                await self.registry.record_gateway_failure(self.pan_id, expected_generation)
+                gone = (
+                    isinstance(err, DeviceNotAdvertising)
+                    and group.gateway_connection.lost_for() >= GATEWAY_GONE_AFTER.total_seconds()
+                )
+                await self.registry.record_gateway_failure(self.pan_id, expected_generation, gone=gone)
+            elif isinstance(err, (GatewayReplaced, GatewayDown)) or not group.gateway_connection.is_connected:
+                # The gateway connection failed, not the relay to this
+                # device: the gateway's own poll deals with that.
+                _LOGGER.debug(
+                    "%s: not counting this failure -- gateway %r isn't connected", self.serial, group.gateway_serial,
+                )
             elif await self._answers_small_read(group):
                 # Reachable: the poll failed for another reason (a reply
                 # too large to relay, for example), which a restart can't
@@ -986,6 +1191,13 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "not counting it as unreachable", self.serial, group.gateway_serial, err,
                 )
                 self._reachable_but_poll_failing = True
+            elif not self._failure_counts(group):
+                _LOGGER.debug(
+                    "%s isn't advertising and the mesh peer list is too old to tell whether it's "
+                    "still on the mesh -- not counting this failure; reading the peer list at the "
+                    "next tank check", self.serial,
+                )
+                self._request_mesh_peer_read()
             else:
                 # May be specific to this target, so the shared connection is
                 # left alone; the failure counts towards
@@ -1004,6 +1216,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         member = group.members.get(self.serial)
         data["mesh_last_seen_at"] = member.mesh_last_seen_at if member else None
         return data
+
+    def _failure_counts(self, group: PanGroup) -> bool:
+        """Whether a relayed device that didn't answer counts as failing (and
+        so towards an automatic restart): it is advertising (powered), or a
+        mesh peer list read within MESH_LIST_FRESH_FOR_FAILURES lists it (on
+        the mesh, only out of Bluetooth range). Otherwise it may be powered
+        off, which the next peer list read tells."""
+        if is_advertising(self.hass, self.serial):
+            return True
+        return (
+            group.mesh_read_at is not None and group.mesh_serials is not None
+            and time.monotonic() - group.mesh_read_at < MESH_LIST_FRESH_FOR_FAILURES.total_seconds()
+            and self.serial in group.mesh_serials
+        )
 
     async def _answers_small_read(self, group: PanGroup) -> bool:
         """Whether this relayed device answers a small read (its Model)

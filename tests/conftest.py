@@ -36,3 +36,15 @@ _ensure_component_symlinked()
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Make Home Assistant's test harness discover custom_components/mobius."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def every_device_advertising(request):
+    """Tests run without Bluetooth advertisements. Unless a test is marked
+    `no_advertisements` (or patches is_advertising itself), every device
+    counts as advertising, so none is ever treated as absent."""
+    if request.node.get_closest_marker("no_advertisements"):
+        yield
+        return
+    with patch("custom_components.mobius.coordinator.is_advertising", return_value=True):
+        yield

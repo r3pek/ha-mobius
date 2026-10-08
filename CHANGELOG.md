@@ -4,6 +4,13 @@
 
 - Fixed a deprecation warning about `DeviceEntry.config_entries`.
 - Requires Home Assistant 2026.8.0 or newer.
+- A gateway that is powered off or out of range is replaced within about a
+  minute, by a device that is advertising.
+- Devices that are powered off are no longer polled or restarted; they are
+  polled again as soon as they advertise.
+- A failing gateway no longer causes failures (and restarts) of the other
+  devices.
+- Connecting retries once after clearing a stale Bluetooth service cache.
 
 ## 0.10.3
 

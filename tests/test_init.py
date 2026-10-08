@@ -11,7 +11,7 @@ including the gateway, synthetic tank device registration).
 import asyncio
 import logging
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 from homeassistant.const import CONF_ADDRESS
@@ -646,6 +646,11 @@ async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(
     ), patch(
         "custom_components.mobius.coordinator.MobiusConnectionManager.ensure_connected",
         AsyncMock(return_value=fake_pump_device),
+    ), patch(
+        # The patched ensure_connected() doesn't open a connection; relayed
+        # polls and the tank check need the gateway connected.
+        "custom_components.mobius.coordinator.MobiusConnectionManager.is_connected",
+        new_callable=PropertyMock, return_value=True,
     ), patch(
         "custom_components.mobius.coordinator.RelayedMobiusDevice", return_value=MagicMock(),
     ), patch(

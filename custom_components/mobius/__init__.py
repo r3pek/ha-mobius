@@ -12,7 +12,7 @@ from typing import Optional
 from homeassistant.components import bluetooth, persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, CoreState, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant, CoreState, EVENT_HOMEASSISTANT_STARTED, callback
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -29,7 +29,8 @@ from .const import (
     SOFT_REFRESH_RETRY_DELAY, MESH_PEER_REFRESH_INTERVAL,
 )
 from .coordinator import (
-    MobiusDeviceCoordinator, _find_in_bluetooth_cache, advertised_as_bluetooth_only, async_tank_broadcast,
+    MobiusDeviceCoordinator, _find_in_bluetooth_cache, advertised_as_bluetooth_only, advertising_rssi,
+    async_tank_broadcast,
     discover_mesh_address, discover_tank_for_serial,
 )
 from .gateway_registry import GatewayRegistry, PanGroup
@@ -121,11 +122,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
-def _current_rssi(hass: HomeAssistant, serial: str) -> int | None:
-    """RSSI of the advertisement currently carrying `serial`, if any (used
-    for gateway election)."""
-    info = _find_in_bluetooth_cache(hass, serial)
-    return info.rssi if info is not None else None
+# RSSI of `serial`'s advertisement if it is advertising now (used for the
+# gateway election).
+_current_rssi = advertising_rssi
 
 
 def _single_device_notification_id(entry: ConfigEntry) -> str:
@@ -287,29 +286,42 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     ):
         return
 
-    # A connected device doesn't advertise, so the cache is only checked
-    # while the gateway is disconnected.
-    if not group.gateway_connection.is_connected and _find_in_bluetooth_cache(hass, group.gateway_serial) is None:
+    # The gateway this check reads through, named in its log lines even if
+    # another gateway is promoted meanwhile.
+    gateway_serial, gateway_connection = group.gateway_serial, group.gateway_connection
+
+    # Only the gateway's own poll reconnects it (a gateway that is gone is
+    # replaced there); the peer list is read at the next check.
+    if not gateway_connection.is_connected:
+        # A connected device doesn't advertise, so the cache only tells
+        # something while the gateway is disconnected.
+        if _find_in_bluetooth_cache(hass, gateway_serial) is None:
+            _LOGGER.debug(
+                "Tank %r's own gateway %r isn't currently connected, and isn't advertising "
+                "either -- requesting an active scan", entry.title, gateway_serial,
+            )
+            await bluetooth.async_request_active_scan(hass)
         _LOGGER.debug(
-            "Tank %r's own gateway %r isn't currently connected, and wasn't found "
-            "in Home Assistant's Bluetooth cache either -- requesting an active scan",
-            entry.title, group.gateway_serial,
+            "Tank %r: gateway %r isn't connected -- reading the mesh peer list at the next "
+            "check", entry.title, gateway_serial,
         )
-        await bluetooth.async_request_active_scan(hass)
+        return
 
     try:
-        mdevice = await group.gateway_connection.ensure_connected()
+        mdevice = await gateway_connection.ensure_connected()
         # raise_errors: a failed read must not look like an empty mesh.
         peers = await mdevice.discover_mesh_peers_auto(raise_errors=True)
     except Exception as err:
         _LOGGER.debug(
             "Tank revalidation for %r: reading the mesh peer list from gateway %r failed "
             "(retried at the next check, in %s): %s",
-            entry.title, group.gateway_serial, TANK_REVALIDATION_INTERVAL, err or type(err).__name__,
+            entry.title, gateway_serial, TANK_REVALIDATION_INTERVAL, err or type(err).__name__,
         )
         return
+    read_at = time.monotonic()
     if runtime is not None:
-        runtime.last_mesh_refresh = time.monotonic()
+        runtime.last_mesh_refresh = read_at
+    registry.update_mesh_peers(pan_id, {p.serial for p in peers}, read_at)
 
     known_serials = {d[CONF_SERIAL] for d in known_devices}
     now_utc = dt_util.utcnow()
@@ -590,6 +602,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             TANK_REVALIDATION_INTERVAL,
         )
     )
+    # An advertisement of an absent device gets it polled again right away
+    # (MobiusDeviceCoordinator.async_seen_advertising()).
+    _async_watch_advertisements(hass, entry, coordinators)
     # The clock is checked after every poll of any device of the tank.
     for coordinator in coordinators.values():
         entry.async_on_unload(
@@ -598,6 +613,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+# The manufacturer IDs Mobius devices advertise with (manifest.json's
+# "bluetooth" matchers).
+_ADVERTISEMENT_MANUFACTURER_IDS = (514, 1)
+
+
+def _async_watch_advertisements(
+    hass: HomeAssistant, entry: ConfigEntry, coordinators: dict[str, MobiusDeviceCoordinator],
+) -> None:
+    """Passes each advertisement of one of the entry's devices to its
+    coordinator, until the entry is unloaded."""
+
+    @callback
+    def _on_advertisement(service_info, _change) -> None:
+        parsed = parse_advertisement(service_info.manufacturer_data)
+        coordinator = coordinators.get(parsed.serial) if parsed is not None else None
+        if coordinator is not None:
+            coordinator.async_seen_advertising()
+
+    for manufacturer_id in _ADVERTISEMENT_MANUFACTURER_IDS:
+        entry.async_on_unload(
+            bluetooth.async_register_callback(
+                hass, _on_advertisement, {"manufacturer_id": manufacturer_id},
+                bluetooth.BluetoothScanningMode.PASSIVE,
+            )
+        )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

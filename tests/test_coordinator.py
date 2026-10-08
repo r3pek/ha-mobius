@@ -202,6 +202,12 @@ def _make_fake_light_device():
     return device
 
 
+def _mark_gateway_connected(group) -> None:
+    """Relayed polls are skipped while the gateway isn't connected; tests
+    that stub ensure_connected() mark it connected."""
+    group.gateway_connection._device = MagicMock(is_connected=True)
+
+
 def _make_registry(hass) -> GatewayRegistry:
     semaphore = asyncio.Semaphore(2)
     return GatewayRegistry(hass, semaphore, election_settle_seconds=0.01)
@@ -1591,6 +1597,7 @@ async def test_relayed_coordinator_uses_cached_mesh_address(hass):
     fake_gateway_device = MagicMock()
     fake_relayed_device = _make_fake_pump_device()
     group = registry.group(PAN_ID)
+    _mark_gateway_connected(group)
 
     with patch.object(
         group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
@@ -1623,6 +1630,7 @@ async def test_relayed_coordinator_discovers_address_on_demand_when_not_cached(h
     fake_gateway_device = MagicMock()
     fake_relayed_device = _make_fake_pump_device()
     group = registry.group(PAN_ID)
+    _mark_gateway_connected(group)
 
     with patch.object(
         group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
@@ -1681,6 +1689,7 @@ async def test_relayed_coordinator_failure_does_not_touch_gateway_connection_sta
     broken_relayed_device = MagicMock()
     broken_relayed_device.get_device_info = AsyncMock(side_effect=IOError("relay failed"))
     group = registry.group(PAN_ID)
+    _mark_gateway_connected(group)
 
     with patch.object(
         group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
@@ -1712,6 +1721,7 @@ async def test_relayed_coordinator_success_resets_its_own_relay_failure_count(ha
     fake_gateway_device = MagicMock()
     fake_relayed_device = _make_fake_pump_device()
     group = registry.group(PAN_ID)
+    _mark_gateway_connected(group)
 
     with patch.object(
         group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_gateway_device),
@@ -2181,8 +2191,15 @@ class TestDiscoverMeshAddressSemaphore:
         concurrent_count = {"current": 0, "max_seen": 0}
 
         class FakeMobiusDevice:
-            def __init__(self, ble_device, connect_timeout=None):
+            def __init__(self, ble_device, serial=None, connect_timeout=None):
                 pass
+
+            async def connect(self):
+                await self.__aenter__()
+
+            async def disconnect(self):
+                if hasattr(self, "__aexit__"):
+                    await self.__aexit__(None, None, None)
 
             async def __aenter__(self):
                 concurrent_count["current"] += 1
@@ -2223,8 +2240,15 @@ class TestDiscoverMeshAddressSemaphore:
         concurrent_count = {"current": 0, "max_seen": 0}
 
         class FakeMobiusDevice:
-            def __init__(self, ble_device, connect_timeout=None):
+            def __init__(self, ble_device, serial=None, connect_timeout=None):
                 pass
+
+            async def connect(self):
+                await self.__aenter__()
+
+            async def disconnect(self):
+                if hasattr(self, "__aexit__"):
+                    await self.__aexit__(None, None, None)
 
             async def __aenter__(self):
                 concurrent_count["current"] += 1
@@ -2292,8 +2316,15 @@ class TestDiscoverTankForSerial:
         )
 
         class FakeMobiusDevice:
-            def __init__(self, ble_device, connect_timeout=None):
+            def __init__(self, ble_device, serial=None, connect_timeout=None):
                 pass
+
+            async def connect(self):
+                await self.__aenter__()
+
+            async def disconnect(self):
+                if hasattr(self, "__aexit__"):
+                    await self.__aexit__(None, None, None)
 
             async def __aenter__(self):
                 return self
@@ -2351,8 +2382,15 @@ class TestDiscoverTankForSerial:
         semaphore = asyncio.Semaphore(1)
 
         class FailingMobiusDevice:
-            def __init__(self, ble_device, connect_timeout=None):
+            def __init__(self, ble_device, serial=None, connect_timeout=None):
                 pass
+
+            async def connect(self):
+                await self.__aenter__()
+
+            async def disconnect(self):
+                if hasattr(self, "__aexit__"):
+                    await self.__aexit__(None, None, None)
 
             async def __aenter__(self):
                 raise IOError("could not connect")
@@ -2382,8 +2420,15 @@ class TestDiscoverTankForSerial:
         concurrent_count = {"current": 0, "max_seen": 0}
 
         class FakeMobiusDevice:
-            def __init__(self, ble_device, connect_timeout=None):
+            def __init__(self, ble_device, serial=None, connect_timeout=None):
                 pass
+
+            async def connect(self):
+                await self.__aenter__()
+
+            async def disconnect(self):
+                if hasattr(self, "__aexit__"):
+                    await self.__aexit__(None, None, None)
 
             async def __aenter__(self):
                 concurrent_count["current"] += 1
@@ -2447,6 +2492,7 @@ async def test_relayed_coordinator_picks_up_mesh_last_seen_from_registry(hass):
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)  # becomes gateway
     await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-90)
     group = registry.group(PAN_ID)
+    _mark_gateway_connected(group)
     known_last_seen = dt_util.utcnow() - timedelta(seconds=42)
     registry.update_mesh_last_seen(PAN_ID, LIGHT_SERIAL, known_last_seen)
     registry.update_mesh_address(PAN_ID, LIGHT_SERIAL, b"\xfd" + b"\x00" * 15)
@@ -2550,6 +2596,7 @@ async def _tank_with_relayed_pump(hass):
     await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-80, prefer_as_gateway=True)
     await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
     registry.update_mesh_address(PAN_ID, PUMP_SERIAL, MESH_ADDRESS)
+    _mark_gateway_connected(registry.group(PAN_ID))
     return registry, registry.group(PAN_ID)
 
 

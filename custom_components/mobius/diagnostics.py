@@ -74,7 +74,8 @@ def _bluetooth_cache_snapshot(hass: HomeAssistant, serial: str, now: float) -> d
     rotate several) can't be matched: "not found" means not identifiable
     right now.
     """
-    info = _find_in_bluetooth_cache(hass, serial)
+    # Any age: the age is part of the snapshot.
+    info = _find_in_bluetooth_cache(hass, serial, max_age=None)
     if info is None:
         return {"found_by_serial": False}
     return {

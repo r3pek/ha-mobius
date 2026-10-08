@@ -10,21 +10,27 @@ membership and which member is the gateway.
 ## Gateway selection
 
 A new group waits GATEWAY_ELECTION_SETTLE_SECONDS for members to join and
-then picks the one with the best RSSI. Members with a K32W radio are only
+then picks the one with the best RSSI, preferring members advertising now
+(by their current RSSI) and skipping absent ones (see _best_candidate()
+and is_absent()). Members with a K32W radio are only
 picked when no other member is available, as the app does when choosing
 which device of a tank to connect to. A member's radio type is known after
 its first successful poll (update_radio_type()); until then it counts as
 not K32W. A member that joins later never
 replaces a working gateway; only GATEWAY_FAILURE_THRESHOLD consecutive
-gateway failures, the gateway leaving the group, or (with automatic
+gateway failures, a gateway that is gone (disconnected and not advertising
+for GATEWAY_GONE_AFTER, replaced at once), the gateway leaving the group,
+or (with automatic
 restarts disabled) RELAY_FAILURE_THRESHOLD failed relays to one target
 change it.
 
 ## Failover
 
-A failing gateway is replaced by the best-RSSI member that hasn't failed as
-gateway in the current round (recently_failed_gateways), and becomes a
-relayed member. When every member has failed once, a new round starts. A
+A failing gateway is replaced by the best member (as above) that hasn't
+failed as gateway in the current round (recently_failed_gateways), and
+becomes a relayed member. Its connection manager is retired, so work
+started for it stops reconnecting it, and every member's relay failure
+count starts over. When every member has failed once, a new round starts. A
 group with no other member is left without a gateway.
 
 ## Automatic restarts
@@ -171,6 +177,10 @@ class PanGroup:
     restart_step: int = 0
     last_relay_failure_at: Optional[datetime] = None
     restart_lockout_until: Optional[datetime] = None
+    # Serials in the last mesh peer list read successfully through the
+    # gateway, and when (time.monotonic()); None before the first read.
+    mesh_serials: Optional[set[str]] = None
+    mesh_read_at: Optional[float] = None
     _electing: bool = False
     _gateway_elected: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -272,17 +282,69 @@ class GatewayRegistry:
             group._gateway_elected.set()
 
     def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:
-        """The member with the highest known RSSI (excluding exclude_serials, and
-        K32W members while any other remains; see member_rssi_items()), or
-        the first of them if none has an RSSI.
         """
-        candidates = group.member_rssi_items(exclude_serials=exclude_serials)
-        if not candidates:
-            return None
-        with_rssi = [c for c in candidates if c[1] is not None]
-        if with_rssi:
-            return max(with_rssi, key=lambda c: c[1])[0]
-        return candidates[0][0]
+        The member to make gateway, excluding exclude_serials:
+
+        1. Among members advertising now, the one with the best current
+           RSSI. A member that isn't advertising can't be connected to.
+        2. Else among members that aren't absent (is_absent()), the best
+           RSSI known.
+        3. Else among all of them, the same way.
+
+        In each, K32W members are only picked when no other is left (see
+        member_rssi_items()).
+        """
+        # Imported here: coordinator.py imports this module.
+        from .coordinator import advertising_rssi
+
+        excluded = exclude_serials or set()
+        remaining = [serial for serial in group.members if serial not in excluded]
+        live = {serial: advertising_rssi(self.hass, serial) for serial in remaining}
+        advertising = {serial for serial, rssi in live.items() if rssi is not None}
+        present = {serial for serial in remaining if not self._absent(group, serial, serial in advertising)}
+
+        for tier, use_live_rssi in ((advertising, True), (present, False), (set(remaining), False)):
+            if not tier:
+                continue
+            candidates = group.member_rssi_items(exclude_serials=set(group.members) - tier)
+            if use_live_rssi:
+                candidates = [(serial, live[serial]) for serial, _stored in candidates]
+            with_rssi = [c for c in candidates if c[1] is not None]
+            if with_rssi:
+                return max(with_rssi, key=lambda c: c[1])[0]
+            return candidates[0][0]
+        return None
+
+    @staticmethod
+    def _absent(group: PanGroup, serial: str, advertising: bool) -> bool:
+        """See is_absent()."""
+        if advertising or group.mesh_serials is None:
+            return False
+        if group.gateway_serial == serial and group.gateway_connection is not None and group.gateway_connection.is_connected:
+            return False
+        return serial not in group.mesh_serials
+
+    def is_absent(self, pan_id: int, serial: str) -> bool:
+        """
+        Whether `serial` is absent: missing from the last mesh peer list
+        read successfully and not advertising (ADVERTISEMENT_MAX_AGE).
+        Either alone isn't enough: a device out of Bluetooth range keeps
+        working through the mesh, and a peer list can miss a device that
+        still advertises. False before the first peer list read.
+        """
+        from .coordinator import is_advertising
+
+        group = self._groups.get(pan_id)
+        if group is None:
+            return False
+        return self._absent(group, serial, is_advertising(self.hass, serial))
+
+    def update_mesh_peers(self, pan_id: int, serials: set[str], read_at: float) -> None:
+        """Stores the serials of a mesh peer list read successfully."""
+        group = self._groups.get(pan_id)
+        if group is not None:
+            group.mesh_serials = set(serials)
+            group.mesh_read_at = read_at
 
     def _assign_gateway(self, group: PanGroup, serial: Optional[str]) -> None:
         """Makes `serial` the gateway (None clears it), with a new connection
@@ -292,9 +354,16 @@ class GatewayRegistry:
         # Imported here: coordinator.py imports this module.
         from .coordinator import MobiusConnectionManager
 
+        if group.gateway_connection is not None:
+            # Work started for the old gateway stops reconnecting it.
+            group.gateway_connection.retired = True
         group.gateway_serial = serial
         group.consecutive_gateway_failures = 0
         group.generation += 1
+        # Relay failures counted through the old gateway say nothing about
+        # the new route.
+        for member in group.members.values():
+            member.consecutive_relay_failures = 0
         group.gateway_connection = (
             MobiusConnectionManager(self.hass, serial, self.semaphore)
             if serial is not None else None
@@ -375,10 +444,13 @@ class GatewayRegistry:
 
     async def record_gateway_failure(
         self, pan_id: int, expected_generation: int, now: Optional[datetime] = None,
+        gone: bool = False,
     ) -> bool:
         """Records a failed read of the gateway itself. After
         GATEWAY_FAILURE_THRESHOLD consecutive failures another member is promoted
-        and True is returned.
+        and True is returned. gone=True (the gateway has been disconnected and
+        not advertising for GATEWAY_GONE_AFTER) promotes another member at
+        once.
 
         expected_generation is the group.generation captured when the failing
         fetch started; if the gateway has changed since, the failure is ignored
@@ -406,6 +478,11 @@ class GatewayRegistry:
                 )
                 return False
             group.consecutive_gateway_failures += 1
+            if gone:
+                await self._promote_away_from_current_gateway(
+                    group, "is disconnected and not advertising (powered off or out of range)",
+                )
+                return True
             if group.consecutive_gateway_failures < GATEWAY_FAILURE_THRESHOLD:
                 _LOGGER.debug(
                     "Gateway %r for pan_id %#06x failed (%d/%d consecutive)",

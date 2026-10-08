@@ -8,7 +8,7 @@ project's development, for both a pump and a light.
 
 import logging
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 
@@ -496,6 +496,11 @@ async def test_mesh_address_sensor_carries_last_seen_as_an_attribute(hass):
     ), patch(
         "custom_components.mobius.discover_mesh_address",
         AsyncMock(return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")),
+    ), patch(
+        # The patched ensure_connected() doesn't open a connection; relayed
+        # polls and the tank check need the gateway connected.
+        "custom_components.mobius.coordinator.MobiusConnectionManager.is_connected",
+        new_callable=PropertyMock, return_value=True,
     ), patch(
         "custom_components.mobius.coordinator.dt_util.utcnow", return_value=frozen_now,
     ):
