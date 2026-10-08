@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a deprecation warning about `DeviceEntry.config_entries`.
+- Requires Home Assistant 2026.8.0 or newer.
+
 ## 0.10.3
 
 - A failed mesh peer list read is logged with its error (it was logged as

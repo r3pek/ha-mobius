@@ -105,7 +105,7 @@ Download `mobius.zip` from a release, extract it into
 repository's `custom_components/mobius/` works too, but the cards then
 need to be built first (see [`frontend-src/`](./frontend-src/README.md)).
 
-Requires Home Assistant 2026.7.0 or newer. `python-mobius` and
+Requires Home Assistant 2026.8.0 or newer. `python-mobius` and
 `bleak-retry-connector` are installed automatically.
 
 ## Bluetooth proxy hardware

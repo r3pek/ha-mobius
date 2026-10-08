@@ -173,9 +173,9 @@ def _is_tank_device(device_entry: dr.DeviceEntry) -> bool:
 
 def _device_runtime(hass: HomeAssistant, device_entry: dr.DeviceEntry, label: str) -> tuple[str, MobiusRuntimeData]:
     """(entry_id, runtime data) of the config entry a device belongs to."""
-    if not device_entry.config_entries:
+    entry_id = device_entry.config_entry_id
+    if not entry_id:
         raise ScheduleGroupError(_ERR.ERR_NOT_FOUND, f"{label} has no config entry")
-    entry_id = next(iter(device_entry.config_entries))
     entry = hass.config_entries.async_get_entry(entry_id)
     runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None) if entry is not None else None
     if runtime is None:

@@ -1096,3 +1096,22 @@ def test_mode_param_ranges_come_from_python_mobius():
     assert _mode_param_ranges(PumpMode.Pulse, PrimitiveType.PumpV1, Model.Nero7)["OnTime"]["min"] == 2000
     # Sync: Master (ParentSerial) has no range.
     assert set(_mode_param_ranges(PumpMode.Sync, PrimitiveType.VorTechV1, None)) == {"MaxSpeed", "PhaseShift"}
+
+
+def test_device_runtime_reads_config_entry_id_only(hass):
+    """DeviceEntry.config_entries is deprecated (removed for custom
+    integrations in Home Assistant 2027.10): the entry comes from
+    config_entry_id."""
+    from unittest.mock import MagicMock, PropertyMock
+    from custom_components.mobius.websocket_api import _device_runtime
+
+    entry, tank_device_id = _setup_tank(hass, {})
+    real_entry = dr.async_get(hass).async_get(tank_device_id)
+    device_entry = MagicMock(spec=dr.DeviceEntry)
+    device_entry.config_entry_id = real_entry.config_entry_id
+    type(device_entry).config_entries = PropertyMock(side_effect=AssertionError("deprecated"))
+
+    entry_id, runtime = _device_runtime(hass, device_entry, "Tank")
+
+    assert entry_id == entry.entry_id
+    assert runtime is entry.runtime_data

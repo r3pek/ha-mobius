@@ -1,8 +1,7 @@
-# >=0.13.344 -- the exact version this integration's own CI was
-# confirmed to first pass against (bundles homeassistant==2026.7.0
-# stable exactly) -- see hacs.json's own "homeassistant" minimum for
-# why 2026.7.0 specifically.
-pytest-homeassistant-custom-component>=0.13.344
+# >=0.13.354 -- the first release bundling homeassistant==2026.8.0
+# stable, matching hacs.json's "homeassistant" minimum: 2026.8.0 is the
+# first version with DeviceEntry.config_entry_id (websocket_api.py).
+pytest-homeassistant-custom-component>=0.13.354
 pytest-asyncio
 bleak-retry-connector>=3.0
 pyudev
