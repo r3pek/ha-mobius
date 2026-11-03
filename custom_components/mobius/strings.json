@@ -152,7 +152,7 @@
     },
     "update": {
       "firmware": {
-        "name": "Firmware"
+        "name": "Firmware update"
       }
     }
   }

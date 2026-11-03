@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Renamed the Firmware update entity from "Firmware" to "Firmware update".
+
 ## 0.11.0
 
 - Added a Firmware update entity: shows when the Mobius cloud has newer

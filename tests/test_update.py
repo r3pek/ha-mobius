@@ -15,7 +15,7 @@ from custom_components.mobius.firmware_check import FirmwareChecker, get_firmwar
 
 PAN_ID = 0x3D0F
 PUMP_SERIAL = "00000000000001"
-FIRMWARE = "update.mp40_right_firmware"
+FIRMWARE = "update.mp40_right_firmware_update"
 
 DRIVER_URL = "https://cloud.mobius.app/firmware/mobius/check?version=3.0.34&image=2&format=json"
 RADIO_URL = "https://cloud.mobius.app/firmware/mobius/check?version=2.1.36&image=10&format=json"
