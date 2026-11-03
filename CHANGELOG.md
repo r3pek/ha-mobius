@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
 - Added a Firmware update entity: shows when the Mobius cloud has newer
   firmware for a device, with its changelog. Install it with the Mobius app.
