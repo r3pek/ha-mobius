@@ -48,6 +48,7 @@ Not affiliated with or endorsed by any of these companies.
 | Local control, Fan shutdown switches; LED auto-dim timeout, Max fan speed selects | Devices that support them | |
 | Support tier, Error state, Schedule points, Firmware version, Hardware revision, Mesh address, Configured scenes | Every device | Diagnostic |
 | Reboot button | Every device | |
+| Firmware update | Devices the Mobius app updates | Checked with the Mobius cloud; install with the app |
 | Scene selection | Tank | |
 | Restart all devices and Refresh all data buttons, Time sync switch, Poll interval (10-300 s) | Tank | |
 | Gateway device, Mesh prefix | Tanks with several devices | Diagnostic |

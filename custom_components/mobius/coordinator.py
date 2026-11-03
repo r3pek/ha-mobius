@@ -59,6 +59,7 @@ from mobius import (
     parse_advertisement, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, extract_short_address, C2Attribute,
     PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
+    firmware_label,
 )
 
 from bleak.exc import BleakCharacteristicNotFoundError
@@ -733,6 +734,12 @@ async def _fetch_all(
     info["olson_tz"] = metadata.olson_tz
     info["firmware_versions"] = metadata.firmware_versions
     info["hardware_info"] = metadata.hardware_info
+    # The firmware parts the Mobius cloud is asked about (update.py).
+    info["firmware_images"] = [
+        {"label": firmware_label(image.firmware_type, model), "image_id": int(image.image_id),
+         "version": image.version}
+        for image in metadata.firmware_images
+    ]
 
     if primitive in LIGHT_PRIMITIVES:
         info["channels"] = [c.name for c in metadata.supported_channels]

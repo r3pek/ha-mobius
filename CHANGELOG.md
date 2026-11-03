@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added a Firmware update entity: shows when the Mobius cloud has newer
+  firmware for a device, with its changelog. Install it with the Mobius app.
+
 ## 0.10.4
 
 - Fixed a deprecation warning about `DeviceEntry.config_entries`.

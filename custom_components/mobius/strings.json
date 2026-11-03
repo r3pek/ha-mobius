@@ -149,6 +149,11 @@
       "running_on_battery": {
         "name": "Running on battery"
       }
+    },
+    "update": {
+      "firmware": {
+        "name": "Firmware"
+      }
     }
   }
 }

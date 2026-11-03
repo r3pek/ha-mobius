@@ -39,6 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SWITCH, Platform.SELECT, Platform.NUMBER,
+    Platform.UPDATE,
 ]
 
 # Config entries only; YAML configuration is rejected with a clear error.

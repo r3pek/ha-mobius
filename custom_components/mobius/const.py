@@ -120,6 +120,13 @@ MESH_PEER_REFRESH_INTERVAL = timedelta(minutes=5)
 # when the tank's "Refresh all data" button is pressed.
 STATIC_REFRESH_INTERVAL = timedelta(minutes=10)
 
+# How long a firmware check reply from the Mobius cloud is used before the
+# same image and version are checked again (update.py). The cloud asks for
+# an hour; firmware is released far less often. A failed check is retried
+# after FIRMWARE_RETRY_INTERVAL.
+FIRMWARE_CHECK_INTERVAL = timedelta(hours=6)
+FIRMWARE_RETRY_INTERVAL = timedelta(hours=1)
+
 # A tank's clock is set when any of its devices drifts more than this many
 # seconds from Home Assistant's clock, or reports a different time zone
 # (checked after every poll, see __init__.py's _async_check_tank_time()).
