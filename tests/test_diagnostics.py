@@ -11,7 +11,7 @@ similar issue other integrations have hit (core PR #141111).
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_MLPREFIX, CONF_DEVICES

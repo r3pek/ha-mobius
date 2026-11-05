@@ -14,21 +14,27 @@ name: Test
 
 jobs:
   test:
+    name: test (HA ${{ matrix.ha }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # hacs.json's minimum. Its test harness, the retired
+          # pytest-homeassistant-custom-component, pins Home Assistant.
+          - ha: "2026.8"
+            harness: "pytest-homeassistant-custom-component==0.13.354"
+          # The latest Home Assistant, with the harness it ships since
+          # 2026.11.
+          - ha: latest
+            harness: "pytest-homeassistant[bluetooth]"
     steps:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
       - name: Set up Python
-        # 3.14, not 3.12 -- pytest-homeassistant-custom-component>=0.13.344
-        # (see requirements_test.txt) requires it: HA itself moved to
-        # requiring Python 3.14 starting with version 2026.3.1, confirmed
-        # directly against that package's own PyPI metadata across the
-        # 0.13.316/0.13.317 boundary (>=3.13 vs >=3.14) when this
-        # constraint was first introduced. An earlier version of this
-        # workflow file was never updated to match when that constraint
-        # was added, which broke this step outright (pip cannot install a
-        # package requiring Python >=3.14 into a 3.12 environment).
+        # 3.14: Home Assistant requires it since 2026.3.1, and so do both
+        # test harnesses (see the matrix above).
         uses: https://code.forgejo.org/actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -43,7 +49,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements_test.txt
+          pip install "${{ matrix.harness }}" -r requirements_test.txt
 
       # manifest.json's own "requirements" are what Home Assistant
       # installs at runtime -- read from there rather than duplicated

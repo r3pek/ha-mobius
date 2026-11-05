@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from mobius import Tank, MetadataSnapshot
 

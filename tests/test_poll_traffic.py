@@ -5,7 +5,7 @@ from the batch, and the mesh peer list read by the tank check only."""
 import dataclasses
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from mobius import OperationState
 

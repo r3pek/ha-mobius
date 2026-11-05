@@ -15,7 +15,8 @@ import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
+from tests.common import MockConfigEntry
 
 from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute, LightPollResult
 
@@ -148,6 +149,8 @@ def _fake_light_device():
 
 
 async def test_pump_entry_setup_creates_expected_sensors(hass):
+    # The pump reports gal/h; in a metric install HA shows L/h instead.
+    hass.config.units = US_CUSTOMARY_SYSTEM
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={

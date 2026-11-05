@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNKNOWN
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from mobius import FirmwareImage, FirmwareType, ImageId, MetadataSnapshot, Tank
 

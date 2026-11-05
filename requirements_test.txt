@@ -1,7 +1,8 @@
-# >=0.13.354 -- the first release bundling homeassistant==2026.8.0
-# stable, matching hacs.json's "homeassistant" minimum: 2026.8.0 is the
-# first version with DeviceEntry.config_entry_id (websocket_api.py).
-pytest-homeassistant-custom-component>=0.13.354
+# Home Assistant's test harness isn't listed here: CI installs one per HA
+# version it tests (see .forgejo/workflows/test.yml). Locally, install
+#   pytest-homeassistant[bluetooth]                (HA 2026.11 and later)
+# or
+#   pytest-homeassistant-custom-component==0.13.354  (HA 2026.8, the minimum)
 pytest-asyncio
 bleak-retry-connector>=3.0
 pyudev

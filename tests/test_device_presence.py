@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from bleak.exc import BleakCharacteristicNotFoundError
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from custom_components.mobius import MobiusRuntimeData, _async_revalidate_tank, _async_watch_advertisements
 from custom_components.mobius.const import CONF_DEVICES, CONF_PAN_ID, CONF_SERIAL, DOMAIN, RELAY_FAILURE_THRESHOLD

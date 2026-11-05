@@ -8,6 +8,8 @@
 - Entities of every kind (switches, selects, numbers, battery and firmware
   update entities) are created once a device that wasn't ready at setup
   is read, not only sensors.
+- Tests run on Home Assistant 2026.11 (new `pytest-homeassistant` harness)
+  as well as the oldest supported version.
 
 ## 0.11.1
 

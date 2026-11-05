@@ -19,7 +19,7 @@ import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from mobius import PrimitiveType, Tank, MetadataSnapshot
 

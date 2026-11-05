@@ -156,7 +156,7 @@ serial numbers, so a passive-only proxy isn't enough.
 ```bash
 git clone https://code.r3pek.org/r3pek/ha-mobius
 cd ha-mobius
-pip install -r requirements_test.txt
+pip install "pytest-homeassistant[bluetooth]" -r requirements_test.txt
 pip install python-mobius bleak-retry-connector
 pytest tests/
 
@@ -164,7 +164,9 @@ cd frontend-src && npm install && npm test   # cards
 ```
 
 CI (`.forgejo/workflows/test.yml`) installs the runtime requirements from
-`manifest.json`.
+`manifest.json` and runs the tests on the oldest supported Home Assistant
+(2026.8, with `pytest-homeassistant-custom-component==0.13.354`) and the
+latest.
 
 ## License
 

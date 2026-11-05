@@ -6,7 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from custom_components.mobius import MobiusRuntimeData
 from custom_components.mobius.const import CONF_DEVICES, CONF_MLPREFIX, CONF_PAN_ID, CONF_SERIAL, DOMAIN

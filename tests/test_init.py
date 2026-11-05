@@ -17,7 +17,7 @@ import pytest
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from homeassistant.components.bluetooth import MONOTONIC_TIME
 
@@ -928,7 +928,7 @@ async def _setup_entry_with_devices(hass, devices):
 
 
 def _single_device_notification(hass, entry):
-    from pytest_homeassistant_custom_component.common import async_get_persistent_notifications
+    from tests.common import async_get_persistent_notifications
 
     return async_get_persistent_notifications(hass).get(f"mobius_single_device_tank_{entry.entry_id}")
 

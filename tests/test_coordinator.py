@@ -19,7 +19,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from tests.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
