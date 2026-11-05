@@ -29,7 +29,7 @@ from custom_components.mobius.websocket_api import (
     _resolve_tank_groups, _member_device_id, _resolve_member, ScheduleGroupError, PUMP_MODE_NAMES,
     handle_resolve_schedule_groups, handle_read_schedule_group,
     handle_export_schedule_group_mob, handle_parse_schedule_mob,
-    _serial_for_master_hex, _master_hex_for_serial, _translate_master_to_parent_serial,
+    _translate_master_to_parent_serial,
     _tank_active_scene, _sensor_entity_id, _scene_entity_id,
 )
 from mobius import (
@@ -627,7 +627,7 @@ async def test_read_schedule_group_unknown_device(hass):
 # Master hex <-> serial translation (Sync/EcoSmartBack's own "parent pump")
 # --------------------------------------------------------------------------
 
-async def test_serial_for_master_hex_finds_matching_device(hass):
+async def test_parent_serial_for_master_finds_matching_device(hass):
     entry, tank_device_id = _setup_tank(hass, {
         "SN1": _pump_data("Pump A"),
         "SN2": _pump_data("Pump B"),
@@ -638,19 +638,19 @@ async def test_serial_for_master_hex_finds_matching_device(hass):
     await registry.join(PAN_ID, "SN2", rssi=-50)
     registry.group(PAN_ID).members["SN2"].mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa0000000000000042")
 
-    assert _serial_for_master_hex("0000000000000042", coordinator) == "SN2"
+    assert registry.group(PAN_ID).parent_serial_for_master("0000000000000042") == "SN2"
 
 
-async def test_serial_for_master_hex_returns_none_when_unmatched(hass):
+async def test_parent_serial_for_master_returns_none_when_unmatched(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump A")})
     coordinator = entry.runtime_data.coordinators["SN1"]
     registry = coordinator.registry
     await registry.join(PAN_ID, "SN1", rssi=-50)
 
-    assert _serial_for_master_hex("ffffffffffffffff", coordinator) is None
+    assert registry.group(PAN_ID).parent_serial_for_master("ffffffffffffffff") is None
 
 
-async def test_master_hex_for_serial_returns_last_8_bytes(hass):
+async def test_master_for_parent_serial_returns_last_8_bytes(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump A"), "SN2": _pump_data("Pump B")})
     coordinator = entry.runtime_data.coordinators["SN1"]
     registry = coordinator.registry
@@ -658,10 +658,10 @@ async def test_master_hex_for_serial_returns_last_8_bytes(hass):
     await registry.join(PAN_ID, "SN2", rssi=-50)
     registry.group(PAN_ID).members["SN2"].mesh_address = bytes.fromhex("fdaaaaaaaaaaaaaa0000000000000042")
 
-    assert _master_hex_for_serial("SN2", coordinator) == "0000000000000042"
+    assert registry.group(PAN_ID).master_for_parent_serial("SN2") == "0000000000000042"
 
 
-async def test_master_hex_for_serial_returns_none_when_address_unknown(hass):
+async def test_master_for_parent_serial_returns_none_when_address_unknown(hass):
     entry, tank_device_id = _setup_tank(hass, {"SN1": _pump_data("Pump A"), "SN2": _pump_data("Pump B")})
     coordinator = entry.runtime_data.coordinators["SN1"]
     registry = coordinator.registry
@@ -669,7 +669,7 @@ async def test_master_hex_for_serial_returns_none_when_address_unknown(hass):
     await registry.join(PAN_ID, "SN2", rssi=-50)
     # SN2's own mesh_address deliberately left None (never reached yet).
 
-    assert _master_hex_for_serial("SN2", coordinator) is None
+    assert registry.group(PAN_ID).master_for_parent_serial("SN2") is None
 
 
 async def test_translate_master_to_parent_serial_mutates_pump_points(hass):

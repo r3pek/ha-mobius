@@ -21,7 +21,8 @@ from mobius import (
 
 from .const import DOMAIN
 from .coordinator import MobiusDeviceCoordinator
-from .websocket_api import _resolve_member, ScheduleGroupError, _master_hex_for_serial
+from .gateway_registry import params_with_master
+from .websocket_api import _resolve_member, ScheduleGroupError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,21 +106,15 @@ def _untranslate_parent_serial_to_master(points_dict: list[dict], coordinator: M
     """
     The reverse of websocket_api.py's _translate_master_to_parent_serial():
     replaces each point's "ParentSerial" with the "Master" hex string
-    pump_schedule_from_dict() expects, in place. Raises HomeAssistantError
-    if a parent can't be resolved to a mesh address, rather than syncing the
-    pump to the wrong device.
+    pump_schedule_from_dict() expects (params_with_master()), in place.
+    Raises HomeAssistantError if a parent can't be resolved.
     """
+    group = coordinator.registry.group(coordinator.pan_id)
     for point in points_dict:
-        params = point.get("params", {})
-        if "ParentSerial" in params:
-            parent_serial = params.pop("ParentSerial")
-            master_hex = _master_hex_for_serial(parent_serial, coordinator) if parent_serial else None
-            if master_hex is None:
-                raise HomeAssistantError(
-                    f"Can't resolve parent pump {parent_serial!r}'s own mesh address -- "
-                    f"it may not be part of this tank, or hasn't been reached yet."
-                )
-            params["Master"] = master_hex
+        try:
+            point["params"] = params_with_master(point.get("params", {}), group)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
 
 
 async def _min_group_capacity(members: list[Member], which: int) -> int | None:

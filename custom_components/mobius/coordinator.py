@@ -58,7 +58,7 @@ from mobius import (
     ConfigurationCache, MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank, is_bluetooth_only,
     parse_advertisement, discover_tank,
     LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, C2Attribute,
-    PumpParam, enum_or_none, pump_params_to_dict, support_tier, get_active_pump_block,
+    enum_or_none, pump_params_to_dict, support_tier, get_active_pump_block,
     firmware_label,
 )
 
@@ -70,7 +70,7 @@ from .const import (
     MARK_UNAVAILABLE_AFTER, MESH_LIST_FRESH_FOR_FAILURES, POLL_INTERVAL, RELAY_PROBE_TIMEOUT,
     STATIC_REFRESH_INTERVAL,
 )
-from .gateway_registry import GatewayRegistry, PanGroup, RestartAction
+from .gateway_registry import GatewayRegistry, PanGroup, RestartAction, params_with_parent_serial
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -544,19 +544,6 @@ def used_scenes(data: dict) -> list:
     return [s for s in data.get("configured_scenes") or [] if not s.is_empty]
 
 
-def _format_pump_params(params: dict, group: Optional[PanGroup]) -> dict[str, object]:
-    """Pump parameters for an attribute value (pump_params_to_dict()). The
-    Sync/EcoSmartBack Master parameter (a mesh address suffix) is replaced by
-    "ParentSerial", the serial it resolves to, like websocket_api.py does."""
-    result: dict[str, object] = {}
-    for name, value in pump_params_to_dict(params).items():
-        if name == PumpParam.Master.name and group is not None:
-            result["ParentSerial"] = group.serial_for_mesh_suffix(bytes.fromhex(value))
-        else:
-            result[name] = value
-    return result
-
-
 async def _fetch_all(
     device, cached_supported_attribute_ids=None, batch_disabled=False,
     cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
@@ -696,7 +683,7 @@ async def _fetch_all(
         block = get_active_pump_block(full_poll.pump_schedule_points, minute_of_day)
         if block:
             info["current_pump_mode"] = block.pump.mode.name
-            info["current_pump_params"] = _format_pump_params(block.pump.params, group)
+            info["current_pump_params"] = params_with_parent_serial(pump_params_to_dict(block.pump.params), group)
 
     # Supported per attribute, on any device type; None when none of the
     # four attributes is supported.

@@ -26,6 +26,7 @@ from mobius import (
 from . import MobiusRuntimeData
 from .const import DOMAIN
 from .coordinator import MobiusDeviceCoordinator, used_scenes
+from .gateway_registry import params_with_parent_serial
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -309,28 +310,6 @@ async def handle_resolve_schedule_groups(
     connection.send_result(msg["id"], {"groups": [g.as_dict() for g in groups]})
 
 
-def _serial_for_master_hex(master_hex: str, coordinator: MobiusDeviceCoordinator) -> str | None:
-    """The serial of the tank device a Sync/EcoSmartBack "Master" value
-    (hex of the last 8 bytes of the parent pump's mesh address, see
-    python-mobius 07-pump-schedule.md) refers to, or None."""
-    group = coordinator.registry.group(coordinator.pan_id)
-    if group is None:
-        return None
-    return group.serial_for_mesh_suffix(bytes.fromhex(master_hex))
-
-
-def _master_hex_for_serial(serial: str, coordinator: MobiusDeviceCoordinator) -> str | None:
-    """The reverse of _serial_for_master_hex(): the "Master" hex for the
-    pump `serial`, or None if its mesh address isn't known."""
-    group = coordinator.registry.group(coordinator.pan_id)
-    if group is None:
-        return None
-    member = group.members.get(serial)
-    if member is None or member.mesh_address is None:
-        return None
-    return member.mesh_address[-8:].hex()
-
-
 def _mode_param_names(mode: PumpMode) -> list[str]:
     """Parameter names of `mode` as the card sees them (Master is
     replaced by ParentSerial, see _translate_master_to_parent_serial())."""
@@ -349,15 +328,12 @@ def _mode_param_ranges(mode: PumpMode, primitive: PrimitiveType | None, model: M
 
 
 def _translate_master_to_parent_serial(points_dict: list[dict], coordinator: MobiusDeviceCoordinator) -> None:
-    """Replaces each point's "Master" parameter with "ParentSerial" (the
-    serial it refers to, or None), in place, so the card never deals with
-    mesh addresses. services.py's _untranslate_parent_serial_to_master()
-    is the reverse."""
+    """Replaces each point's "Master" parameter with "ParentSerial"
+    (params_with_parent_serial()), in place. services.py's
+    _untranslate_parent_serial_to_master() is the reverse."""
+    group = coordinator.registry.group(coordinator.pan_id)
     for point in points_dict:
-        params = point.get("params", {})
-        if "Master" in params:
-            master_hex = params.pop("Master")
-            params["ParentSerial"] = _serial_for_master_hex(master_hex, coordinator)
+        point["params"] = params_with_parent_serial(point.get("params", {}), group)
 
 
 def _resolve_member(hass: HomeAssistant, device_id: str) -> tuple[str, MobiusRuntimeData, MobiusDeviceCoordinator]:

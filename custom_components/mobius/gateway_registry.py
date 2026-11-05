@@ -192,14 +192,51 @@ class PanGroup:
         preferred = [m for m in members if m.radio_type != K32W_RADIO_LABEL]
         return [(m.serial, m.rssi) for m in (preferred or members)]
 
-    def serial_for_mesh_suffix(self, suffix: bytes) -> Optional[str]:
-        """The member whose mesh_address ends with `suffix` (the
-        Sync/EcoSmartBack Master parameter holds the last 8 bytes of the
-        parent pump's mesh address), or None if unknown."""
+    def parent_serial_for_master(self, master_hex: str) -> Optional[str]:
+        """The member a Sync/EcoSmartBack "Master" parameter (hex of the
+        last 8 bytes of the parent pump's mesh address) refers to, or None
+        if unknown."""
+        suffix = bytes.fromhex(master_hex)
         for serial, member in self.members.items():
             if member.mesh_address is not None and member.mesh_address[-len(suffix):] == suffix:
                 return serial
         return None
+
+    def master_for_parent_serial(self, serial: str) -> Optional[str]:
+        """The reverse of parent_serial_for_master(): the "Master" hex for
+        the pump `serial`, or None if its mesh address isn't known."""
+        member = self.members.get(serial)
+        if member is None or member.mesh_address is None:
+            return None
+        return member.mesh_address[-8:].hex()
+
+
+def params_with_parent_serial(params: dict, group: Optional[PanGroup]) -> dict:
+    """Pump parameters ({name: value}, python-mobius pump_params_to_dict())
+    with "Master" replaced by "ParentSerial", the serial it refers to (None
+    when unknown), so the UI never deals with mesh addresses."""
+    result = dict(params)
+    if "Master" in result:
+        master_hex = result.pop("Master")
+        result["ParentSerial"] = group.parent_serial_for_master(master_hex) if group is not None else None
+    return result
+
+
+def params_with_master(params: dict, group: Optional[PanGroup]) -> dict:
+    """The reverse of params_with_parent_serial(). Raises ValueError if the
+    parent can't be resolved to a mesh address, rather than syncing a pump
+    to the wrong device."""
+    result = dict(params)
+    if "ParentSerial" in result:
+        parent_serial = result.pop("ParentSerial")
+        master_hex = group.master_for_parent_serial(parent_serial) if group is not None and parent_serial else None
+        if master_hex is None:
+            raise ValueError(
+                f"Can't resolve parent pump {parent_serial!r}'s own mesh address -- "
+                f"it may not be part of this tank, or hasn't been reached yet."
+            )
+        result["Master"] = master_hex
+    return result
 
 
 class GatewayRegistry:
