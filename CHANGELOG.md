@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
+- Requires python-mobius 0.12.0.
 - Every poll, including the first, is one batched request.
 - Vectra closed-loop mode follows changes made in the app; devices the
   library can't parse keep their support note after the first poll.
