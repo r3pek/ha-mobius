@@ -17,7 +17,6 @@ from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
@@ -80,11 +79,13 @@ class MobiusRuntimeData:
     # Monotonic time of the tank check's last mesh peer list read
     # (MESH_PEER_REFRESH_INTERVAL).
     last_mesh_refresh: Optional[float] = None
-    # Set by sensor.py's async_setup_entry(); used by
-    # _async_ensure_sensors_exist().
-    sensor_add_entities: Optional[AddEntitiesCallback] = None
-    sensor_device_infos: dict[str, DeviceInfo] = field(default_factory=dict)
-    created_sensor_unique_ids: set[str] = field(default_factory=set)
+    # Per-device entities of every platform (entity.py's
+    # async_add_device_entities()): (add_entities, build) per platform, the
+    # devices' DeviceInfo and the unique_ids created so far, for
+    # async_add_missing_device_entities().
+    entity_builders: list = field(default_factory=list)
+    device_infos: dict[str, DeviceInfo] = field(default_factory=dict)
+    created_unique_ids: set[str] = field(default_factory=set)
 
 
 def _shared_state(hass: HomeAssistant) -> tuple[asyncio.Semaphore, GatewayRegistry]:
@@ -191,53 +192,11 @@ def _entry_group(hass: HomeAssistant, entry: ConfigEntry) -> Optional[tuple[Gate
     return None if group is None else (registry, pan_id, group)
 
 
-async def _async_ensure_sensors_exist(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """
-    Creates type-specific sensors that are missing.
-
-    sensor.py decides which pump or light sensors to create from each
-    device's data at setup. A relayed device's first read is non-blocking
-    and can fail, in which case its type-specific sensors are not created
-    at setup. This compares the entities each device's current data would
-    produce with the ones already created (by unique_id) and adds the
-    missing ones. Runs on every tank revalidation.
-
-    Switches and selects (switch.py/select.py) are not covered.
-    """
-    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
-    if runtime is None or runtime.sensor_add_entities is None:
-        return
-
-    # Imported here: sensor.py imports from this module.
-    from .sensor import _build_type_specific_entities
-
-    new_entities = []
-    for serial, coordinator in runtime.coordinators.items():
-        device_info = runtime.sensor_device_infos.get(serial)
-        data = coordinator.data or {}
-        support = data.get("support", "")
-        if device_info is None or not support:
-            continue
-        candidates = _build_type_specific_entities(coordinator, serial, device_info, support, data)
-        missing = [e for e in candidates if e.unique_id not in runtime.created_sensor_unique_ids]
-        if missing:
-            new_entities += missing
-            runtime.created_sensor_unique_ids.update(e.unique_id for e in missing)
-
-    if new_entities:
-        _LOGGER.debug(
-            "%r: creating %d sensor(s) that were missed at setup (that "
-            "device's own data wasn't ready yet at that exact moment): %s",
-            entry.title, len(new_entities), [e.unique_id for e in new_entities],
-        )
-        runtime.sensor_add_entities(new_entities)
-
-
 async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=None) -> None:
     """
     Periodic per-entry check (TANK_REVALIDATION_INTERVAL):
 
-    1. Creates sensors missed at setup (_async_ensure_sensors_exist()).
+    1. Creates entities missed at setup (async_add_missing_device_entities()).
     2. Without a gateway, re-triggers the gateway election through
        registry.join(). Bluetooth-only devices take no part in this or the
        steps below.
@@ -253,7 +212,9 @@ async def _async_revalidate_tank(hass: HomeAssistant, entry: ConfigEntry, now=No
     unavailable after MARK_UNAVAILABLE_AFTER), and new devices are left to
     Bluetooth discovery. A failed check is retried on the next run.
     """
-    await _async_ensure_sensors_exist(hass, entry)
+    # Imported here: entity.py imports from this module.
+    from .entity import async_add_missing_device_entities
+    async_add_missing_device_entities(entry)
 
     found = _entry_group(hass, entry)
     if found is None:

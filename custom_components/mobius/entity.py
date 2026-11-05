@@ -7,9 +7,10 @@ from typing import Any, Awaitable, Callable, Iterator, TypeVar
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.helpers.entity import DeviceInfo, Entity, EntityCategory
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
@@ -84,6 +85,55 @@ def iter_entry_devices(
         yield serial, coordinator, device_info, data
 
 
+DeviceEntityBuilder = Callable[[MobiusDeviceCoordinator, str, DeviceInfo, dict], list[Entity]]
+
+
+def async_add_device_entities(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback,
+    build: DeviceEntityBuilder,
+) -> None:
+    """
+    Adds `build(coordinator, serial, device_info, data)`'s entities for
+    every device of the entry. Which entities a device gets depends on its
+    data, which a device not read yet doesn't have: the builder is kept and
+    async_add_missing_device_entities() adds them once it is read.
+    """
+    runtime: MobiusRuntimeData = entry.runtime_data
+    entities: list[Entity] = []
+    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
+        runtime.device_infos[serial] = device_info
+        entities += build(coordinator, serial, device_info, data)
+    runtime.created_unique_ids.update(e.unique_id for e in entities)
+    async_add_entities(entities)
+    runtime.entity_builders.append((async_add_entities, build))
+
+
+@callback
+def async_add_missing_device_entities(entry: ConfigEntry) -> None:
+    """Adds the per-device entities (async_add_device_entities()) that
+    each device's current data calls for and that don't exist yet."""
+    runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        return
+    for add_entities, build in runtime.entity_builders:
+        missing: list[Entity] = []
+        for serial, coordinator in runtime.coordinators.items():
+            device_info = runtime.device_infos.get(serial)
+            if device_info is None or not coordinator.data:
+                continue
+            missing += [
+                e for e in build(coordinator, serial, device_info, coordinator.data)
+                if e.unique_id not in runtime.created_unique_ids
+            ]
+        if missing:
+            _LOGGER.debug(
+                "%r: creating %d entities missed at setup (their device wasn't read yet): %s",
+                entry.title, len(missing), [e.unique_id for e in missing],
+            )
+            runtime.created_unique_ids.update(e.unique_id for e in missing)
+            add_entities(missing)
+
+
 async def async_run_on_device(
     coordinator: MobiusDeviceCoordinator, action: Callable[[Any], Awaitable[_T]], failure: str,
 ) -> _T:
@@ -111,9 +161,8 @@ class MobiusAdvancedFeatureEntity(CoordinatorEntity[MobiusDeviceCoordinator]):
     AdvancedFeatures), written with set_advanced_features(). Created only
     for devices that report the field; unique_id is "{serial}_{key}".
 
-    Not created later for a device whose data was still empty at setup
-    (see __init__.py's _async_ensure_sensors_exist(), which only covers
-    sensors); such a device gets them after a reload.
+    A device whose data was still empty at setup gets them once it is read
+    (async_add_missing_device_entities()).
     """
 
     _attr_has_entity_name = True

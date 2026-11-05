@@ -27,7 +27,7 @@ from mobius import format_mesh_address
 from . import MobiusRuntimeData
 from .const import DOMAIN, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 from .coordinator import MobiusDeviceCoordinator, derive_hw_version, device_display_name, used_scenes
-from .entity import entry_tank_identifier, iter_entry_devices
+from .entity import async_add_device_entities, entry_tank_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -481,11 +481,28 @@ class GatewayDeviceSensor(SensorEntity):
         return {"serial": serial}
 
 
+def _build_device_sensors(coordinator, serial, device_info, data) -> list[SensorEntity]:
+    """Every sensor of one device, from its current data (see entity.py's
+    async_add_device_entities())."""
+    entities: list[SensorEntity] = [
+        SupportTierSensor(coordinator, serial, device_info),
+        ErrorStateSensor(coordinator, serial, device_info),
+        SchedulePointCountSensor(coordinator, serial, device_info),
+        FirmwareVersionSensor(coordinator, serial, device_info),
+        HardwareRevisionSensor(coordinator, serial, device_info),
+    ]
+    # A Bluetooth-only device has no mesh address.
+    if not coordinator.bluetooth_only:
+        entities.append(MeshAddressSensor(coordinator, serial, device_info))
+    # Devices without scene support report no slots at all.
+    if data.get("configured_scenes"):
+        entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))
+    return entities + _build_type_specific_entities(coordinator, serial, device_info, data.get("support", ""), data)
+
+
 def _build_type_specific_entities(coordinator, serial, device_info, support, data) -> list[SensorEntity]:
     """The pump- or light-specific sensors for one device from its current
-    data. Also used by __init__.py's _async_ensure_sensors_exist() to create
-    sensors missed at setup.
-    """
+    data."""
     if support.startswith("pump"):
         entities: list[SensorEntity] = [
             OperationStateSensor(coordinator, serial, device_info),
@@ -493,7 +510,7 @@ def _build_type_specific_entities(coordinator, serial, device_info, support, dat
             CurrentPumpModeSensor(coordinator, serial, device_info),
         ]
         # Only when gph is reliable (a missing value counts as not reliable;
-        # _async_ensure_sensors_exist() adds the sensor later).
+        # the sensor is added once it is, see async_add_device_entities()).
         if (data.get("telemetry") or {}).get("gph_reliable"):
             entities.append(FlowRateSensor(coordinator, serial, device_info))
         return entities
@@ -520,28 +537,9 @@ async def async_setup_entry(
     pan_id = entry.data.get(CONF_PAN_ID)
     registry = hass.data.get(DOMAIN, {}).get("gateway_registry")
 
+    async_add_device_entities(hass, entry, async_add_entities, _build_device_sensors)
+
     entities: list[SensorEntity] = []
-    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
-        entities += [
-            SupportTierSensor(coordinator, serial, device_info),
-            ErrorStateSensor(coordinator, serial, device_info),
-            SchedulePointCountSensor(coordinator, serial, device_info),
-            FirmwareVersionSensor(coordinator, serial, device_info),
-            HardwareRevisionSensor(coordinator, serial, device_info),
-        ]
-        # A Bluetooth-only device has no mesh address.
-        if not coordinator.bluetooth_only:
-            entities.append(MeshAddressSensor(coordinator, serial, device_info))
-        # Devices without scene support report no slots at all.
-        if data.get("configured_scenes"):
-            entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))
-
-        type_specific = _build_type_specific_entities(coordinator, serial, device_info, data.get("support", ""), data)
-        entities += type_specific
-        # Kept for _async_ensure_sensors_exist() (see __init__.py).
-        runtime.sensor_device_infos[serial] = device_info
-        runtime.created_sensor_unique_ids.update(e.unique_id for e in type_specific)
-
     # Tank-level sensors: only meaningful with a mesh prefix and more than one
     # device.
     if mlprefix_hex is not None and len(entry.data.get(CONF_DEVICES, [])) > 1:
@@ -551,6 +549,3 @@ async def async_setup_entry(
             entities.append(GatewayDeviceSensor(entry, pan_id, registry, runtime.coordinators, tank_identifier))
 
     async_add_entities(entities)
-    # Stored last, so a failed setup leaves no callback for
-    # _async_ensure_sensors_exist().
-    runtime.sensor_add_entities = async_add_entities

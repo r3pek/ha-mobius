@@ -24,7 +24,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import FIRMWARE_RETRY_INTERVAL
 from .coordinator import MobiusDeviceCoordinator
-from .entity import iter_entry_devices
+from .entity import async_add_device_entities
 from .firmware_check import FirmwareChecker, get_firmware_checker
 
 _LOGGER = logging.getLogger(__name__)
@@ -160,12 +160,13 @@ class MobiusFirmwareUpdate(CoordinatorEntity[MobiusDeviceCoordinator], UpdateEnt
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """One firmware update entity per device, except devices whose model
-    the app has no updates for. A device not yet read gets one; it stays
-    unavailable if its model turns out to have none."""
+    """One firmware update entity per device the app has firmware updates
+    for (created once the device has been read)."""
     checker = get_firmware_checker(hass)
-    async_add_entities(
-        MobiusFirmwareUpdate(coordinator, serial, device_info, checker)
-        for serial, coordinator, device_info, data in iter_entry_devices(hass, entry)
-        if not data or data.get("firmware_images")
-    )
+
+    def build(coordinator, serial, device_info, data) -> list[UpdateEntity]:
+        if not data.get("firmware_images"):
+            return []
+        return [MobiusFirmwareUpdate(coordinator, serial, device_info, checker)]
+
+    async_add_device_entities(hass, entry, async_add_entities, build)

@@ -1931,7 +1931,7 @@ async def test_coordinator_corrects_device_name_once_real_data_arrives(hass):
     first read at setup failed gets registered with sensor.py's own
     generic "Mobius device (SERIAL)" fallback name (DeviceInfo is only
     consulted once, at entity-creation time) -- and since the entity-
-    healing fix (_async_ensure_sensors_exist()) only ever creates the
+    healing fix (async_add_missing_device_entities()) only ever creates the
     missing ENTITIES, not update the device's own registry entry, that
     name was staying stuck at the fallback forever, even once the
     entities themselves recovered correctly. Confirms this coordinator-

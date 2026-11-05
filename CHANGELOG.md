@@ -5,6 +5,9 @@
 - Every poll, including the first, is one batched request.
 - Vectra closed-loop mode follows changes made in the app; devices the
   library can't parse keep their support note after the first poll.
+- Entities of every kind (switches, selects, numbers, battery and firmware
+  update entities) are created once a device that wasn't ready at setup
+  is read, not only sensors.
 
 ## 0.11.1
 

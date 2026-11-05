@@ -598,7 +598,7 @@ async def test_probe_tries_devices_in_rssi_order_not_list_order(hass, caplog):
 
 async def test_soft_refresh_retries_and_recovers_from_a_transient_first_failure(hass, caplog):
     """The setup-time half of the fix for a real, confirmed production
-    bug (see _async_ensure_sensors_exist()'s own docstring for the
+    bug (see async_add_missing_device_entities() for the
     self-healing half): a relayed device's own first soft refresh
     failing transiently shouldn't mean it starts unavailable for the
     whole session if a retry, moments later, would have succeeded fine.
@@ -1755,53 +1755,63 @@ async def test_unload_entry_does_not_trigger_rediscovery(hass):
 
 
 # --------------------------------------------------------------------------
-# _async_ensure_sensors_exist() -- the self-healing check for a real,
-# confirmed production bug: sensor.py's own async_setup_entry() decides
-# which type-specific entities to create from a ONE-TIME snapshot of
-# coordinator.data, taken at setup. For a relayed (non-gateway) device
-# specifically, that snapshot can still be empty at that exact moment (its
-# own first read is a soft, non-blocking refresh -- see
-# SOFT_REFRESH_RETRY_ATTEMPTS's own docstring in const.py) -- these tests
-# confirm the periodic backstop that catches whatever the retry there
-# doesn't.
+# async_add_missing_device_entities() -- every platform decides which
+# per-device entities to create from coordinator.data, which a relayed
+# device's first (non-blocking) read may not have filled at setup. The tank
+# check adds the missing ones once the data is there.
 # --------------------------------------------------------------------------
 
-from custom_components.mobius import _async_ensure_sensors_exist, MobiusRuntimeData
+from custom_components.mobius import MobiusRuntimeData
+from custom_components.mobius.binary_sensor import _build_binary_sensors
+from custom_components.mobius.entity import async_add_missing_device_entities
 from custom_components.mobius.sensor import _build_type_specific_entities
 
 
-def _make_runtime_for_healing_test(hass, entry, serial, data, already_created=()):
-    """A MobiusRuntimeData with one coordinator whose data is exactly
-    as given, a stashed (mocked) sensor_add_entities callback, and a
-    fake device_info -- everything _async_ensure_sensors_exist() needs,
-    without going through a real sensor.py platform setup at all."""
+def _type_specific_sensors(coordinator, serial, device_info, data):
+    return _build_type_specific_entities(coordinator, serial, device_info, data.get("support", ""), data)
+
+
+def _make_runtime_for_healing_test(entry, serial, data, build=_type_specific_sensors, already_created=()):
+    """A MobiusRuntimeData with one coordinator whose data is exactly as
+    given and one platform's builder with a mocked add_entities callback,
+    without a real platform setup."""
     coordinator = MagicMock()
     coordinator.data = data
     runtime = MobiusRuntimeData(coordinators={serial: coordinator})
-    runtime.sensor_add_entities = MagicMock()
-    runtime.sensor_device_infos = {serial: MagicMock()}
-    runtime.created_sensor_unique_ids = set(already_created)
+    add_entities = MagicMock()
+    runtime.entity_builders = [(add_entities, build)]
+    runtime.device_infos = {serial: MagicMock()}
+    runtime.created_unique_ids = set(already_created)
     entry.runtime_data = runtime
-    return runtime
+    return runtime, add_entities
 
 
-class TestEnsureSensorsExist:
-    async def test_creates_missing_type_specific_entities_when_data_becomes_available(self, hass):
+class TestAddMissingDeviceEntities:
+    async def test_creates_missing_entities_when_data_becomes_available(self, hass):
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-1")
         entry.add_to_hass(hass)
         data = {"support": "pump", "telemetry": {"speed_percent": 50, "gph": 1200, "gph_reliable": True}}
-        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, data)
+        runtime, add_entities = _make_runtime_for_healing_test(entry, PUMP_SERIAL, data)
 
-        await _async_ensure_sensors_exist(hass, entry)
+        async_add_missing_device_entities(entry)
 
-        runtime.sensor_add_entities.assert_called_once()
-        added = runtime.sensor_add_entities.call_args[0][0]
-        added_unique_ids = {e.unique_id for e in added}
+        add_entities.assert_called_once()
+        added_unique_ids = {e.unique_id for e in add_entities.call_args[0][0]}
         assert added_unique_ids == {
             f"{PUMP_SERIAL}_operation_state", f"{PUMP_SERIAL}_motor_speed",
             f"{PUMP_SERIAL}_flow_rate", f"{PUMP_SERIAL}_current_pump_mode",
         }
-        assert runtime.created_sensor_unique_ids == added_unique_ids
+        assert runtime.created_unique_ids == added_unique_ids
+
+    async def test_other_platforms_are_covered_too(self, hass):
+        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-binary")
+        entry.add_to_hass(hass)
+        data = {"support": "pump", "battery_backup": {"speed": 300, "max_speed": 500}}
+        _runtime, add_entities = _make_runtime_for_healing_test(entry, PUMP_SERIAL, data, build=_build_binary_sensors)
+
+        async_add_missing_device_entities(entry)
+
+        assert {e.unique_id for e in add_entities.call_args[0][0]} == {f"{PUMP_SERIAL}_running_on_battery"}
 
     async def test_does_not_recreate_already_created_entities(self, hass):
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-2")
@@ -1811,57 +1821,44 @@ class TestEnsureSensorsExist:
             f"{PUMP_SERIAL}_operation_state", f"{PUMP_SERIAL}_motor_speed",
             f"{PUMP_SERIAL}_flow_rate", f"{PUMP_SERIAL}_current_pump_mode",
         }
-        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, data, already_created=already)
+        runtime, add_entities = _make_runtime_for_healing_test(entry, PUMP_SERIAL, data, already_created=already)
 
-        await _async_ensure_sensors_exist(hass, entry)
+        async_add_missing_device_entities(entry)
 
-        runtime.sensor_add_entities.assert_not_called()
-        assert runtime.created_sensor_unique_ids == already  # unchanged, not duplicated
+        add_entities.assert_not_called()
+        assert runtime.created_unique_ids == already  # unchanged, not duplicated
 
     async def test_creates_only_the_specific_missing_entity_not_the_whole_type(self, hass):
-        """The subtler version of the same bug: support was already
-        correctly detected as "light" and its other entities already
-        created, but calibration data specifically wasn't present yet
-        at that exact moment -- confirms only the missing Calibration
-        entity gets added, not duplicates of the already-created ones."""
+        """Support was already detected as "light" and its other entities
+        created, but calibration data wasn't present yet: only the missing
+        Calibration entity is added."""
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-3")
         entry.add_to_hass(hass)
         data = {
             "support": "light", "channels": ["RoyalBlue"], "current_intensities": {"RoyalBlue": 500},
             "calibration": MagicMock(completed=True, date_of_last=0, lower_bound=None, upper_bound=None),
         }
-        already = {f"{LIGHT_SERIAL}_intensity_royalblue", f"{LIGHT_SERIAL}_schedule_intensity"}  # calibration NOT yet in this set
-        runtime = _make_runtime_for_healing_test(hass, entry, LIGHT_SERIAL, data, already_created=already)
+        already = {f"{LIGHT_SERIAL}_intensity_royalblue", f"{LIGHT_SERIAL}_schedule_intensity"}
+        _runtime, add_entities = _make_runtime_for_healing_test(entry, LIGHT_SERIAL, data, already_created=already)
 
-        await _async_ensure_sensors_exist(hass, entry)
+        async_add_missing_device_entities(entry)
 
-        runtime.sensor_add_entities.assert_called_once()
-        added = runtime.sensor_add_entities.call_args[0][0]
-        assert {e.unique_id for e in added} == {f"{LIGHT_SERIAL}_calibration"}
+        add_entities.assert_called_once()
+        assert {e.unique_id for e in add_entities.call_args[0][0]} == {f"{LIGHT_SERIAL}_calibration"}
 
     async def test_skips_devices_whose_data_still_is_not_ready(self, hass):
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-4")
         entry.add_to_hass(hass)
-        runtime = _make_runtime_for_healing_test(hass, entry, PUMP_SERIAL, {})  # support still missing
+        runtime, add_entities = _make_runtime_for_healing_test(entry, PUMP_SERIAL, {})
 
-        await _async_ensure_sensors_exist(hass, entry)
+        async_add_missing_device_entities(entry)
 
-        runtime.sensor_add_entities.assert_not_called()
-        assert runtime.created_sensor_unique_ids == set()
-
-    async def test_noop_if_sensor_platform_never_set_up_yet(self, hass):
-        """runtime.sensor_add_entities is None until sensor.py's own
-        async_setup_entry() has actually run once -- must not raise if
-        this somehow runs before that's happened."""
-        entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-5")
-        entry.add_to_hass(hass)
-        entry.runtime_data = MobiusRuntimeData(coordinators={})
-
-        await _async_ensure_sensors_exist(hass, entry)  # must not raise
+        add_entities.assert_not_called()
+        assert runtime.created_unique_ids == set()
 
     async def test_noop_if_runtime_data_does_not_exist_yet(self, hass):
         entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id="healing-test-6")
         entry.add_to_hass(hass)
         # entry.runtime_data deliberately never set at all.
 
-        await _async_ensure_sensors_exist(hass, entry)  # must not raise
+        async_add_missing_device_entities(entry)  # must not raise

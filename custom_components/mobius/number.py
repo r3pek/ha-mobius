@@ -23,7 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import MobiusRuntimeData
 from .const import POLL_INTERVAL
 from .coordinator import MobiusDeviceCoordinator
-from .entity import async_run_on_device, entry_tank_identifier, iter_entry_devices
+from .entity import async_add_device_entities, async_run_on_device, entry_tank_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -228,7 +228,5 @@ def _build_pump_battery_numbers(coordinator, serial, device_info, data) -> list[
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    entities: list[NumberEntity] = [PollIntervalNumber(entry, entry_tank_identifier(entry))]
-    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
-        entities += _build_pump_battery_numbers(coordinator, serial, device_info, data)
-    async_add_entities(entities)
+    async_add_entities([PollIntervalNumber(entry, entry_tank_identifier(entry))])
+    async_add_device_entities(hass, entry, async_add_entities, _build_pump_battery_numbers)

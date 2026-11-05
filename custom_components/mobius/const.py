@@ -97,7 +97,7 @@ MESH_LIST_FRESH_FOR_FAILURES = timedelta(minutes=2)
 # Extra attempts (and delay between them) for a relayed device's first,
 # non-blocking refresh at setup. Kept below RELAY_FAILURE_THRESHOLD so setup
 # alone can't trigger an automatic restart or a gateway re-election. Missing entities are created
-# later anyway (see sensor.py's _async_ensure_sensors_exist()).
+# later anyway (see entity.py's async_add_missing_device_entities()).
 SOFT_REFRESH_RETRY_ATTEMPTS = 1  # in addition to the first attempt
 SOFT_REFRESH_RETRY_DELAY = 3.0  # seconds
 

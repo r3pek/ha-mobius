@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import MobiusRuntimeData
 from .coordinator import async_tank_broadcast, used_scenes
 from .entity import (
-    MobiusAdvancedFeatureEntity, build_advanced_feature_entities, entry_tank_identifier, iter_entry_devices,
+    MobiusAdvancedFeatureEntity, async_add_device_entities, build_advanced_feature_entities, entry_tank_identifier,
 )
 
 # The app's preset choices (seconds / percent). set_advanced_features()
@@ -196,7 +196,5 @@ class SceneSelectionSelect(SelectEntity):
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    entities: list[SelectEntity] = [SceneSelectionSelect(entry, entry_tank_identifier(entry))]
-    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
-        entities += _build_advanced_feature_selects(coordinator, serial, device_info, data)
-    async_add_entities(entities)
+    async_add_entities([SceneSelectionSelect(entry, entry_tank_identifier(entry))])
+    async_add_device_entities(hass, entry, async_add_entities, _build_advanced_feature_selects)

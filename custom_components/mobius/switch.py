@@ -15,7 +15,7 @@ from . import MobiusRuntimeData
 from .coordinator import MobiusDeviceCoordinator
 from .entity import (
     MobiusAdvancedFeatureEntity, async_run_on_device, build_advanced_feature_entities,
-    entry_tank_identifier, iter_entry_devices,
+    async_add_device_entities, entry_tank_identifier,
 )
 
 
@@ -141,10 +141,13 @@ class LunarPhasesEnabledSwitch(CoordinatorEntity[MobiusDeviceCoordinator], Switc
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    entities: list[SwitchEntity] = [TimeSyncSwitch(entry, entry_tank_identifier(entry))]
-    for serial, coordinator, device_info, data in iter_entry_devices(hass, entry):
-        entities += _build_advanced_feature_switches(coordinator, serial, device_info, data)
-        # Lights that support LunarPhasesEnabled.
-        if data.get("support") == "light" and data.get("lunar_supported"):
-            entities.append(LunarPhasesEnabledSwitch(coordinator, serial, device_info))
-    async_add_entities(entities)
+    async_add_entities([TimeSyncSwitch(entry, entry_tank_identifier(entry))])
+    async_add_device_entities(hass, entry, async_add_entities, _build_device_switches)
+
+
+def _build_device_switches(coordinator, serial, device_info, data) -> list[SwitchEntity]:
+    entities = _build_advanced_feature_switches(coordinator, serial, device_info, data)
+    # Lights that support LunarPhasesEnabled.
+    if data.get("support") == "light" and data.get("lunar_supported"):
+        entities.append(LunarPhasesEnabledSwitch(coordinator, serial, device_info))
+    return entities

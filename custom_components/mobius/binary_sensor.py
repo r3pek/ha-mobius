@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import MobiusDeviceCoordinator
-from .entity import iter_entry_devices
+from .entity import async_add_device_entities
 
 
 class RunningOnBatteryBinarySensor(CoordinatorEntity[MobiusDeviceCoordinator], BinarySensorEntity):
@@ -42,8 +42,8 @@ class RunningOnBatteryBinarySensor(CoordinatorEntity[MobiusDeviceCoordinator], B
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    async_add_entities(
-        RunningOnBatteryBinarySensor(coordinator, serial, device_info)
-        for serial, coordinator, device_info, data in iter_entry_devices(hass, entry)
-        if data.get("battery_backup")
-    )
+    async_add_device_entities(hass, entry, async_add_entities, _build_binary_sensors)
+
+
+def _build_binary_sensors(coordinator, serial, device_info, data) -> list[BinarySensorEntity]:
+    return [RunningOnBatteryBinarySensor(coordinator, serial, device_info)] if data.get("battery_backup") else []
