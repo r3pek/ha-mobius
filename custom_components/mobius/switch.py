@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -74,6 +74,13 @@ class TimeSyncSwitch(SwitchEntity, RestoreEntity):
         self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
         self._entry = entry
         self._attr_is_on = True
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Nothing this entity sets up depends on its entity ID, so Home
+        Assistant (2026.11+) can rename it in place instead of removing and
+        re-adding it."""
+        super().async_entity_id_changed(old_entity_id)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

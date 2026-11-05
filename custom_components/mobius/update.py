@@ -119,6 +119,13 @@ class MobiusFirmwareUpdate(CoordinatorEntity[MobiusDeviceCoordinator], UpdateEnt
                     sections.append("\n".join(lines))
         return "\n\n".join(sections) if len(sections) > 1 else None
 
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Nothing this entity sets up depends on its entity ID, so Home
+        Assistant (2026.11+) can rename it in place instead of removing and
+        re-adding it."""
+        super().async_entity_id_changed(old_entity_id)
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(async_track_time_interval(

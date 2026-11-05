@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNKNOWN
+from homeassistant.helpers import entity_registry as er
 from tests.common import MockConfigEntry
 
 from mobius import FirmwareImage, FirmwareType, ImageId, MetadataSnapshot, Tank
@@ -194,6 +195,27 @@ async def test_updated_firmware_is_checked_again(hass):
         state = hass.states.get(FIRMWARE)
         assert state.state == STATE_OFF
         assert state.attributes["installed_version"] == "Radio 2.1.36, Product OS 3.0.35"
+        assert calls.count(newer_driver_url) == 1
+
+
+@pytest.mark.asyncio
+async def test_renamed_entity_keeps_updating(hass):
+    device = _pump()
+    newer_driver_url = DRIVER_URL.replace("3.0.34", "3.0.35")
+    replies = {RADIO_URL: UP_TO_DATE, DRIVER_URL: DRIVER_UPDATE, newer_driver_url: UP_TO_DATE}
+    async with _setup(hass, device, replies) as (entry, calls):
+        renamed = "update.pump_firmware"
+        er.async_get(hass).async_update_entity(FIRMWARE, new_entity_id=renamed)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert hass.states.get(FIRMWARE) is None
+        assert hass.states.get(renamed).state == STATE_ON
+
+        device.get_metadata_batch.return_value = _metadata([
+            PUMP_IMAGES[0], FirmwareImage(FirmwareType.MainMicroOS, ImageId.QuietDriveDriver, "3.0.35"),
+        ])
+        await entry.runtime_data.coordinators[PUMP_SERIAL].async_refresh()
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert hass.states.get(renamed).state == STATE_OFF
         assert calls.count(newer_driver_url) == 1
 
 

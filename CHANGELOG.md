@@ -10,6 +10,8 @@
   is read, not only sensors.
 - Tests run on Home Assistant 2026.11 (new `pytest-homeassistant` harness)
   as well as the oldest supported version.
+- Renaming an entity's ID on Home Assistant 2026.11+ renames it in place
+  instead of removing and re-adding it.
 
 ## 0.11.1
 

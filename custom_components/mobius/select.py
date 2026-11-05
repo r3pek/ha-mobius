@@ -99,6 +99,13 @@ class SceneSelectionSelect(SelectEntity):
         self._entry = entry
         self._unsub_callbacks: list = []
 
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Nothing this entity sets up depends on its entity ID, so Home
+        Assistant (2026.11+) can rename it in place instead of removing and
+        re-adding it."""
+        super().async_entity_id_changed(old_entity_id)
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         runtime: MobiusRuntimeData = self._entry.runtime_data
