@@ -19,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import PrimitiveType, Tank, MeshPeer, Model, LightIntensityResult, MetadataSnapshot, SupportedAttribute, LightPollResult
 
+from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius import tank_device_identifier
 from custom_components.mobius import _async_revalidate_tank
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
@@ -63,6 +64,7 @@ def _fake_pump_device():
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
 
     fake_point = MagicMock()
+    fake_point.time_minutes = 0
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
@@ -76,11 +78,13 @@ def _fake_pump_device():
             "Radio": "4.0.21", "Radio Bootloader": "1.2",
             "Product OS": "2.1.5", "Product Bootloader": "1.0",
         },
+        firmware_version="2.1.5",
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
     ))
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")
     )
+    full_poll_from_reads(device)
     return device
 
 
@@ -123,10 +127,9 @@ def _fake_light_device():
     # represent: at least some real Radion lights simply don't report
     # that FirmwareType at all (no MainMicroOS index in their
     # FirmwareVersion response), unlike pumps which always have one.
-    # This is the actual bug derive_sw_version()'s fallback chain exists
-    # to cover -- see its own tests in test_coordinator.py for the
-    # fallback logic itself; this fixture confirms the full setup flow
-    # picks up the fallback correctly too.
+    # python-mobius main_firmware_version() falls back to the radio
+    # firmware for such a light (its own tests cover the choice); this
+    # fixture confirms the full setup flow carries it to sw_version.
     device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
         advanced_features=None, calibration=calibration,
         hardware_info={"Revision": 1},
@@ -134,11 +137,13 @@ def _fake_light_device():
             "Product Bootloader": "1.0", "Radio Firmware": "1.5.103",
             "Filesystem": "1.1.0", "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
         },
+        firmware_version="1.5.103",
         supported_channels=channel_objs, error_state=None, epoch=None, local_time=None, tz_offset=None,
     ))
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe005678")
     )
+    full_poll_from_reads(device)
     return device
 
 
@@ -566,7 +571,7 @@ async def test_light_entry_setup_creates_channel_sensors(hass):
 
     # The actual point of this assertion: this light's fixture reports no
     # "Product OS" at all (see _fake_light_device()'s comment) -- sw_version
-    # must still be populated via derive_sw_version()'s fallback chain,
+    # must still be populated with the main version the library picked,
     # not silently left empty, confirming the real bug fix end-to-end
     # through the full setup flow. Also confirms a calibration sensor is
     # created, since calibration is confirmed real/populated for lights

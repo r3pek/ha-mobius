@@ -5,11 +5,12 @@ import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNKNOWN
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import FirmwareImage, FirmwareType, ImageId, MetadataSnapshot, Tank
 
+from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 from custom_components.mobius.firmware_check import FirmwareChecker, get_firmware_checker
 
@@ -76,11 +77,13 @@ def _pump(images=PUMP_IMAGES):
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     point = MagicMock()
+    point.time_minutes = 0
     point.pump.mode.name = "ReefCrest"
     point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[point])
     device.get_current_pump_block = AsyncMock(return_value=point)
     device.get_metadata_batch = AsyncMock(return_value=_metadata(images))
+    full_poll_from_reads(device)
     return device
 
 
@@ -181,13 +184,11 @@ async def test_updated_firmware_is_checked_again(hass):
     async with _setup(hass, device, replies) as (entry, calls):
         assert hass.states.get(FIRMWARE).state == STATE_ON
 
+        # The driver was updated in the app: the next poll reports it.
         device.get_metadata_batch.return_value = _metadata([
             PUMP_IMAGES[0], FirmwareImage(FirmwareType.MainMicroOS, ImageId.QuietDriveDriver, "3.0.35"),
         ])
-        device.get_full_poll_batch = AsyncMock(side_effect=Exception("use the first-poll path"))
-        coordinator = entry.runtime_data.coordinators[PUMP_SERIAL]
-        coordinator.data["firmware_images"][1]["version"] = "3.0.35"
-        coordinator.async_set_updated_data(dict(coordinator.data))
+        await entry.runtime_data.coordinators[PUMP_SERIAL].async_refresh()
         await hass.async_block_till_done(wait_background_tasks=True)
 
         state = hass.states.get(FIRMWARE)

@@ -19,6 +19,9 @@ from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from homeassistant.components.bluetooth import MONOTONIC_TIME
+
+from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius import async_setup, async_setup_entry, tank_device_identifier
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
 from mobius import MeshPeer, Model, Tank, MetadataSnapshot, PrimitiveType
@@ -142,6 +145,7 @@ def _fake_pump_device():
     fake_device.get_operation_state = AsyncMock()
     fake_device.get_operation_state.return_value.name = "Schedule"
     fake_point = MagicMock()
+    fake_point.time_minutes = 0
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     fake_device.get_pump_schedule = AsyncMock(return_value=[fake_point])
@@ -151,6 +155,7 @@ def _fake_pump_device():
         hardware_info={"Revision": 2}, firmware_versions={"Product OS": "1.0"},
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
     ))
+    full_poll_from_reads(fake_device)
     return fake_device
 
 
@@ -1162,6 +1167,7 @@ class TestRevalidateProactiveCacheCheck:
         group.gateway_connection._device = None
 
         fake_info = MagicMock()
+        fake_info.time = MONOTONIC_TIME()
         fake_info.manufacturer_data = {
             0x0202: bytes.fromhex("2a0001000000000f3d") + PUMP_SERIAL.encode("ascii"),
         }
@@ -1609,6 +1615,7 @@ def _fake_discovery(address: str, serial: str, company_id: int = 0x0202):
     payload = bytes.fromhex("2a0001000000000f3d") + serial.encode("ascii")
     info = MagicMock()
     info.address = address
+    info.time = MONOTONIC_TIME()
     info.manufacturer_data = {company_id: payload}  # MOBIUS_COMPANY_ID_ECOTECH by default
     return info
 

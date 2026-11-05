@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData, tank_device_identifier, resolve_tank_device_id
 from .const import DOMAIN, CONF_SERIAL, CONF_DEVICES, CONF_MLPREFIX, CONF_PAN_ID
-from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version, device_display_name
+from .coordinator import MobiusDeviceCoordinator, derive_hw_version, device_display_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def iter_entry_devices(
         data = coordinator.data or {}
         device_info = _device_info(
             serial, data, address=device_record.get(CONF_ADDRESS),
-            sw_version=derive_sw_version(data.get("firmware_versions", {})),
+            sw_version=data.get("sw_version"),
             hw_version=derive_hw_version(data.get("hardware_info", {})),
             via_device_id=via_device_id,
         )

@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from mobius import Tank, MetadataSnapshot
 from mobius.pump_status import BatteryBackupInfo, BoostedBatteryInfo
 
+from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 
 PAN_ID = 0x3D0F
@@ -39,6 +40,7 @@ def _pump(battery_backup=None, boosted_battery=None, operation_mode="Reefcrest")
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     point = MagicMock()
+    point.time_minutes = 0
     point.pump.mode.name = "ReefCrest"
     point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[point])
@@ -47,6 +49,7 @@ def _pump(battery_backup=None, boosted_battery=None, operation_mode="Reefcrest")
         advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
     ))
+    full_poll_from_reads(device)
     return device
 
 

@@ -57,8 +57,8 @@ from homeassistant.util import dt as dt_util
 from mobius import (
     ConfigurationCache, MobiusDevice, RelayedMobiusDevice, MeshPeer, PrimitiveType, Model, Tank, is_bluetooth_only,
     parse_advertisement, discover_tank,
-    LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, extract_short_address, C2Attribute,
-    PumpParam, enum_or_none, pump_params_to_dict, primitive_type_from_name, support_tier,
+    LIGHT_PRIMITIVES, PUMP_PRIMITIVES, PRIMITIVE_SIZE, C2Attribute,
+    PumpParam, enum_or_none, pump_params_to_dict, support_tier, get_active_pump_block,
     firmware_label,
 )
 
@@ -131,11 +131,10 @@ def _find_in_bluetooth_cache(
         parsed = parse_advertisement(info.manufacturer_data)
         if not parsed or parsed.serial != serial:
             continue
-        received = info.time if isinstance(info.time, (int, float)) else None
-        if max_age is not None and received is not None and now - received > max_age:
+        if max_age is not None and now - info.time > max_age:
             continue
-        if newest is None or (received is not None and (newest_time is None or received > newest_time)):
-            newest, newest_time = info, received
+        if newest is None or info.time > newest_time:
+            newest, newest_time = info, info.time
     return newest
 
 
@@ -350,10 +349,7 @@ async def _restart_member(hass: HomeAssistant, registry: GatewayRegistry, group:
     if member is not None and member.mesh_address is not None and group.gateway_serial not in (None, serial):
         try:
             gateway_device = await group.gateway_connection.ensure_connected()
-            peer = MeshPeer(
-                serial=serial, model_raw=0, model=None,
-                short_address=extract_short_address(member.mesh_address), address=member.mesh_address,
-            )
+            peer = MeshPeer(serial=serial, address=member.mesh_address)
             await RelayedMobiusDevice(gateway_device, peer).reboot()
             _LOGGER.info("Restarted %s through gateway %s", serial, group.gateway_serial)
             return
@@ -526,23 +522,9 @@ class MobiusConnectionManager:
                 self._lost_since = time.monotonic()
 
 
-# Firmware labels tried, in order, for the device's sw_version. "Firmware"
-# (the LED driver on a Radion) is what the app shows as the main version.
-# "OS" and "QCA4020Firmware" are the raw FirmwareType names reported when the
-# model is unknown (no manufacturer labels apply).
-_SW_VERSION_LABEL_PRIORITY = [
-    "Firmware", "Product OS", "Radio Firmware", "Radio OS", "Radio",
-    "OS", "QCA4020Firmware",
-]
-
-
-def derive_sw_version(firmware_versions: dict) -> Optional[str]:
-    """The first version found following _SW_VERSION_LABEL_PRIORITY."""
-    for label in _SW_VERSION_LABEL_PRIORITY:
-        version = firmware_versions.get(label)
-        if version:
-            return version
-    return None
+def _supports(supported_attribute_ids: Optional[set], attr_id: int) -> bool:
+    """Whether `attr_id` is supported; True when support is unknown."""
+    return supported_attribute_ids is None or attr_id in supported_attribute_ids
 
 
 def derive_hw_version(hardware_info: dict) -> Optional[str]:
@@ -576,13 +558,13 @@ def _format_pump_params(params: dict, group: Optional[PanGroup]) -> dict[str, ob
 
 
 async def _fetch_all(
-    device, minute_of_day_now=None, cached_supported_attribute_ids=None, batch_disabled=False,
+    device, cached_supported_attribute_ids=None, batch_disabled=False,
     cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
     configuration_cache: Optional[ConfigurationCache] = None,
 ) -> tuple[dict[str, Any], set[int], bool, Optional[PrimitiveType], Optional[Model]]:
     """
-    One poll: identity, telemetry, schedule and metadata. `device` is a
-    MobiusDevice or a RelayedMobiusDevice.
+    One poll (get_full_poll_batch()). `device` is a MobiusDevice or a
+    RelayedMobiusDevice.
 
     Returns (info, supported_attribute_ids, used_batch, primitive, model).
     Only `info` becomes coordinator.data; the rest is state the coordinator
@@ -594,16 +576,15 @@ async def _fetch_all(
       set is then read again on the next poll.
     batch_disabled: passed as force_individual_reads once batching has
       failed BATCH_FAILURE_THRESHOLD times.
-    cached_primitive_type / cached_model: known once the first poll
-      succeeded (neither changes for a device). With both known, everything
-      is read in one get_full_poll_batch() request; the first poll reads
-      get_device_info() and then the separate metadata/light/pump reads.
+    cached_primitive_type / cached_model: from an earlier poll (neither
+      changes for a device); None on the first poll, which reads them.
     group: the device's PanGroup, used to resolve a pump's Master parameter
       to a serial. Optional.
     configuration_cache: the device's ConfigurationCache: with it, the
       scenes and the schedule are read only when their checksum changed
       (light intensities are still computed every poll, from the cached
-      schedule). Optional.
+      schedule), and the rarely-changing attributes every
+      STATIC_REFRESH_INTERVAL. Optional.
     """
     now = dt_util.now()
     minute_of_day = now.hour * 60 + now.minute
@@ -616,92 +597,37 @@ async def _fetch_all(
             supported_attribute_ids = supported_attribute_ids_to_cache = {s.attr_id for s in supported}
         except Exception as e:
             _LOGGER.warning(
-                "get_supported_attributes() failed this poll (%s) -- proceeding with an "
-                "empty set for this one poll only (most batched data will be missing this "
-                "time); will retry fetching it fresh on the next poll rather than caching "
-                "this failure permanently",
-                e,
+                "get_supported_attributes() failed this poll (%s) -- reading every attribute "
+                "individually this poll; reading the list again next poll", e,
             )
-            # Use an empty set for this poll only. Returning None (not an
-            # empty set) makes the next poll read it again; an empty set
-            # would be cached as "supports nothing".
-            supported_attribute_ids = set()
-            supported_attribute_ids_to_cache = None
+            # None: unknown, every attribute is tried one at a time.
+            supported_attribute_ids = supported_attribute_ids_to_cache = None
 
-    pump_schedule_points = None
-
-    if cached_primitive_type is not None and cached_model is not None:
-        primitive = cached_primitive_type
-        model = cached_model
-        full_poll = await device.get_full_poll_batch(
-            primitive=primitive, model=model, which=1, minute_of_day=minute_of_day, now=now,
-            supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
-            cache=configuration_cache,
+    full_poll = await device.get_full_poll_batch(
+        primitive=cached_primitive_type, model=cached_model, which=1, minute_of_day=minute_of_day, now=now,
+        supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
+        cache=configuration_cache,
+    )
+    primitive, model = full_poll.primitive, full_poll.model
+    used_batch = full_poll.used_batch
+    if configuration_cache is not None and full_poll.configuration_read:
+        _LOGGER.debug(
+            "%s: read %s this poll (not cached, or its checksum changed)",
+            full_poll.device_info.get("serial"), ", ".join(full_poll.configuration_read),
         )
-        used_batch = full_poll.used_batch
-        if configuration_cache is not None and full_poll.used_batch and full_poll.configuration_read:
-            _LOGGER.debug(
-                "%s: read %s this poll (not cached, or its checksum changed)",
-                full_poll.device_info.get("serial"), ", ".join(full_poll.configuration_read),
-            )
-        if full_poll.attribute_table_changed:
-            _LOGGER.info(
-                "%s: supported attribute table changed (firmware update?) -- reading it again "
-                "on the next poll", full_poll.device_info.get("serial"),
-            )
-            supported_attribute_ids_to_cache = None
-        info = dict(full_poll.device_info)
-        info["primitive_type"] = primitive.name
-        metadata = full_poll.metadata
-        light_poll = full_poll.light_poll
-        pump_telemetry_result = full_poll.pump_telemetry
-        pump_schedule_points = full_poll.pump_schedule_points
-        configured_scenes = full_poll.configured_scenes
-        current_scene = full_poll.current_scene
-        battery_backup = full_poll.battery_backup
-        boosted_battery = full_poll.boosted_battery
-        operation_state = full_poll.operation_state
-    else:
-        # First poll: learn primitive type and model.
-        info = await device.get_device_info()
-        primitive = primitive_type_from_name(info.get("primitive_type"))
-        model = enum_or_none(Model, info.get("model_raw"))
-
-        metadata = await device.get_metadata_batch(
-            model=model, supported_attribute_ids=supported_attribute_ids,
-            force_individual_reads=batch_disabled,
+    if full_poll.attribute_table_changed:
+        _LOGGER.info(
+            "%s: supported attribute table changed (firmware update?) -- reading it again "
+            "on the next poll", full_poll.device_info.get("serial"),
         )
-        used_batch = metadata.used_batch
-        light_poll = None
-        pump_telemetry_result = None
-        battery_backup = None
-        boosted_battery = None
-        operation_state = None
-        if primitive in LIGHT_PRIMITIVES:
-            light_poll = await device.get_light_poll_batch(
-                which=1, minute_of_day=minute_of_day, now=now,
-                supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
-            )
-            used_batch = used_batch and light_poll.used_batch
-        elif primitive in PUMP_PRIMITIVES:
-            pump_schedule_points = await device.get_pump_schedule(which=1)
-            pump_telemetry_result = await device.get_pump_telemetry(model=model, primitive=primitive)
-            battery_backup = await device.get_battery_backup_info()
-            boosted_battery = await device.get_boosted_battery_info()
-
-        # Most devices don't support scenes; both reads fail soft.
-        try:
-            configured_scenes = await device.get_configured_scenes(primitive=primitive)
-        except Exception:
-            configured_scenes = []
-        try:
-            current_scene = await device.get_current_scene()
-        except Exception:
-            current_scene = None
+        supported_attribute_ids_to_cache = None
+    info = dict(full_poll.device_info)
+    metadata = full_poll.metadata
+    light_poll = full_poll.light_poll
 
     info["support"] = support_tier(primitive)
     if primitive in PUMP_PRIMITIVES:
-        info["telemetry"] = pump_telemetry_result
+        info["telemetry"] = full_poll.pump_telemetry
         if info["telemetry"].get("gph") is not None and not info["telemetry"].get("gph_reliable"):
             _LOGGER.debug(
                 "%s: gph reading (%s) is not considered reliable for this "
@@ -710,18 +636,16 @@ async def _fetch_all(
                 "won't be created for this reason if it's missing",
                 info.get("serial"), info["telemetry"]["gph"], model, primitive,
             )
-        if operation_state is None:
-            # First poll, or not in the batch response.
-            operation_state = await device.get_operation_state()
-        info["operation_state"] = operation_state.name
+        operation_state = full_poll.operation_state
+        info["operation_state"] = operation_state.name if operation_state is not None else None
         # "BatteryBackup" while the pump runs on battery.
         info["operation_mode"] = info["telemetry"].get("operation_mode")
         # None when the pump doesn't support the setting.
-        info["battery_backup"] = asdict(battery_backup) if battery_backup else None
-        info["boosted_battery"] = asdict(boosted_battery) if boosted_battery else None
+        info["battery_backup"] = asdict(full_poll.battery_backup) if full_poll.battery_backup else None
+        info["boosted_battery"] = asdict(full_poll.boosted_battery) if full_poll.boosted_battery else None
+        # Vectra closed-loop mode (see VectraInfo); None for other pumps.
+        info["closed_loop"] = full_poll.vectra_info.closed_loop if full_poll.vectra_info else None
     elif primitive not in LIGHT_PRIMITIVES:
-        # Only possible on the first poll: once a primitive type is cached it
-        # is a light or a pump.
         size = PRIMITIVE_SIZE.get(primitive) if primitive else None
         info["support_note"] = (
             f"PrimitiveType {info.get('primitive_type')!r} has no parser implemented"
@@ -733,6 +657,7 @@ async def _fetch_all(
     info["clock_drift"] = int(now.timestamp()) - metadata.epoch if metadata.epoch is not None else None
     info["olson_tz"] = metadata.olson_tz
     info["firmware_versions"] = metadata.firmware_versions
+    info["sw_version"] = metadata.firmware_version
     info["hardware_info"] = metadata.hardware_info
     # The firmware parts the Mobius cloud is asked about (update.py).
     info["firmware_images"] = [
@@ -757,7 +682,7 @@ async def _fetch_all(
         # only set during the night segment). All None when the light
         # doesn't support the attribute; the lunar switch and the card's moon
         # toggle are only offered when it does.
-        lunar_supported = C2Attribute.LunarPhasesEnabled in supported_attribute_ids
+        lunar_supported = _supports(supported_attribute_ids, C2Attribute.LunarPhasesEnabled)
         info["lunar_supported"] = lunar_supported
         info["lunar_enabled"] = light_poll.lunar_enabled if lunar_supported else None
         info["lunar_phase_day"] = light_poll.lunar_phase_day if lunar_supported else None
@@ -767,10 +692,8 @@ async def _fetch_all(
         info["calibration"] = metadata.calibration
 
     elif primitive in PUMP_PRIMITIVES:
-        info["schedule_point_count"] = len(pump_schedule_points)
-        block = await device.get_current_pump_block(
-            which=1, minute_of_day=minute_of_day, points=pump_schedule_points,
-        )
+        info["schedule_point_count"] = len(full_poll.pump_schedule_points)
+        block = get_active_pump_block(full_poll.pump_schedule_points, minute_of_day)
         if block:
             info["current_pump_mode"] = block.pump.mode.name
             info["current_pump_params"] = _format_pump_params(block.pump.params, group)
@@ -779,8 +702,8 @@ async def _fetch_all(
     # four attributes is supported.
     info["advanced_features"] = asdict(metadata.advanced_features) if metadata.advanced_features else None
 
-    info["configured_scenes"] = configured_scenes
-    info["current_scene"] = current_scene
+    info["configured_scenes"] = full_poll.configured_scenes
+    info["current_scene"] = current_scene = full_poll.current_scene
     # When the running scene ends, so the remaining time can count down
     # between polls.
     info["current_scene_ends_at"] = (
@@ -837,10 +760,6 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Read on the first successful poll; neither changes for a device.
         self._primitive_type: Optional[PrimitiveType] = None
         self._model: Optional[Model] = None
-        # Vectra closed-loop mode (see VectraInfo). A setting, but read only
-        # once since get_vectra_info() takes three reads; a change is picked
-        # up after a reload.
-        self._closed_loop: Optional[bool] = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -869,7 +788,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The device is looked up by serial, like sensor.py's _device_info()
         builds its identifiers.
         """
-        sw_version = derive_sw_version(data.get("firmware_versions") or {})
+        sw_version = data.get("sw_version")
         hw_version = derive_hw_version(data.get("hardware_info") or {})
         model = data.get("model")
         manufacturer = data.get("manufacturer")
@@ -1030,7 +949,6 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("%s poll (Bluetooth-only) failed: %s", self.serial, err)
             self.direct_connection.mark_disconnected()
             raise
-        data["closed_loop"] = self._closed_loop
         data["mesh_last_seen_at"] = None
         return data
 
@@ -1083,7 +1001,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Makes the tank's next check (within TANK_REVALIDATION_INTERVAL)
         read the mesh peer list."""
         runtime = getattr(self.config_entry, "runtime_data", None)
-        if runtime is not None and hasattr(runtime, "last_mesh_refresh"):
+        if runtime is not None:
             runtime.last_mesh_refresh = None
 
     async def _fetch(self) -> dict[str, Any]:
@@ -1146,11 +1064,6 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self.registry.record_relay_success(self.pan_id, self.serial)
 
-            if self._primitive_type == PrimitiveType.VectraV1 and self._closed_loop is None:
-                vectra_info = await device.get_vectra_info()  # None when unavailable
-                if vectra_info is not None:
-                    self._closed_loop = vectra_info.closed_loop
-            data["closed_loop"] = self._closed_loop
             if is_bluetooth_only(self._model):
                 # Read over the gateway connection, i.e. this device was
                 # the gateway: switch now (the data itself is fine).
@@ -1270,10 +1183,7 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             self.registry.update_mesh_address(self.pan_id, self.serial, address)
 
-        return MeshPeer(
-            serial=self.serial, model_raw=0, model=None,
-            short_address=extract_short_address(address), address=address,
-        )
+        return MeshPeer(serial=self.serial, address=address)
 
     async def _discover_own_mesh_address(self) -> Optional[bytes]:
         return await discover_mesh_address(self.hass, self.serial, self.registry.semaphore)

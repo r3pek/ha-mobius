@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Every poll, including the first, is one batched request.
+- Vectra closed-loop mode follows changes made in the app; devices the
+  library can't parse keep their support note after the first poll.
+
 ## 0.11.1
 
 - Renamed the Firmware update entity from "Firmware" to "Firmware update".

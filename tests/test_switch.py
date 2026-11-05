@@ -12,6 +12,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from mobius import Tank, AdvancedFeatures, MetadataSnapshot
 
+from tests.fake_full_poll import full_poll_from_reads
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, CONF_PAN_ID, CONF_DEVICES
 
 PAN_ID = 0x3D0F
@@ -39,6 +40,7 @@ def _minimal_pump_device(advanced_features_dict):
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     fake_point = MagicMock()
+    fake_point.time_minutes = 0
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
@@ -53,6 +55,7 @@ def _minimal_pump_device(advanced_features_dict):
     device.get_own_mesh_address = AsyncMock(
         return_value=bytes.fromhex("fdaaaaaaaaaaaaaa000000fffe001234")
     )
+    full_poll_from_reads(device)
     return device
 
 

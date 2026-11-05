@@ -14,6 +14,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import pytest
+from homeassistant.components.bluetooth import MONOTONIC_TIME
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -22,7 +23,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.mobius.const import DOMAIN, CONF_SERIAL, MARK_UNAVAILABLE_AFTER, GATEWAY_FAILURE_THRESHOLD, BATCH_FAILURE_THRESHOLD
 from custom_components.mobius.coordinator import (
-    MobiusConnectionManager, MobiusDeviceCoordinator, derive_sw_version, derive_hw_version,
+    MobiusConnectionManager, MobiusDeviceCoordinator, derive_hw_version,
     discover_mesh_address, discover_tank_for_serial, _fetch_all, moon_phase_icon, moon_phase_name,
     async_run_restart,
 )
@@ -56,6 +57,7 @@ def _fake_discovery_info(address: str, payload: bytes, company_id: int = MOBIUS_
     actually reads."""
     info = MagicMock()
     info.address = address
+    info.time = MONOTONIC_TIME()
     info.manufacturer_data = {company_id: payload}
     return info
 
@@ -73,8 +75,10 @@ def _make_fake_pump_device():
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VorTechV1)
+    device.get_supported_attributes = AsyncMock(return_value=[])
 
     fake_point = MagicMock()
+    fake_point.time_minutes = 0
     fake_point.pump.mode.name = "TidalSwell"
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 11)
@@ -92,7 +96,7 @@ def _make_fake_pump_device():
         device_info={
             "model_raw": 42, "model": "VorTechMP40wG3QD", "manufacturer": "EcoTech Marine",
             "name": "MP40QD Right", "serial": PUMP_SERIAL,
-            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+            "primitive_type": "VorTechV1", "error_state": "NoError", "mac_address": None,
         },
         metadata=MetadataSnapshot(
             advanced_features=None, calibration=None,
@@ -101,11 +105,14 @@ def _make_fake_pump_device():
                 "Radio": "4.0.21", "Radio Bootloader": "1.2",
                 "Product OS": "2.1.5", "Product Bootloader": "1.0",
             },
+            firmware_version="2.1.5",
             supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
         ),
         light_poll=None,
         pump_telemetry={"speed": 447, "speed_percent": 44.7, "gph": 2272},
         pump_schedule_points=[fake_point] * 11,
+        primitive=PrimitiveType.VorTechV1, model=Model.VorTechMP40wG3QD,
+        operation_state=device.get_operation_state.return_value,
     ))
     return device
 
@@ -127,12 +134,14 @@ def _make_fake_vectra_device(closed_loop=True, vectra_info_available=True):
     device.get_operation_state = AsyncMock()
     device.get_operation_state.return_value.name = "Schedule"
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VectraV1)
+    device.get_supported_attributes = AsyncMock(return_value=[])
     device.get_vectra_info = AsyncMock(
         return_value=VectraInfo(power_on_delay=5, closed_loop=closed_loop, feed_mode_return_delay=10)
         if vectra_info_available else None
     )
 
     fake_point = MagicMock()
+    fake_point.time_minutes = 0
     fake_point.pump.mode.name = "ConstantSpeed"
     fake_point.pump.params = {}
     device.get_pump_schedule = AsyncMock(return_value=[fake_point] * 5)
@@ -146,7 +155,7 @@ def _make_fake_vectra_device(closed_loop=True, vectra_info_available=True):
         device_info={
             "model_raw": 149, "model": "VectraL2", "manufacturer": "EcoTech Marine",
             "name": "Vectra L2", "serial": VECTRA_SERIAL,
-            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+            "primitive_type": "VectraV1", "error_state": "NoError", "mac_address": None,
         },
         metadata=MetadataSnapshot(
             advanced_features=None, calibration=None,
@@ -156,6 +165,9 @@ def _make_fake_vectra_device(closed_loop=True, vectra_info_available=True):
         light_poll=None,
         pump_telemetry={"speed": 300, "speed_percent": 30.0, "gph": None},
         pump_schedule_points=[fake_point] * 5,
+        primitive=PrimitiveType.VectraV1, model=Model.VectraL2,
+        operation_state=device.get_operation_state.return_value,
+        vectra_info=device.get_vectra_info.return_value,
     ))
     return device
 
@@ -168,6 +180,7 @@ def _make_fake_light_device():
         "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
     })
     device.identify_device_type = AsyncMock(return_value=PrimitiveType.VisualV1)
+    device.get_supported_attributes = AsyncMock(return_value=[])
     device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
         advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
@@ -183,7 +196,7 @@ def _make_fake_light_device():
         device_info={
             "model_raw": 179, "model": "RadionXR15wG6Pro", "manufacturer": "EcoTech Marine",
             "name": "", "serial": LIGHT_SERIAL,
-            "primitive_type": None, "error_state": "NoError", "mac_address": None,
+            "primitive_type": "VisualV1", "error_state": "NoError", "mac_address": None,
         },
         metadata=MetadataSnapshot(
             advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
@@ -198,7 +211,16 @@ def _make_fake_light_device():
         ),
         pump_telemetry=None,
         pump_schedule_points=None,
+        primitive=PrimitiveType.VisualV1, model=Model.RadionXR15wG6Pro,
     ))
+    base = device.get_full_poll_batch.return_value
+
+    async def full_poll(**_kwargs):
+        # The light part comes from get_light_poll_batch(), which tests
+        # replace to describe a light's state.
+        return dataclasses.replace(base, light_poll=await device.get_light_poll_batch())
+
+    device.get_full_poll_batch.side_effect = full_poll
     return device
 
 
@@ -543,7 +565,7 @@ async def test_successful_poll_stores_the_radio_type_in_the_registry(hass):
     coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()
-    fake_device.get_metadata_batch.return_value.hardware_info["RadioType"] = "KW41"
+    fake_device.get_full_poll_batch.return_value.metadata.hardware_info["RadioType"] = "KW41"
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
         await coordinator.async_refresh()
@@ -597,9 +619,7 @@ class TestSupportedAttributeIdCaching:
         fake_device.get_supported_attributes.assert_awaited_once()
         # And the cached set was genuinely what got passed through --
         # confirms this isn't just "never called again" by coincidence.
-        fake_device.get_metadata_batch.assert_awaited_with(
-            model=Model.VorTechMP40wG3QD, supported_attribute_ids={300}, force_individual_reads=False,
-        )
+        assert fake_device.get_full_poll_batch.await_args.kwargs["supported_attribute_ids"] == {300}
 
     async def test_cache_not_updated_on_a_failed_poll(self, hass):
         """A real, expected outcome: if a poll fails entirely, whatever
@@ -612,7 +632,7 @@ class TestSupportedAttributeIdCaching:
         coordinator._supported_attribute_ids = {999}  # pre-seed a fake prior cache
 
         broken_device = MagicMock()
-        broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+        broken_device.get_full_poll_batch = AsyncMock(side_effect=IOError("connection lost"))
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=broken_device)):
             await coordinator.async_refresh()
@@ -719,10 +739,10 @@ class TestSceneWiring:
             index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
             name="Feed", timeout=30, light=None, pump=None,
         )
-        fake_device.get_configured_scenes = AsyncMock(return_value=[the_scene])
-        fake_device.get_current_scene = AsyncMock(return_value=ActiveScene(
+        fake_device.get_full_poll_batch.return_value.configured_scenes = [the_scene]
+        fake_device.get_full_poll_batch.return_value.current_scene = ActiveScene(
             id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=25,
-        ))
+        )
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
             await coordinator.async_refresh()
@@ -790,18 +810,14 @@ class TestSceneWiring:
 
 
 class TestFullPollBatchWiring:
-    """The actual point of caching primitive_type/model on the
-    coordinator: the FIRST poll (identity not yet known) still learns
-    it via get_device_info(), but EVERY poll after that uses
-    get_full_poll_batch() exclusively -- no further identification
-    round-trip, ever, for that device's whole lifetime (see
-    get_full_poll_batch()'s own docstring in python-mobius)."""
+    """Every poll is one get_full_poll_batch(). The first one reads the
+    PrimitiveType itself; the coordinator then passes the primitive type
+    and model it learned to every later poll."""
 
-    async def test_first_poll_uses_device_info_not_full_poll_batch(self, hass):
+    async def test_first_poll_learns_the_primitive_type_and_model(self, hass):
         registry = _make_registry(hass)
         await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
         assert coordinator._primitive_type is None
         assert coordinator._model is None
 
@@ -811,28 +827,28 @@ class TestFullPollBatchWiring:
             await coordinator.async_refresh()
 
         assert coordinator.last_update_success
-        fake_device.get_device_info.assert_awaited_once()
-        fake_device.get_full_poll_batch.assert_not_awaited()
+        fake_device.get_full_poll_batch.assert_awaited_once_with(
+            primitive=None, model=None, which=1, minute_of_day=ANY, now=ANY,
+            supported_attribute_ids=ANY, force_individual_reads=False,
+            cache=coordinator.configuration_cache,
+        )
+        fake_device.get_device_info.assert_not_awaited()
         assert coordinator._primitive_type == PrimitiveType.VorTechV1
         assert coordinator._model == Model.VorTechMP40wG3QD
 
-    async def test_second_poll_uses_full_poll_batch_exclusively(self, hass):
+    async def test_later_polls_pass_the_learned_primitive_type_and_model(self, hass):
         registry = _make_registry(hass)
         await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
 
         fake_device = _make_fake_pump_device()
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()  # first poll -- learns identity
-            await coordinator.async_refresh()  # second poll -- should skip re-identifying
+            await coordinator.async_refresh()
+            await coordinator.async_refresh()
 
         assert coordinator.last_update_success
-        # The actual point: only ONE get_device_info() call across BOTH
-        # polls, not two -- the second poll never re-identifies.
-        fake_device.get_device_info.assert_awaited_once()
-        fake_device.get_full_poll_batch.assert_awaited_once()
+        assert fake_device.get_full_poll_batch.await_count == 2
         fake_device.get_full_poll_batch.assert_awaited_with(
             primitive=PrimitiveType.VorTechV1, model=Model.VorTechMP40wG3QD,
             which=1, minute_of_day=ANY, now=ANY,
@@ -842,11 +858,10 @@ class TestFullPollBatchWiring:
         assert coordinator.data["telemetry"]["speed"] == 447
         assert coordinator.data["schedule_point_count"] == 11
 
-    async def test_light_second_poll_uses_full_poll_batch_exclusively(self, hass):
+    async def test_light_polls_the_same_way(self, hass):
         registry = _make_registry(hass)
         await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, LIGHT_SERIAL, PAN_ID)
 
         fake_device = _make_fake_light_device()
         group = registry.group(PAN_ID)
@@ -855,15 +870,32 @@ class TestFullPollBatchWiring:
             await coordinator.async_refresh()
 
         assert coordinator.last_update_success
-        fake_device.get_device_info.assert_awaited_once()
-        fake_device.get_full_poll_batch.assert_awaited_once_with(
+        fake_device.get_full_poll_batch.assert_awaited_with(
             primitive=PrimitiveType.VisualV1, model=Model.RadionXR15wG6Pro,
             which=1, minute_of_day=ANY, now=ANY,
             supported_attribute_ids=ANY, force_individual_reads=False,
             cache=coordinator.configuration_cache,
         )
 
+    async def test_unsupported_device_keeps_its_support_note(self, hass):
+        """A device the library has no parser for (a dosing pump) polls
+        like any other and says so on every poll, not just the first."""
+        registry = _make_registry(hass)
+        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
 
+        fake_device = _make_fake_pump_device()
+        fake_device.get_full_poll_batch.return_value = dataclasses.replace(
+            fake_device.get_full_poll_batch.return_value, primitive=PrimitiveType.DoseV1, model=None,
+            pump_telemetry=None, pump_schedule_points=None, operation_state=None,
+        )
+        group = registry.group(PAN_ID)
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+            for _ in range(2):
+                await coordinator.async_refresh()
+                assert coordinator.last_update_success
+                assert "has no parser implemented" in coordinator.data["support_note"]
+                assert "telemetry" not in coordinator.data
 
     async def test_attribute_table_change_rereads_the_supported_attributes(self, hass):
         registry = _make_registry(hass)
@@ -878,103 +910,38 @@ class TestFullPollBatchWiring:
         ]
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()  # first poll: reads the supported attributes
-            await coordinator.async_refresh()  # full poll reports a changed table
+            await coordinator.async_refresh()  # reads the supported attributes; the poll reports a changed table
             await coordinator.async_refresh()  # reads them again
 
         assert fake_device.get_supported_attributes.await_count == 2
 
-class TestVectraClosedLoopCaching:
-    """closed_loop only matters for VectraV1 -- see coordinator.py's own
-    comment on self._closed_loop for why it's cached once (like
-    primitive_type/model) rather than re-fetched every poll."""
 
-    async def test_vectra_pump_gets_closed_loop_fetched_and_cached(self, hass):
+class TestVectraClosedLoop:
+    """closed_loop comes from the poll's Vectra settings (only Vectra
+    pumps have them), so a change made in the app shows up on the next
+    static refresh."""
+
+    async def _poll(self, hass, device):
         registry = _make_registry(hass)
         await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
-        assert coordinator._closed_loop is None
-
-        fake_device = _make_fake_vectra_device(closed_loop=True)
+        coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, VECTRA_SERIAL, PAN_ID)
         group = registry.group(PAN_ID)
-        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
+        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=device)):
             await coordinator.async_refresh()
-
         assert coordinator.last_update_success
-        fake_device.get_vectra_info.assert_awaited_once()
-        assert coordinator._closed_loop is True
-        assert coordinator.data["closed_loop"] is True
+        return coordinator
 
-    async def test_closed_loop_false_is_cached_and_reported_correctly(self, hass):
-        # Specifically NOT the same as "unknown" -- a real, confirmed
-        # False must survive being stored and read back, not collapse
-        # to the same thing an unfetched/failed value would produce.
-        registry = _make_registry(hass)
-        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
+    @pytest.mark.parametrize("closed_loop", [True, False])
+    async def test_closed_loop_from_the_poll(self, hass, closed_loop):
+        coordinator = await self._poll(hass, _make_fake_vectra_device(closed_loop=closed_loop))
+        assert coordinator.data["closed_loop"] is closed_loop
 
-        fake_device = _make_fake_vectra_device(closed_loop=False)
-        group = registry.group(PAN_ID)
-        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()
-
-        assert coordinator._closed_loop is False
-        assert coordinator.data["closed_loop"] is False
-
-    async def test_second_poll_does_not_refetch_closed_loop(self, hass):
-        registry = _make_registry(hass)
-        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
-
-        fake_device = _make_fake_vectra_device(closed_loop=True)
-        group = registry.group(PAN_ID)
-        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()  # first poll -- fetches and caches
-            await coordinator.async_refresh()  # second poll -- must NOT re-fetch
-
-        # The actual point: only ONE get_vectra_info() call across BOTH
-        # polls -- three separate protocol round-trips each time this
-        # is called, a real ongoing cost this caching exists to avoid.
-        fake_device.get_vectra_info.assert_awaited_once()
-        assert coordinator.data["closed_loop"] is True
-
-    async def test_non_vectra_pump_never_calls_get_vectra_info(self, hass):
-        registry = _make_registry(hass)
-        await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
-
-        fake_device = _make_fake_pump_device()  # VorTechV1, not Vectra
-        fake_device.get_vectra_info = AsyncMock(
-            side_effect=AssertionError("get_vectra_info() should never be called for a non-Vectra pump")
-        )
-        group = registry.group(PAN_ID)
-        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()
-
-        assert coordinator.last_update_success
+    async def test_unavailable_vectra_settings_give_none(self, hass):
+        coordinator = await self._poll(hass, _make_fake_vectra_device(vectra_info_available=False))
         assert coordinator.data["closed_loop"] is None
 
-    async def test_vectra_info_unavailable_fails_soft_to_none(self, hass):
-        # get_vectra_info() itself already returns None on failure
-        # (unsupported attribute, connection hiccup) -- this confirms
-        # the coordinator doesn't crash or wedge when that happens,
-        # and simply leaves closed_loop at its own default.
-        registry = _make_registry(hass)
-        await registry.join(PAN_ID, VECTRA_SERIAL, rssi=-50)
-        entry = MagicMock()
-        coordinator = MobiusDeviceCoordinator(hass, entry, registry, VECTRA_SERIAL, PAN_ID)
-
-        fake_device = _make_fake_vectra_device(vectra_info_available=False)
-        group = registry.group(PAN_ID)
-        with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
-            await coordinator.async_refresh()
-
-        assert coordinator.last_update_success
-        assert coordinator._closed_loop is None
+    async def test_other_pumps_have_no_closed_loop(self, hass):
+        coordinator = await self._poll(hass, _make_fake_pump_device())
         assert coordinator.data["closed_loop"] is None
 
 
@@ -1000,9 +967,10 @@ class TestCurrentPumpModeMasterTranslation:
 
         device = _make_fake_pump_device()
         fake_point = MagicMock()
+        fake_point.time_minutes = 0
         fake_point.pump.mode.name = "Sync"
         fake_point.pump.params = {PumpParam.Master: parent_address[-8:], PumpParam.MaxSpeed: 300}
-        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+        device.get_full_poll_batch.return_value.pump_schedule_points = [fake_point]
 
         info, *_ = await _fetch_all(device, group=group)
 
@@ -1022,9 +990,10 @@ class TestCurrentPumpModeMasterTranslation:
 
         device = _make_fake_pump_device()
         fake_point = MagicMock()
+        fake_point.time_minutes = 0
         fake_point.pump.mode.name = "Sync"
         fake_point.pump.params = {PumpParam.Master: bytes.fromhex("aabbccdd11223344")}
-        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+        device.get_full_poll_batch.return_value.pump_schedule_points = [fake_point]
 
         info, *_ = await _fetch_all(device, group=group)
 
@@ -1036,9 +1005,10 @@ class TestCurrentPumpModeMasterTranslation:
         never raise, just skip this one translation."""
         device = _make_fake_pump_device()
         fake_point = MagicMock()
+        fake_point.time_minutes = 0
         fake_point.pump.mode.name = "Sync"
         fake_point.pump.params = {PumpParam.Master: bytes.fromhex("aabbccdd11223344")}
-        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+        device.get_full_poll_batch.return_value.pump_schedule_points = [fake_point]
 
         info, *_ = await _fetch_all(device)
 
@@ -1051,9 +1021,10 @@ class TestCurrentPumpModeMasterTranslation:
 
         device = _make_fake_pump_device()
         fake_point = MagicMock()
+        fake_point.time_minutes = 0
         fake_point.pump.mode.name = "ConstantSpeed"
         fake_point.pump.params = {PumpParam.MaxSpeed: 450}
-        device.get_current_pump_block = AsyncMock(return_value=fake_point)
+        device.get_full_poll_batch.return_value.pump_schedule_points = [fake_point]
 
         info, *_ = await _fetch_all(device, group=group)
 
@@ -1210,22 +1181,18 @@ class TestLightPollBatchWiring:
         assert coordinator.data["lunar_enabled"] is None
         assert coordinator.data["moon_phase_icon"] is None
 
-    async def test_light_poll_batch_failure_still_counts_toward_the_shared_threshold(self, hass):
-        """metadata batch succeeds, but the light-poll batch specifically
-        fails -- confirms the OVERALL used_batch (and therefore the
-        shared failure counter) reflects that failure, not just the
-        metadata batch's own success."""
+    async def test_a_poll_that_fell_back_counts_toward_the_threshold(self, hass):
+        """The poll's used_batch (False: its batch failed and it was read
+        one attribute at a time) feeds the failure counter."""
         registry = _make_registry(hass)
         await registry.join(PAN_ID, LIGHT_SERIAL, rssi=-50)
         entry = MagicMock()
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, LIGHT_SERIAL, PAN_ID)
 
         fake_device = _make_fake_light_device()
-        fake_device.get_light_poll_batch = AsyncMock(return_value=LightPollResult(
-            schedule_points=[],
-            intensities=LightIntensityResult({}, diagnostics={}),
-            used_batch=False,
-        ))
+        base = fake_device.get_full_poll_batch.return_value
+        fake_device.get_full_poll_batch.side_effect = None
+        fake_device.get_full_poll_batch.return_value = dataclasses.replace(base, used_batch=False)
         group = registry.group(PAN_ID)
         with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
             await coordinator.async_refresh()
@@ -1313,7 +1280,7 @@ class TestBatchFailureThreshold:
 
     async def test_once_disabled_the_next_fetch_requests_individual_reads(self, hass):
         """The actual end-to-end point of all this bookkeeping: once
-        disabled, the NEXT poll must ask get_metadata_batch() for
+        disabled, the NEXT poll must ask get_full_poll_batch() for
         force_individual_reads=True, not just track the state
         internally without ever acting on it."""
         registry = _make_registry(hass)
@@ -1328,9 +1295,7 @@ class TestBatchFailureThreshold:
             await coordinator.async_refresh()
 
         assert coordinator.last_update_success
-        fake_device.get_metadata_batch.assert_awaited_with(
-            model=Model.VorTechMP40wG3QD, supported_attribute_ids=set(), force_individual_reads=True,
-        )
+        assert fake_device.get_full_poll_batch.await_args.kwargs["force_individual_reads"] is True
 
     async def test_repeated_polls_after_disabling_do_not_grow_the_counter(self, hass):
         """The exact real-world scenario this fix addresses: once
@@ -1508,7 +1473,7 @@ async def test_gateway_read_failure_after_successful_connect_also_reports_and_ma
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     broken_device = MagicMock()
-    broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+    broken_device.get_full_poll_batch = AsyncMock(side_effect=IOError("connection lost"))
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=broken_device)), \
@@ -1547,7 +1512,7 @@ async def test_gateway_failure_stale_after_concurrent_promotion_is_dropped(hass)
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     broken_device = MagicMock()
-    broken_device.get_device_info = AsyncMock(side_effect=IOError("connection lost"))
+    broken_device.get_full_poll_batch = AsyncMock(side_effect=IOError("connection lost"))
 
     group = registry.group(PAN_ID)
     old_gateway_connection = group.gateway_connection
@@ -1687,7 +1652,7 @@ async def test_relayed_coordinator_failure_does_not_touch_gateway_connection_sta
 
     fake_gateway_device = MagicMock()
     broken_relayed_device = MagicMock()
-    broken_relayed_device.get_device_info = AsyncMock(side_effect=IOError("relay failed"))
+    broken_relayed_device.get_full_poll_batch = AsyncMock(side_effect=IOError("relay failed"))
     group = registry.group(PAN_ID)
     _mark_gateway_connected(group)
 
@@ -1909,16 +1874,16 @@ async def test_coordinator_syncs_device_registry_sw_and_hw_version_on_change(has
     coordinator = MobiusDeviceCoordinator(hass, entry, registry, PUMP_SERIAL, PAN_ID)
 
     fake_device = _make_fake_pump_device()
-    fake_device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+    fake_device.get_full_poll_batch.return_value.metadata = MetadataSnapshot(
         advanced_features=None, calibration=None,
         hardware_info={"Revision": 2},  # a board revision
         firmware_versions={
             "Radio": "4.0.22", "Radio Bootloader": "1.2",
-            "Product OS": "2.2.0",  # the NEW version, after the OTA update
-            "Product Bootloader": "1.0",
+            "Product OS": "2.2.0", "Product Bootloader": "1.0",
         },
+        firmware_version="2.2.0",  # the NEW main version, after the OTA update
         supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
-    ))
+    )
 
     group = registry.group(PAN_ID)
     with patch.object(group.gateway_connection, "ensure_connected", AsyncMock(return_value=fake_device)):
@@ -2042,96 +2007,6 @@ async def test_coordinator_does_not_touch_registry_name_when_already_correct(has
 
     assert coordinator.last_update_success
     mock_update.assert_not_called()
-
-
-# --------------------------------------------------------------------------
-# derive_sw_version() -- picks a "main" firmware version to display,
-# falling through a priority list rather than assuming "Product OS" is
-# always present. Real hardware testing found at least some Radion
-# lights don't report that specific FirmwareType at all, which left
-# sw_version silently empty for those devices with a single hardcoded
-# lookup -- these tests cover the actual bug scenario, not just the
-# already-working "Product OS present" case.
-# --------------------------------------------------------------------------
-
-class TestDeriveSwVersion:
-    def test_prefers_firmware_over_product_os_when_both_present(self):
-        """The actual current behavior: "Firmware" (the light's real LED-
-        driver microcontroller, FirmwareType.LEDClusterMicro/
-        Esp32*Firmware) is confirmed via direct comparison against the
-        official app's own display to be what it treats as primary --
-        not "Product OS" (FirmwareType.MainMicroOS), even when both are
-        present. See _SW_VERSION_LABEL_PRIORITY's comment for why an
-        earlier version of this logic had these the other way around."""
-        versions = {
-            "Firmware": "1.0.2", "Product OS": "0.0.12", "Product Bootloader": "3.3.0",
-            "Radio Firmware": "1.5.103", "Radio OS": "1.5.103", "Radio": "3.1.0",
-        }
-        assert derive_sw_version(versions) == "1.0.2"
-
-    def test_prefers_product_os_when_no_firmware_label(self):
-        versions = {
-            "Product OS": "2.1.5", "Radio Firmware": "1.5.103", "Radio OS": "1.5.103",
-        }
-        assert derive_sw_version(versions) == "2.1.5"
-
-    def test_falls_back_to_radio_firmware_when_no_product_os(self):
-        """The actual real-hardware scenario this was built for: a light
-        that reports Radio Firmware/Filesystem/Radio OS/Radio/WLAN but no
-        Product OS at all (no MainMicroOS FirmwareType in its response)."""
-        versions = {
-            "Radio Firmware": "1.5.103", "Filesystem": "1.1.0",
-            "Radio OS": "1.5.103", "Radio": "3.1.0", "WLAN": "3.1.0",
-        }
-        assert derive_sw_version(versions) == "1.5.103"
-
-    def test_falls_back_to_radio_os_when_no_product_os_or_radio_firmware(self):
-        versions = {"Radio OS": "1.5.103", "WLAN": "3.1.0"}
-        assert derive_sw_version(versions) == "1.5.103"
-
-    def test_falls_back_to_radio_as_last_resort(self):
-        versions = {"WLAN": "3.1.0", "Radio": "3.1.0"}
-        assert derive_sw_version(versions) == "3.1.0"
-
-    def test_returns_none_when_nothing_in_priority_list_present(self):
-        versions = {"Product Bootloader": "1.0", "Radio Bootloader": "1.2"}
-        assert derive_sw_version(versions) is None
-
-    def test_returns_none_for_empty_dict(self):
-        assert derive_sw_version({}) is None
-
-    def test_ignores_empty_string_values(self):
-        """A present-but-empty value shouldn't be treated as "found" --
-        must fall through to the next candidate."""
-        versions = {"Product OS": "", "Radio Firmware": "1.5.103"}
-        assert derive_sw_version(versions) == "1.5.103"
-
-    def test_ai_axis_pump_uses_os_label(self):
-        """A real, reported production gap: AquaIllumination-brand
-        devices report an entirely different label set than EcoTech-
-        brand ones -- "OS" here, matching neither "Firmware" nor
-        "Product OS" -- so sw_version came back None despite
-        firmware_versions itself being fully populated (confirmed via
-        the sensor's own extra_state_attributes still showing every
-        individual firmware component correctly). Real values, from an
-        actual AI Axis 40."""
-        versions = {"OS": "2.3.15", "Bootloader": "1.5.0"}
-        assert derive_sw_version(versions) == "2.3.15"
-
-    def test_ai_prime_light_falls_back_to_qca4020_firmware_label(self):
-        """Same gap, the light-side variant: no "OS" label at all here
-        (that's pump-specific), so this needs its own fallback. Order
-        (OS checked first, in the priority list above this one) confirmed
-        directly against the app's own TDevice.json() -- its own
-        diagnostics-export method picks exactly this same priority for
-        its own single "main version" field, since a device only ever
-        reports one of the two labels, never both. Real values, from an
-        actual AI Prime 16HD."""
-        versions = {
-            "QCA4020Firmware": "1.5.69", "QCA4020FileSystem": "1.1.0",
-            "QCA4020M4F": "1.5.69", "QCA4020M0": "3.1.0", "QCA4020WLAN": "3.1.0",
-        }
-        assert derive_sw_version(versions) == "1.5.69"
 
 
 class TestDeriveHwVersion:

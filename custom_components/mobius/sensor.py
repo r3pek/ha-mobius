@@ -26,7 +26,7 @@ from mobius import format_mesh_address
 
 from . import MobiusRuntimeData
 from .const import DOMAIN, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
-from .coordinator import MobiusDeviceCoordinator, derive_sw_version, derive_hw_version, device_display_name, used_scenes
+from .coordinator import MobiusDeviceCoordinator, derive_hw_version, device_display_name, used_scenes
 from .entity import entry_tank_identifier, iter_entry_devices
 
 _LOGGER = logging.getLogger(__name__)
@@ -318,9 +318,9 @@ class CalibrationSensor(MobiusEntity):
 
 
 class FirmwareVersionSensor(MobiusEntity):
-    """The firmware version shown as the device's sw_version (see
-    derive_sw_version()), with every firmware component and the supported
-    attribute names as attributes.
+    """The firmware version shown as the device's sw_version (python-mobius
+    main_firmware_version()), with every firmware component and the
+    supported attribute names as attributes.
     """
 
     def __init__(self, coordinator, serial, device_info):
@@ -334,7 +334,7 @@ class FirmwareVersionSensor(MobiusEntity):
 
     @property
     def native_value(self):
-        return derive_sw_version((self.coordinator.data or {}).get("firmware_versions") or {})
+        return (self.coordinator.data or {}).get("sw_version")
 
     @property
     def extra_state_attributes(self):
