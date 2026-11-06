@@ -544,12 +544,21 @@ def used_scenes(data: dict) -> list:
     return [s for s in data.get("configured_scenes") or [] if not s.is_empty]
 
 
+def container_is_monitored(dose: dict | None) -> bool:
+    """False when the pump reports it doesn't track its container level
+    (ContainerMonitor NoMonitor): the remaining volume then means nothing.
+    An unknown monitor type counts as monitored."""
+    return bool(dose) and dose.get("container_monitor") != "none"
+
+
 def _enum_key(value) -> Optional[str]:
     """A dose enum as the state the sensors show: its name in lower case,
-    "none" for the no-sensor / no-monitor / not-halted value."""
+    "none" for NoSensor / NoMonitor. The states are the ENUM sensors'
+    options (sensor.py)."""
     if value is None:
         return None
-    return "none" if value == 0 else value.name.lower()
+    name = value.name.lower()
+    return "none" if name.startswith("no") else name
 
 
 def _dose_info_dict(dose) -> Optional[dict[str, Any]]:

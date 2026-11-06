@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData
-from .coordinator import MobiusDeviceCoordinator, async_tank_broadcast
+from .coordinator import MobiusDeviceCoordinator, async_tank_broadcast, container_is_monitored
 from .entity import async_add_device_entities, async_run_on_device, entry_tank_identifier, iter_entry_devices
 
 
@@ -60,6 +60,10 @@ class RefillContainerButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEn
         self._attr_unique_id = f"{serial}_refill_container"
         self._attr_translation_key = "refill_container"
         self._attr_device_info = device_info
+
+    @property
+    def available(self) -> bool:
+        return super().available and container_is_monitored((self.coordinator.data or {}).get("dose"))
 
     async def async_press(self) -> None:
         """Raises HomeAssistantError when the container size is unknown or

@@ -120,7 +120,8 @@ class _PumpBatteryNumber(CoordinatorEntity[MobiusDeviceCoordinator], NumberEntit
     @property
     def native_value(self) -> Optional[float]:
         group = self._group_data()
-        return group[self._field] * self._scale if group else None
+        value = group.get(self._field) if group else None
+        return None if value is None else value * self._scale
 
     async def async_set_native_value(self, value: float) -> None:
         await async_run_on_device(

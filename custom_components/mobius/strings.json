@@ -87,10 +87,20 @@
         "name": "Dosed today"
       },
       "container_monitor": {
-        "name": "Container monitoring"
+        "name": "Container monitoring",
+        "state": {
+          "none": "None",
+          "countdown": "Countdown",
+          "sensor": "Sensor"
+        }
       },
       "dose_halt_state": {
-        "name": "Dosing halt state"
+        "name": "Dosing halt state",
+        "state": {
+          "running": "Running",
+          "pause": "Paused",
+          "stop": "Stopped"
+        }
       },
       "dose_daily_target": {
         "name": "Daily dose (schedule)"

@@ -26,7 +26,7 @@ from mobius import format_mesh_address
 
 from . import MobiusRuntimeData
 from .const import DOMAIN, CONF_PAN_ID, CONF_DEVICES, CONF_MLPREFIX
-from .coordinator import MobiusDeviceCoordinator, derive_hw_version, device_display_name, used_scenes
+from .coordinator import MobiusDeviceCoordinator, container_is_monitored, derive_hw_version, device_display_name, used_scenes
 from .entity import async_add_device_entities, entry_tank_identifier
 
 _LOGGER = logging.getLogger(__name__)
@@ -498,8 +498,11 @@ class _DoseSensor(MobiusEntity):
     _unit: str | None = None
     _device_class = None
     _state_class = None
+    _options: list[str] | None = None
     _diagnostic = False
     _enabled_default = True
+    # Only meaningful when the pump tracks the container level (not NoMonitor).
+    _needs_container_monitor = False
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
@@ -507,7 +510,7 @@ class _DoseSensor(MobiusEntity):
             SensorEntityDescription(
                 key=self._key, translation_key=self._key, icon=self._icon,
                 native_unit_of_measurement=self._unit, device_class=self._device_class,
-                state_class=self._state_class,
+                state_class=self._state_class, options=self._options,
                 entity_registry_enabled_default=self._enabled_default,
             ),
             device_info, diagnostic=self._diagnostic,
@@ -519,7 +522,13 @@ class _DoseSensor(MobiusEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and bool(self.data.get("dose"))
+        if not (super().available and self.data.get("dose")):
+            return False
+        return not self._needs_container_monitor or container_is_monitored(self.dose)
+
+
+CONTAINER_MONITOR_OPTIONS = ["none", "countdown", "sensor"]
+DOSE_HALT_STATE_OPTIONS = ["running", "pause", "stop"]
 
 
 def _ul_to_ml(value):
@@ -528,6 +537,7 @@ def _ul_to_ml(value):
 
 class ContainerRemainingSensor(_DoseSensor):
     _key = "container_remaining"
+    _needs_container_monitor = True
     _icon = "mdi:cup-water"
     _unit = "mL"
     _device_class = SensorDeviceClass.VOLUME_STORAGE
@@ -552,6 +562,7 @@ class ContainerVolumeSensor(_DoseSensor):
 
 class ContainerLevelSensor(_DoseSensor):
     _key = "container_level"
+    _needs_container_monitor = True
     _icon = "mdi:gauge"
     _unit = "%"
     _state_class = SensorStateClass.MEASUREMENT
@@ -606,6 +617,7 @@ class DoseExpectedSoFarSensor(_DoseSensor):
 class ContainerDaysLeftSensor(_DoseSensor):
     """Remaining container volume divided by the schedule's daily volume."""
     _key = "container_days_left"
+    _needs_container_monitor = True
     _icon = "mdi:calendar-clock"
     _unit = "d"
     _state_class = SensorStateClass.MEASUREMENT
@@ -622,6 +634,8 @@ class ContainerDaysLeftSensor(_DoseSensor):
 class ContainerMonitorSensor(_DoseSensor):
     _key = "container_monitor"
     _icon = "mdi:eye-outline"
+    _device_class = SensorDeviceClass.ENUM
+    _options = CONTAINER_MONITOR_OPTIONS
     _diagnostic = True
     _enabled_default = False
 
@@ -633,6 +647,8 @@ class ContainerMonitorSensor(_DoseSensor):
 class DoseHaltStateSensor(_DoseSensor):
     _key = "dose_halt_state"
     _icon = "mdi:pause-octagon-outline"
+    _device_class = SensorDeviceClass.ENUM
+    _options = DOSE_HALT_STATE_OPTIONS
 
     @property
     def native_value(self):

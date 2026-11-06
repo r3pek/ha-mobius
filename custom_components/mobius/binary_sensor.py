@@ -9,7 +9,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import MobiusDeviceCoordinator
+from .coordinator import MobiusDeviceCoordinator, container_is_monitored
 from .entity import async_add_device_entities
 
 
@@ -55,7 +55,7 @@ class ContainerEmptyBinarySensor(CoordinatorEntity[MobiusDeviceCoordinator], Bin
 
     @property
     def available(self) -> bool:
-        return super().available and bool((self.coordinator.data or {}).get("dose"))
+        return super().available and container_is_monitored((self.coordinator.data or {}).get("dose"))
 
     @property
     def is_on(self) -> bool | None:

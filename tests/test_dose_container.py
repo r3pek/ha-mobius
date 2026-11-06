@@ -16,10 +16,14 @@ from custom_components.mobius.binary_sensor import ContainerEmptyBinarySensor, _
 from custom_components.mobius.button import RefillContainerButton, _build_refill_buttons
 from custom_components.mobius.number import ContainerSizeNumber, _build_device_numbers
 from custom_components.mobius.sensor import (
+    CONTAINER_MONITOR_OPTIONS,
+    DOSE_HALT_STATE_OPTIONS,
     ContainerDaysLeftSensor,
     ContainerLevelSensor,
+    ContainerMonitorSensor,
     ContainerRemainingSensor,
     DoseDailyTargetSensor,
+    DoseHaltStateSensor,
     DosedTodaySensor,
     _build_dose_entities,
 )
@@ -136,3 +140,36 @@ async def test_container_size_number_resets_the_remaining_volume_like_the_app():
     await number.async_set_native_value(250)
     # set_container_volume() also sets the remaining volume (default).
     device.set_container_volume.assert_awaited_once_with(250_000)
+
+
+def test_enum_states_match_the_sensor_options():
+    assert [coord._enum_key(v) for v in ContainerMonitorType] == CONTAINER_MONITOR_OPTIONS
+    assert [coord._enum_key(v) for v in DoseHaltState] == DOSE_HALT_STATE_OPTIONS
+    c = _coordinator({"container_monitor": "countdown", "halt_state": "running"})
+    for cls, options in ((ContainerMonitorSensor, CONTAINER_MONITOR_OPTIONS),
+                         (DoseHaltStateSensor, DOSE_HALT_STATE_OPTIONS)):
+        entity = cls(c, SERIAL, {})
+        assert entity.device_class == "enum" and entity.options == options
+
+
+def test_level_entities_are_unavailable_without_container_monitoring():
+    dose = {"container_volume_ul": 500_000, "container_current_volume_ul": 0,
+            "daily_target_ul": 2000, "container_monitor": "none"}
+    c = _coordinator(dose)
+    for entity in (ContainerRemainingSensor(c, SERIAL, {}), ContainerLevelSensor(c, SERIAL, {}),
+                   ContainerDaysLeftSensor(c, SERIAL, {}), ContainerEmptyBinarySensor(c, SERIAL, {}),
+                   RefillContainerButton(c, SERIAL, {})):
+        assert entity.available is False, entity
+    assert DosedTodaySensor(c, SERIAL, {}).available is True
+    assert ContainerMonitorSensor(c, SERIAL, {}).available is True
+    # Countdown, sensor and an unknown monitor type keep them available.
+    for monitor in ("countdown", "sensor", None):
+        dose["container_monitor"] = monitor
+        assert ContainerRemainingSensor(c, SERIAL, {}).available is True
+        assert RefillContainerButton(c, SERIAL, {}).available is True
+
+
+def test_container_size_number_without_a_size():
+    number = ContainerSizeNumber(_coordinator({"container_volume_ul": None}), SERIAL,
+                                 "container_size", "mdi:cup-outline", {})
+    assert number.native_value is None
