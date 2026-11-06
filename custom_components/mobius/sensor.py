@@ -66,6 +66,7 @@ class _DataKeySensor(MobiusEntity):
     _key: str
     _icon: str
     _diagnostic = False
+    _enabled_default = True
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
@@ -488,6 +489,170 @@ class GatewayDeviceSensor(SensorEntity):
         return {"serial": serial}
 
 
+
+class _DoseSensor(MobiusEntity):
+    """A dosing pump container sensor computed from coordinator.data["dose"]."""
+
+    _key: str
+    _icon: str
+    _unit: str | None = None
+    _device_class = None
+    _state_class = None
+    _diagnostic = False
+    _enabled_default = True
+
+    def __init__(self, coordinator, serial, device_info):
+        super().__init__(
+            coordinator, serial, self._key,
+            SensorEntityDescription(
+                key=self._key, translation_key=self._key, icon=self._icon,
+                native_unit_of_measurement=self._unit, device_class=self._device_class,
+                state_class=self._state_class,
+                entity_registry_enabled_default=self._enabled_default,
+            ),
+            device_info, diagnostic=self._diagnostic,
+        )
+
+    @property
+    def dose(self) -> dict:
+        return self.data.get("dose") or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self.data.get("dose"))
+
+
+def _ul_to_ml(value):
+    return None if value is None else round(value / 1000.0, 1)
+
+
+class ContainerRemainingSensor(_DoseSensor):
+    _key = "container_remaining"
+    _icon = "mdi:cup-water"
+    _unit = "mL"
+    _device_class = SensorDeviceClass.VOLUME_STORAGE
+    _state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def native_value(self):
+        return _ul_to_ml(self.dose.get("container_current_volume_ul"))
+
+
+class ContainerVolumeSensor(_DoseSensor):
+    _key = "container_volume"
+    _icon = "mdi:cup-outline"
+    _unit = "mL"
+    _device_class = SensorDeviceClass.VOLUME_STORAGE
+    _diagnostic = True
+
+    @property
+    def native_value(self):
+        return _ul_to_ml(self.dose.get("container_volume_ul"))
+
+
+class ContainerLevelSensor(_DoseSensor):
+    _key = "container_level"
+    _icon = "mdi:gauge"
+    _unit = "%"
+    _state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def native_value(self):
+        total = self.dose.get("container_volume_ul")
+        current = self.dose.get("container_current_volume_ul")
+        if not total or current is None:
+            return None
+        return max(0, min(100, round(current * 100 / total)))
+
+
+class DosedTodaySensor(_DoseSensor):
+    _key = "dosed_today"
+    _icon = "mdi:water-check"
+    _unit = "mL"
+    _device_class = SensorDeviceClass.VOLUME
+    _state_class = SensorStateClass.TOTAL_INCREASING
+
+    @property
+    def native_value(self):
+        return _ul_to_ml(self.dose.get("dispensed_today_ul"))
+
+
+class DoseDailyTargetSensor(_DoseSensor):
+    """Daily volume of the dose schedule (the app's "Daily volume")."""
+    _key = "dose_daily_target"
+    _icon = "mdi:calendar-today"
+    _unit = "mL"
+    _device_class = SensorDeviceClass.VOLUME
+    _state_class = None
+
+    @property
+    def native_value(self):
+        return _ul_to_ml(self.dose.get("daily_target_ul"))
+
+
+class DoseExpectedSoFarSensor(_DoseSensor):
+    """What the schedule should have dispensed since midnight."""
+    _key = "dose_expected_so_far"
+    _icon = "mdi:progress-clock"
+    _unit = "mL"
+    _device_class = SensorDeviceClass.VOLUME
+    _state_class = SensorStateClass.TOTAL_INCREASING
+
+    @property
+    def native_value(self):
+        return _ul_to_ml(self.dose.get("expected_so_far_ul"))
+
+
+class ContainerDaysLeftSensor(_DoseSensor):
+    """Remaining container volume divided by the schedule's daily volume."""
+    _key = "container_days_left"
+    _icon = "mdi:calendar-clock"
+    _unit = "d"
+    _state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def native_value(self):
+        remaining = self.dose.get("container_current_volume_ul")
+        target = self.dose.get("daily_target_ul")
+        if remaining is None or not target or target <= 0:
+            return None
+        return round(max(remaining, 0) / target, 1)
+
+
+class ContainerMonitorSensor(_DoseSensor):
+    _key = "container_monitor"
+    _icon = "mdi:eye-outline"
+    _diagnostic = True
+    _enabled_default = False
+
+    @property
+    def native_value(self):
+        return self.dose.get("container_monitor")
+
+
+class DoseHaltStateSensor(_DoseSensor):
+    _key = "dose_halt_state"
+    _icon = "mdi:pause-octagon-outline"
+
+    @property
+    def native_value(self):
+        return self.dose.get("halt_state")
+
+
+def _build_dose_entities(coordinator, serial, device_info) -> list[SensorEntity]:
+    return [
+        ContainerRemainingSensor(coordinator, serial, device_info),
+        ContainerVolumeSensor(coordinator, serial, device_info),
+        ContainerLevelSensor(coordinator, serial, device_info),
+        DosedTodaySensor(coordinator, serial, device_info),
+        DoseDailyTargetSensor(coordinator, serial, device_info),
+        DoseExpectedSoFarSensor(coordinator, serial, device_info),
+        ContainerDaysLeftSensor(coordinator, serial, device_info),
+        ContainerMonitorSensor(coordinator, serial, device_info),
+        DoseHaltStateSensor(coordinator, serial, device_info),
+    ]
+
+
 def _build_device_sensors(coordinator, serial, device_info, data) -> list[SensorEntity]:
     """Every sensor of one device, from its current data (see entity.py's
     async_add_device_entities())."""
@@ -504,6 +669,9 @@ def _build_device_sensors(coordinator, serial, device_info, data) -> list[Sensor
     # Devices without scene support report no slots at all.
     if data.get("configured_scenes"):
         entities.append(ConfiguredScenesSensor(coordinator, serial, device_info))
+    # Dosing pumps only (python-mobius DoseInfo).
+    if data.get("dose"):
+        entities += _build_dose_entities(coordinator, serial, device_info)
     return entities + _build_type_specific_entities(coordinator, serial, device_info, data.get("support", ""), data)
 
 

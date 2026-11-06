@@ -232,8 +232,32 @@ def _build_pump_battery_numbers(coordinator, serial, device_info, data) -> list[
     return entities
 
 
+class ContainerSizeNumber(_PumpBatteryNumber):
+    """Container size of a dosing pump, in mL. Like the app, setting it
+    also sets the remaining volume to the new size (python-mobius
+    set_container_volume())."""
+
+    _group = "dose"
+    _field = "container_volume_ul"
+    _scale = 0.001
+    _attr_native_min_value = 1
+    _attr_native_max_value = 100000
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "mL"
+
+    async def _async_write(self, device, value: float) -> None:
+        await device.set_container_volume(int(round(value * 1000)))
+
+
+def _build_device_numbers(coordinator, serial, device_info, data) -> list[NumberEntity]:
+    entities = _build_pump_battery_numbers(coordinator, serial, device_info, data)
+    if (data.get("dose") or {}).get("container_volume_ul") is not None:
+        entities.append(ContainerSizeNumber(coordinator, serial, "container_size", "mdi:cup-outline", device_info))
+    return entities
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     async_add_entities([PollIntervalNumber(entry, entry_tank_identifier(entry))])
-    async_add_device_entities(hass, entry, async_add_entities, _build_pump_battery_numbers)
+    async_add_device_entities(hass, entry, async_add_entities, _build_device_numbers)

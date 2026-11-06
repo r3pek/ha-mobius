@@ -1,4 +1,5 @@
-"""Button entities: reboot a device, restart every device of a tank."""
+"""Button entities: reboot a device, restart every device of a tank,
+refill a dosing pump's container."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import MobiusRuntimeData
 from .coordinator import MobiusDeviceCoordinator, async_tank_broadcast
-from .entity import async_run_on_device, entry_tank_identifier, iter_entry_devices
+from .entity import async_add_device_entities, async_run_on_device, entry_tank_identifier, iter_entry_devices
 
 
 class RebootButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEntity):
@@ -41,6 +42,40 @@ class RebootButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEntity):
         await async_run_on_device(
             self.coordinator, lambda device: device.reboot(), f"Failed to reboot {self._serial}",
         )
+
+
+class RefillContainerButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEntity):
+    """Marks a dosing pump's container as refilled, like the app's
+    "Refill": the remaining volume is set back to the container size
+    (python-mobius refill_container())."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:cup-water"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: MobiusDeviceCoordinator, serial: str,
+                 device_info: DeviceInfo) -> None:
+        super().__init__(coordinator)
+        self._serial = serial
+        self._attr_unique_id = f"{serial}_refill_container"
+        self._attr_translation_key = "refill_container"
+        self._attr_device_info = device_info
+
+    async def async_press(self) -> None:
+        """Raises HomeAssistantError when the container size is unknown or
+        the write fails."""
+        # The size from the last poll saves reading it; without one the
+        # library reads it from the pump.
+        volume = ((self.coordinator.data or {}).get("dose") or {}).get("container_volume_ul")
+        await async_run_on_device(
+            self.coordinator, lambda device: device.refill_container(volume),
+            f"Failed to refill the container of {self._serial}",
+        )
+        await self.coordinator.async_request_refresh()
+
+
+def _build_refill_buttons(coordinator, serial, device_info, data) -> list[ButtonEntity]:
+    return [RefillContainerButton(coordinator, serial, device_info)] if data.get("dose") else []
 
 
 class RestartAllButton(ButtonEntity):
@@ -107,3 +142,4 @@ async def async_setup_entry(
     for serial, coordinator, device_info, _data in iter_entry_devices(hass, entry):
         entities.append(RebootButton(coordinator, serial, device_info))
     async_add_entities(entities)
+    async_add_device_entities(hass, entry, async_add_entities, _build_refill_buttons)

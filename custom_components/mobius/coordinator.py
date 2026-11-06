@@ -544,6 +544,30 @@ def used_scenes(data: dict) -> list:
     return [s for s in data.get("configured_scenes") or [] if not s.is_empty]
 
 
+def _enum_key(value) -> Optional[str]:
+    """A dose enum as the state the sensors show: its name in lower case,
+    "none" for the no-sensor / no-monitor / not-halted value."""
+    if value is None:
+        return None
+    return "none" if value == 0 else value.name.lower()
+
+
+def _dose_info_dict(dose) -> Optional[dict[str, Any]]:
+    """coordinator.data["dose"] from python-mobius DoseInfo."""
+    if dose is None:
+        return None
+    return {
+        "container_volume_ul": dose.container_volume_ul,
+        "container_current_volume_ul": dose.container_current_volume_ul,
+        "dispensed_today_ul": dose.dispensed_today_ul,
+        "daily_target_ul": dose.daily_target_ul,
+        "expected_so_far_ul": dose.expected_so_far_ul,
+        "container_monitor": _enum_key(dose.container_monitor),
+        "dose_sensor_type": _enum_key(dose.sensor_type),
+        "halt_state": _enum_key(dose.halt_state),
+    }
+
+
 async def _fetch_all(
     device, cached_supported_attribute_ids=None, batch_disabled=False,
     cached_primitive_type=None, cached_model=None, group: Optional[PanGroup] = None,
@@ -632,12 +656,16 @@ async def _fetch_all(
         info["boosted_battery"] = asdict(full_poll.boosted_battery) if full_poll.boosted_battery else None
         # Vectra closed-loop mode (see VectraInfo); None for other pumps.
         info["closed_loop"] = full_poll.vectra_info.closed_loop if full_poll.vectra_info else None
-    elif primitive not in LIGHT_PRIMITIVES:
+    elif primitive not in LIGHT_PRIMITIVES and full_poll.dose is None:
         size = PRIMITIVE_SIZE.get(primitive) if primitive else None
         info["support_note"] = (
             f"PrimitiveType {info.get('primitive_type')!r} has no parser implemented"
             + (f" ({size} byte primitive)." if size is not None else ".")
         )
+
+    # Dosing pumps: container level and schedule targets (python-mobius
+    # DoseInfo); None for every other device.
+    info["dose"] = _dose_info_dict(full_poll.dose)
 
     # Device clock versus Home Assistant's (seconds; positive = device
     # behind) and its time zone, for _async_check_tank_time() in __init__.py.

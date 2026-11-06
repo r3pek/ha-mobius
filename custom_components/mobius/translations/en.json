@@ -73,6 +73,33 @@
       },
       "gateway_device": {
         "name": "Gateway device"
+      },
+      "container_remaining": {
+        "name": "Container remaining"
+      },
+      "container_volume": {
+        "name": "Container size"
+      },
+      "container_level": {
+        "name": "Container level"
+      },
+      "dosed_today": {
+        "name": "Dosed today"
+      },
+      "container_monitor": {
+        "name": "Container monitoring"
+      },
+      "dose_halt_state": {
+        "name": "Dosing halt state"
+      },
+      "dose_daily_target": {
+        "name": "Daily dose (schedule)"
+      },
+      "dose_expected_so_far": {
+        "name": "Expected dosed so far"
+      },
+      "container_days_left": {
+        "name": "Container days left"
       }
     },
     "button": {
@@ -84,6 +111,9 @@
       },
       "refresh_all": {
         "name": "Refresh all data"
+      },
+      "refill_container": {
+        "name": "Refill container"
       }
     },
     "switch": {
@@ -115,6 +145,9 @@
       },
       "boosted_battery_off_time": {
         "name": "Boosted battery off time"
+      },
+      "container_size": {
+        "name": "Container size"
       }
     },
     "select": {
@@ -148,6 +181,9 @@
     "binary_sensor": {
       "running_on_battery": {
         "name": "Running on battery"
+      },
+      "container_empty": {
+        "name": "Container empty"
       }
     },
     "update": {
