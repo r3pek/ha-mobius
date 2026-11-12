@@ -149,6 +149,11 @@ async def test_container_size_number_resets_the_remaining_volume_like_the_app():
 def test_enum_states_match_the_sensor_options():
     assert [coord._enum_key(v) for v in ContainerMonitorType] == CONTAINER_MONITOR_OPTIONS
     assert [coord._enum_key(v) for v in DoseHaltState] == DOSE_HALT_STATE_OPTIONS
+    c = _coordinator({"container_monitor": "countdown", "halt_state": "running"})
+    for cls, options in ((ContainerMonitorSensor, CONTAINER_MONITOR_OPTIONS),
+                         (DoseHaltStateSensor, DOSE_HALT_STATE_OPTIONS)):
+        entity = cls(c, SERIAL, {})
+        assert entity.device_class == "enum" and entity.options == options
 
 
 def test_only_the_no_members_map_to_none():
@@ -166,11 +171,6 @@ def test_expected_so_far_has_no_long_term_sum_statistics():
     entity = DoseExpectedSoFarSensor(_coordinator({"expected_so_far_ul": 1000}), SERIAL, {})
     assert entity.state_class is None
     assert DosedTodaySensor(_coordinator({}), SERIAL, {}).state_class == "total_increasing"
-    c = _coordinator({"container_monitor": "countdown", "halt_state": "running"})
-    for cls, options in ((ContainerMonitorSensor, CONTAINER_MONITOR_OPTIONS),
-                         (DoseHaltStateSensor, DOSE_HALT_STATE_OPTIONS)):
-        entity = cls(c, SERIAL, {})
-        assert entity.device_class == "enum" and entity.options == options
 
 
 def test_level_entities_are_unavailable_without_container_monitoring():
