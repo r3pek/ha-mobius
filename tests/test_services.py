@@ -120,6 +120,10 @@ def test_support_from_primitive_type_experimental():
     assert _support_from_primitive_type("CoffeeV1") == "pump (experimental)"
 
 
+def test_support_from_primitive_type_dosing_pump():
+    assert _support_from_primitive_type("DoseV1") == "dose"
+
+
 def test_support_from_primitive_type_none_or_unknown():
     assert _support_from_primitive_type(None) == "unsupported"
     assert _support_from_primitive_type("NotReal") == "unsupported"
@@ -216,7 +220,17 @@ async def test_experimental_pump_target_raises(hass):
 
 
 async def test_unsupported_target_raises(hass):
-    entry, device_ids = _setup_tank(hass, {"SN1": ({"support": "unsupported"}, {"primitive_type": "DoseV1"})})
+    entry, device_ids = _setup_tank(hass, {"SN1": ({"support": "unsupported"}, {"primitive_type": "NotReal"})})
+    coordinator = entry.runtime_data.coordinators["SN1"]
+
+    with pytest.raises(HomeAssistantError, match="no confirmed schedule support"):
+        await _live_group_members(hass, "SN1", coordinator)
+
+
+async def test_dosing_pump_target_raises(hass):
+    """"dose" has no schedule writer: rejected like "unsupported", not
+    treated as a pump."""
+    entry, device_ids = _setup_tank(hass, {"SN1": ({"support": "dose"}, {"primitive_type": "DoseV1"})})
     coordinator = entry.runtime_data.coordinators["SN1"]
 
     with pytest.raises(HomeAssistantError, match="no confirmed schedule support"):
@@ -296,10 +310,27 @@ async def test_write_never_reaches_a_light_whose_live_group_no_longer_matches(ha
 
 
 async def test_write_rejects_unsupported_target(hass):
-    entry, device_ids = _setup_tank(hass, {"SN1": ({"support": "unsupported"}, {"primitive_type": "DoseV1"})})
+    entry, device_ids = _setup_tank(hass, {"SN1": ({"support": "unsupported"}, {"primitive_type": "NotReal"})})
 
     with pytest.raises(HomeAssistantError, match="no confirmed schedule support"):
         await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _light_points_dict()))
+
+
+async def test_write_never_reaches_a_dosing_pump_or_its_group(hass):
+    """A dosing pump sharing a light's group mask: no pump schedule on the
+    doser and nothing on the light either."""
+    entry, device_ids = _setup_tank(hass, {
+        "SN1": ({"support": "dose", "name": "Versa"}, {"primitive_type": "DoseV1", "group_mask": 1}),
+        "SN2": (_light_cached("Left"), _light_live(1)),
+    })
+    doser = entry.runtime_data.coordinators["SN1"]._test_fake_device
+    light = entry.runtime_data.coordinators["SN2"]._test_fake_device
+
+    with pytest.raises(HomeAssistantError, match="no confirmed schedule support"):
+        await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _pump_points_dict()))
+    doser.set_pump_schedule.assert_not_called()
+    doser.set_light_schedule.assert_not_called()
+    light.set_light_schedule.assert_not_called()
 
 
 async def test_write_capacity_check_aborts_before_any_write(hass):

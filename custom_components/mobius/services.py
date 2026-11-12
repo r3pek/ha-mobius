@@ -70,7 +70,9 @@ async def _live_group_members(
     target_info = await target_device.get_device_info()
     support = _support_from_primitive_type(target_info.get("primitive_type"))
 
-    if support in ("pump (experimental)", "unsupported"):
+    # Allowlist, not denylist: a tier without a schedule writer (e.g.
+    # "dose") must never fall through to the pump schedule write below.
+    if support not in ("light", "pump"):
         raise HomeAssistantError(
             f"{target_serial} (support={support!r}) has no confirmed schedule support"
         )

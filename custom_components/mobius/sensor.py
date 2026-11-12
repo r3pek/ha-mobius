@@ -80,7 +80,7 @@ class _DataKeySensor(MobiusEntity):
 
 
 class SupportTierSensor(_DataKeySensor):
-    """Support tier of the device (light/pump/unsupported)."""
+    """Support tier of the device (light/pump/dose/unsupported)."""
     _key, _icon, _diagnostic = "support", "mdi:list-status", True
 
     @property

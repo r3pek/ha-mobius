@@ -10,6 +10,10 @@
 - When a pump reports it doesn't monitor its container, the remaining,
   level, days left and container empty entities and the Refill button are
   unavailable.
+- Schedule services only write to lights and pumps (an allowlist instead
+  of excluding `pump (experimental)` and `unsupported`), so dosing pumps,
+  which python-mobius now reports as support tier `dose`, never get a pump
+  schedule written.
 
 ## 0.12.0
 
