@@ -9,7 +9,9 @@ import pytest
 
 from homeassistant.exceptions import HomeAssistantError
 
-from mobius import ContainerMonitorType, DoseHaltState, DoseInfo, DoseSensorType
+from mobius import ContainerMonitorType, DoseHaltState, DoseInfo, DoseSensorType, MetadataSnapshot
+
+from tests.fake_full_poll import full_poll_from_reads
 
 from custom_components.mobius import coordinator as coord
 from custom_components.mobius.binary_sensor import ContainerEmptyBinarySensor, _build_binary_sensors
@@ -23,6 +25,7 @@ from custom_components.mobius.sensor import (
     ContainerMonitorSensor,
     ContainerRemainingSensor,
     DoseDailyTargetSensor,
+    DoseExpectedSoFarSensor,
     DoseHaltStateSensor,
     DosedTodaySensor,
     _build_dose_entities,
@@ -113,7 +116,8 @@ async def test_refill_writes_on_the_first_press():
     c.async_get_connected_device = AsyncMock(return_value=device)
 
     await RefillContainerButton(c, SERIAL, {}).async_press()
-    device.refill_container.assert_awaited_once_with(500_000)
+    # The library reads the current container size itself.
+    device.refill_container.assert_awaited_once_with()
     c.configuration_cache.invalidate_static.assert_called_once()
     c.async_request_refresh.assert_awaited_once()
 
@@ -126,7 +130,7 @@ async def test_refill_failure_is_a_home_assistant_error():
 
     with pytest.raises(HomeAssistantError, match="container size is unknown"):
         await RefillContainerButton(c, SERIAL, {}).async_press()
-    device.refill_container.assert_awaited_once_with(None)
+    device.refill_container.assert_awaited_once_with()
 
 
 async def test_container_size_number_resets_the_remaining_volume_like_the_app():
@@ -145,6 +149,23 @@ async def test_container_size_number_resets_the_remaining_volume_like_the_app():
 def test_enum_states_match_the_sensor_options():
     assert [coord._enum_key(v) for v in ContainerMonitorType] == CONTAINER_MONITOR_OPTIONS
     assert [coord._enum_key(v) for v in DoseHaltState] == DOSE_HALT_STATE_OPTIONS
+
+
+def test_only_the_no_members_map_to_none():
+    assert coord._enum_key(ContainerMonitorType.NoMonitor) == "none"
+    assert coord._enum_key(DoseSensorType.NoSensor) == "none"
+    # Same int value (0) as the two above, but not a "no" member.
+    assert coord._enum_key(DoseHaltState.Running) == "running"
+    # A name that merely starts with "no" keeps its name.
+    fake = MagicMock()
+    fake.name = "Normal"
+    assert coord._enum_key(fake) == "normal"
+
+
+def test_expected_so_far_has_no_long_term_sum_statistics():
+    entity = DoseExpectedSoFarSensor(_coordinator({"expected_so_far_ul": 1000}), SERIAL, {})
+    assert entity.state_class is None
+    assert DosedTodaySensor(_coordinator({}), SERIAL, {}).state_class == "total_increasing"
     c = _coordinator({"container_monitor": "countdown", "halt_state": "running"})
     for cls, options in ((ContainerMonitorSensor, CONTAINER_MONITOR_OPTIONS),
                          (DoseHaltStateSensor, DOSE_HALT_STATE_OPTIONS)):
@@ -173,3 +194,42 @@ def test_container_size_number_without_a_size():
     number = ContainerSizeNumber(_coordinator({"container_volume_ul": None}), SERIAL,
                                  "container_size", "mdi:cup-outline", {})
     assert number.native_value is None
+
+
+# --- coordinator poll path ----------------------------------------------------
+
+def _fake_dosing_pump(dose: DoseInfo) -> MagicMock:
+    device = MagicMock()
+    device.get_device_info = AsyncMock(return_value={
+        "model_raw": 272, "model": "VersaVX1", "manufacturer": "EcoTech Marine",
+        "name": "Versa", "serial": SERIAL,
+        "primitive_type": "DoseV1", "error_state": "NoError", "mac_address": None,
+    })
+    device.get_metadata_batch = AsyncMock(return_value=MetadataSnapshot(
+        advanced_features=None, calibration=None, hardware_info={}, firmware_versions={},
+        supported_channels=[], error_state=None, epoch=None, local_time=None, tz_offset=None,
+    ))
+    device.get_dose_info = AsyncMock(return_value=dose)
+    full_poll_from_reads(device)
+    return device
+
+
+async def test_a_poll_fills_dose_and_drops_the_support_note():
+    dose = DoseInfo(
+        container_current_volume_ul=123_000, container_volume_ul=500_000, dispensed_today_ul=1500,
+        daily_target_ul=4000, expected_so_far_ul=1000,
+        container_monitor=ContainerMonitorType.Countdown, sensor_type=DoseSensorType.NoSensor,
+        halt_state=DoseHaltState.Running,
+    )
+    info, *_ = await coord._fetch_all(_fake_dosing_pump(dose))
+    assert info["dose"]["container_current_volume_ul"] == 123_000
+    assert info["dose"]["container_monitor"] == "countdown"
+    assert info["dose"]["halt_state"] == "running"
+    assert "support_note" not in info or not info["support_note"]
+    assert _build_dose_entities(MagicMock(data=info), SERIAL, {})
+
+
+async def test_a_poll_without_dose_info_keeps_the_support_note():
+    info, *_ = await coord._fetch_all(_fake_dosing_pump(None))
+    assert info["dose"] is None
+    assert "no parser implemented" in info["support_note"]

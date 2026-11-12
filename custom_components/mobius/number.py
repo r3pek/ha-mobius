@@ -89,9 +89,10 @@ class PollIntervalNumber(RestoreNumber):
         )
 
 
-class _PumpBatteryNumber(CoordinatorEntity[MobiusDeviceCoordinator], NumberEntity):
-    """A pump battery setting stored in coordinator.data[group][field]
-    (see coordinator.py), written through `_async_write()`."""
+class _DeviceDataNumber(CoordinatorEntity[MobiusDeviceCoordinator], NumberEntity):
+    """A device setting stored in coordinator.data[group][field] (see
+    coordinator.py), written through `_async_write()`: the pump battery
+    settings and a dosing pump's container size."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
@@ -134,7 +135,7 @@ class _PumpBatteryNumber(CoordinatorEntity[MobiusDeviceCoordinator], NumberEntit
         raise NotImplementedError
 
 
-class BatteryBackupSpeedNumber(_PumpBatteryNumber):
+class BatteryBackupSpeedNumber(_DeviceDataNumber):
     """Pump speed while running on battery ("Battery Backup Speed"), in
     whole percent, up to the pump's "Battery Backup Max Speed" (an
     attribute)."""
@@ -168,7 +169,7 @@ class BatteryBackupSpeedNumber(_PumpBatteryNumber):
         await device.set_battery_backup_speed(value, max_speed=group["max_speed"] if group else None)
 
 
-class BoostedBatteryPowerNumber(_PumpBatteryNumber):
+class BoostedBatteryPowerNumber(_DeviceDataNumber):
     """Boosted battery power, 0-100 %. The pump only accepts changes while
     it runs on battery."""
 
@@ -185,7 +186,7 @@ class BoostedBatteryPowerNumber(_PumpBatteryNumber):
         await device.set_boosted_battery(power=value)
 
 
-class _BoostedBatteryTimeNumber(_PumpBatteryNumber):
+class _BoostedBatteryTimeNumber(_DeviceDataNumber):
     _group = "boosted_battery"
     _attr_native_min_value = 0
     _attr_native_max_value = 3600
@@ -233,7 +234,7 @@ def _build_pump_battery_numbers(coordinator, serial, device_info, data) -> list[
     return entities
 
 
-class ContainerSizeNumber(_PumpBatteryNumber):
+class ContainerSizeNumber(_DeviceDataNumber):
     """Container size of a dosing pump, in mL. Like the app, setting it
     also sets the remaining volume to the new size (python-mobius
     set_container_volume())."""

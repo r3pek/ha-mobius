@@ -7,7 +7,7 @@ import inspect
 from unittest.mock import AsyncMock
 
 from mobius import (
-    FullPollResult, LIGHT_PRIMITIVES, Model, PUMP_PRIMITIVES, PrimitiveType, enum_or_none,
+    DOSE_PRIMITIVES, FullPollResult, LIGHT_PRIMITIVES, Model, PUMP_PRIMITIVES, PrimitiveType, enum_or_none,
     primitive_type_from_name,
 )
 
@@ -43,6 +43,8 @@ def full_poll_from_reads(device) -> None:
             result.operation_state = await _maybe(device, "get_operation_state")
             if primitive == PrimitiveType.VectraV1:
                 result.vectra_info = await _maybe(device, "get_vectra_info")
+        if primitive in DOSE_PRIMITIVES:
+            result.dose = await _maybe(device, "get_dose_info")
         return result
 
     device.get_full_poll_batch = AsyncMock(side_effect=full_poll)

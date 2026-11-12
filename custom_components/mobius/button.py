@@ -68,11 +68,10 @@ class RefillContainerButton(CoordinatorEntity[MobiusDeviceCoordinator], ButtonEn
     async def async_press(self) -> None:
         """Raises HomeAssistantError when the container size is unknown or
         the write fails."""
-        # The size from the last poll saves reading it; without one the
-        # library reads it from the pump.
-        volume = ((self.coordinator.data or {}).get("dose") or {}).get("container_volume_ul")
+        # No size argument: the library reads the container size from the
+        # pump, since the polled one is only refreshed every few minutes.
         await async_run_on_device(
-            self.coordinator, lambda device: device.refill_container(volume),
+            self.coordinator, lambda device: device.refill_container(),
             f"Failed to refill the container of {self._serial}",
         )
         await self.coordinator.async_request_refresh()

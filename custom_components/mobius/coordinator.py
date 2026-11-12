@@ -551,14 +551,24 @@ def container_is_monitored(dose: dict | None) -> bool:
     return bool(dose) and dose.get("container_monitor") != "none"
 
 
+# Dose enum members shown as "none". Keyed by (enum type, member name), not
+# by member: they are IntEnums, so NoMonitor, NoSensor and
+# DoseHaltState.Running (all 0) would be the same dict key.
+_ENUM_NONE_MEMBERS = {
+    ("ContainerMonitorType", "NoMonitor"),
+    ("DoseSensorType", "NoSensor"),
+}
+
+
 def _enum_key(value) -> Optional[str]:
     """A dose enum as the state the sensors show: its name in lower case,
     "none" for NoSensor / NoMonitor. The states are the ENUM sensors'
     options (sensor.py)."""
     if value is None:
         return None
-    name = value.name.lower()
-    return "none" if name.startswith("no") else name
+    if (type(value).__name__, value.name) in _ENUM_NONE_MEMBERS:
+        return "none"
+    return value.name.lower()
 
 
 def _dose_info_dict(dose) -> Optional[dict[str, Any]]:

@@ -66,7 +66,6 @@ class _DataKeySensor(MobiusEntity):
     _key: str
     _icon: str
     _diagnostic = False
-    _enabled_default = True
 
     def __init__(self, coordinator, serial, device_info):
         super().__init__(
@@ -607,7 +606,10 @@ class DoseExpectedSoFarSensor(_DoseSensor):
     _icon = "mdi:progress-clock"
     _unit = "mL"
     _device_class = SensorDeviceClass.VOLUME
-    _state_class = SensorStateClass.TOTAL_INCREASING
+    # Calculated from the schedule, not measured, and it drops when the
+    # schedule changes, so no long-term sum statistics. MEASUREMENT isn't
+    # allowed with the VOLUME device class.
+    _state_class = None
 
     @property
     def native_value(self):
