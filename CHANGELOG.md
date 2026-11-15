@@ -18,6 +18,24 @@
   note, instead of "no parser implemented".
 - The container size number has the volume storage device class, and the
   dose entities' units use Home Assistant's constants.
+- A tank's devices are polled one at a time through the gateway instead
+  of all at once.
+- Setup no longer waits for every device's first read: only the device
+  that decides whether the entry is ready is read during setup, the others
+  right after, with their entities created as soon as each is read. An
+  unreachable device no longer holds up Home Assistant's startup.
+- The schedule card opens a schedule from the last poll when it is less
+  than a minute old (checked against the device's checksum) instead of
+  reading the whole schedule again; after a schedule write it reads from
+  the device, and the written devices are refreshed.
+- Clock drift is only taken from polls that took under 10 seconds, and
+  data kept through failed polls doesn't trigger clock syncs.
+- The gateway election and the periodic tank check run as tracked
+  background tasks; a tank check doesn't start while the previous one is
+  still running, and is cancelled when the entry is unloaded.
+- Fixed: a tank could get a new gateway through the tank check only once;
+  after an elected gateway was lost a second time, the tank stayed without
+  one until the entry was reloaded.
 - Fixed: the `write_schedule_group` and `set_schedule_intensity` services
   did nothing (the schedule card's Save and intensity changes reported
   success without writing): their handlers were never awaited.

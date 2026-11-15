@@ -15,16 +15,17 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from mobius import (
     PumpMode, PumpParam, PrimitiveType, light_schedule_to_dict, pump_schedule_to_dict,
     light_schedule_to_mob, mob_to_light_schedule, pump_schedule_to_mob, mob_to_pump_schedule,
     supported_pump_modes, PUMP_MODE_PARAMS, primitive_type_from_name,
-    Model, enum_or_none, pump_param_range,
+    Model, enum_or_none, pump_param_range, C2Attribute, SchedulePoint, PumpSchedulePoint,
 )
 
 from . import MobiusRuntimeData
-from .const import DOMAIN
+from .const import DOMAIN, SCHEDULE_CACHE_MAX_AGE
 from .coordinator import MobiusDeviceCoordinator, used_scenes
 from .gateway_registry import params_with_parent_serial
 
@@ -359,6 +360,42 @@ def _resolve_member(hass: HomeAssistant, device_id: str) -> tuple[str, MobiusRun
     return serial, runtime, coordinator
 
 
+def _cached_schedule1(coordinator: MobiusDeviceCoordinator, is_light: bool) -> list | None:
+    """
+    Schedule1 as the device's last poll read it (python-mobius keeps it in
+    the coordinator's ConfigurationCache, checked against the device's own
+    Schedule1Checksum on every poll), or None when there is no such copy
+    to trust: no successful poll within SCHEDULE_CACHE_MAX_AGE, or no cached
+    schedule (also after a write through the services, which drop it). Saves
+    a relayed read of the whole schedule each time the card opens it; the
+    age limit keeps the card from editing a schedule changed in the app
+    since.
+    """
+    last_success = getattr(coordinator, "_last_success", None)
+    if not getattr(coordinator, "data_is_current", False) or last_success is None:
+        return None
+    if dt_util.utcnow() - last_success > SCHEDULE_CACHE_MAX_AGE:
+        return None
+    cached = coordinator.configuration_cache.entries.get(int(C2Attribute.Schedule1))
+    if cached is None:
+        return None
+    values = [value for block in sorted(cached[1], key=lambda b: b.index) for value in block.values]
+    parse = SchedulePoint.parse if is_light else PumpSchedulePoint.parse
+    return [point for point in map(parse, values) if point is not None]
+
+
+async def _schedule1(coordinator: MobiusDeviceCoordinator, is_light: bool) -> list:
+    """Schedule1 of the device: the cached copy (_cached_schedule1()) when
+    there is one to trust, else read from the device."""
+    points = _cached_schedule1(coordinator, is_light)
+    if points is not None:
+        return points
+    device = await coordinator.async_get_connected_device()
+    if is_light:
+        return await device.get_light_schedule(which=1)
+    return await device.get_pump_schedule(which=1)
+
+
 async def _member_schedule_command(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict,
     handler: Callable[[str, MobiusDeviceCoordinator, bool], Awaitable[dict]],
@@ -410,10 +447,10 @@ async def handle_read_schedule_group(
     the same schedule, so one read is enough). Schedule2 isn't supported
     yet."""
     async def read(serial, coordinator, is_light):
-        device = await coordinator.async_get_connected_device()
+        points = await _schedule1(coordinator, is_light)
         if is_light:
-            return {"points": light_schedule_to_dict(await device.get_light_schedule(which=1))}
-        points_dict = pump_schedule_to_dict(await device.get_pump_schedule(which=1))
+            return {"points": light_schedule_to_dict(points)}
+        points_dict = pump_schedule_to_dict(points)
         _translate_master_to_parent_serial(points_dict, coordinator)
         return {"points": points_dict}
 
@@ -433,12 +470,14 @@ async def handle_export_schedule_group_mob(
     """Schedule1 of the named device as .mob Template content, built with
     python-mobius (the card only receives the finished JSON)."""
     async def export(serial, coordinator, is_light):
-        device = await coordinator.async_get_connected_device()
+        points = await _schedule1(coordinator, is_light)
         if is_light:
-            return {"mob": light_schedule_to_mob(await device.get_light_schedule(which=1), serial)}
-        info = await device.get_device_info()
-        primitive_type = PrimitiveType[info["primitive_type"]]
-        points = await device.get_pump_schedule(which=1)
+            return {"mob": light_schedule_to_mob(points, serial)}
+        # The primitive never changes for a device: the polled one, else read.
+        primitive_type = getattr(coordinator, "_primitive_type", None)
+        if primitive_type is None:
+            device = await coordinator.async_get_connected_device()
+            primitive_type = PrimitiveType[(await device.get_device_info())["primitive_type"]]
         return {"mob": pump_schedule_to_mob(points, primitive_type, serial)}
 
     await _member_schedule_command(

@@ -130,7 +130,16 @@ FIRMWARE_RETRY_INTERVAL = timedelta(hours=1)
 # A tank's clock is set when any of its devices drifts more than this many
 # seconds from Home Assistant's clock, or reports a different time zone
 # (checked after every poll, see __init__.py's _async_check_tank_time()).
+# How recent a device's last successful poll must be for the schedule card
+# to be served the schedule that poll read (checked against the device's
+# own checksum) instead of reading it again (websocket_api.py).
+SCHEDULE_CACHE_MAX_AGE = timedelta(seconds=60)
+
 CLOCK_DRIFT_THRESHOLD = 60
+
+# A poll taking longer than this gives no clock drift: the device's clock
+# may have been read anywhere within it. Well below CLOCK_DRIFT_THRESHOLD.
+CLOCK_DRIFT_MAX_POLL_SECONDS = 10.0
 
 # Minimum time between two automatic clock syncs of a tank, so a device that
 # doesn't take the time can't cause a write on every poll.

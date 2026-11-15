@@ -159,6 +159,11 @@ class PanGroup:
     gateway_connection: Optional["MobiusConnectionManager"] = None
     members: dict[str, MemberState] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Held for each poll of a member over the gateway connection, so the
+    # tank's devices are polled one after another (coordinator.py's
+    # MobiusDeviceCoordinator._fetch()). Separate from `lock`, which
+    # guards the gateway state and is taken while a poll is running.
+    poll_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Consecutive failed reads of the current gateway; reset when the
     # gateway changes.
     consecutive_gateway_failures: int = 0
@@ -298,7 +303,11 @@ class GatewayRegistry:
                     group._gateway_elected.set()
                 else:
                     group._electing = True
-                    asyncio.ensure_future(self._elect_initial_gateway(group))
+                    # Tracked by Home Assistant (and cancelled at its
+                    # shutdown), unlike a bare ensure_future().
+                    self.hass.async_create_background_task(
+                        self._elect_initial_gateway(group), f"mobius gateway election for pan_id {pan_id:#06x}",
+                    )
 
         if not group._gateway_elected.is_set():
             await group._gateway_elected.wait()
@@ -306,16 +315,22 @@ class GatewayRegistry:
         return group
 
     async def _elect_initial_gateway(self, group: PanGroup) -> None:
-        await asyncio.sleep(self._election_settle_seconds)
-        async with group.lock:
-            if group.gateway_serial is not None:
-                return
-            winner = self._best_candidate(group)
-            _LOGGER.debug(
-                "Gateway election for pan_id %#06x settled: %r elected from %s",
-                group.pan_id, winner, dict(group.member_rssi_items()),
-            )
-            self._assign_gateway(group, winner)
+        try:
+            await asyncio.sleep(self._election_settle_seconds)
+            async with group.lock:
+                if group.gateway_serial is not None:
+                    return
+                winner = self._best_candidate(group)
+                _LOGGER.debug(
+                    "Gateway election for pan_id %#06x settled: %r elected from %s",
+                    group.pan_id, winner, dict(group.member_rssi_items()),
+                )
+                self._assign_gateway(group, winner)
+        finally:
+            # Done (or cancelled): a later join() of a group that has lost
+            # its gateway starts a new election. Left set, the tank check
+            # could recover a tank's gateway only once.
+            group._electing = False
             group._gateway_elected.set()
 
     def _best_candidate(self, group: PanGroup, exclude_serials: Optional[set[str]] = None) -> Optional[str]:

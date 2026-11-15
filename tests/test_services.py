@@ -56,6 +56,9 @@ def _make_coordinator(hass, entry, registry, serial: str, data: dict, live_info:
     fake_device.set_pump_schedule = AsyncMock()
     fake_device.set_schedule_intensity = AsyncMock()
     coordinator.async_get_connected_device = AsyncMock(return_value=fake_device)
+    # A write requests a refresh (services.py's _after_write()); a real one
+    # would poll and leave the refresh debouncer's timer behind.
+    coordinator.async_request_refresh = AsyncMock()
     coordinator._test_fake_device = fake_device  # for direct assertions
     return coordinator
 

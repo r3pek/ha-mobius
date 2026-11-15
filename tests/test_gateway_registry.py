@@ -49,6 +49,8 @@ def _disable_restarts(registry, pan_id):
 @pytest.fixture
 def registry():
     hass = MagicMock()
+    # The election runs as a Home Assistant background task: a real task here.
+    hass.async_create_background_task = lambda coro, name, **kwargs: asyncio.get_running_loop().create_task(coro)
     semaphore = asyncio.Semaphore(2)
     # A tiny settle window -- real tests don't need to wait out the real
     # multi-second production window, just confirm the election logic
@@ -82,6 +84,28 @@ class TestBasicJoin:
         assert group2 is group
         assert group.gateway_serial == "serial-1"
         assert "serial-2" in group.members
+
+
+class TestReElection:
+    @pytest.mark.asyncio
+    async def test_a_tank_that_loses_its_gateway_twice_gets_one_back_both_times(self, registry):
+        """The tank check recovers a tank without a gateway by join()ing a
+        member, which starts an election. The election used to leave
+        _electing set, so after one recovery the next join() started none
+        and the tank stayed without a gateway."""
+        group = await registry.join(PAN_A, "serial-1", rssi=-50)
+        await registry.join(PAN_A, "serial-2", rssi=-60)
+
+        for _ in range(2):
+            async with group.lock:
+                registry._assign_gateway(group, None)  # the gateway is gone
+            assert group.gateway_serial is None
+
+            await registry.join(PAN_A, "serial-1", rssi=-50)  # the tank check's recovery
+            await asyncio.sleep(0.1)  # the election's settle window
+
+            assert group.gateway_serial is not None
+            assert group._electing is False
 
 
 class TestConcurrentElection:

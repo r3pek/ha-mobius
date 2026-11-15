@@ -66,7 +66,7 @@ from bleak.exc import BleakCharacteristicNotFoundError
 from bleak_retry_connector import clear_cache as clear_bluez_service_cache
 
 from .const import (
-    ADVERTISEMENT_MAX_AGE, BATCH_FAILURE_THRESHOLD, CONNECT_TIMEOUT, DOMAIN, GATEWAY_GONE_AFTER,
+    ADVERTISEMENT_MAX_AGE, BATCH_FAILURE_THRESHOLD, CLOCK_DRIFT_MAX_POLL_SECONDS, CONNECT_TIMEOUT, DOMAIN, GATEWAY_GONE_AFTER,
     MARK_UNAVAILABLE_AFTER, MESH_LIST_FRESH_FOR_FAILURES, POLL_INTERVAL, RELAY_PROBE_TIMEOUT,
     STATIC_REFRESH_INTERVAL,
 )
@@ -658,11 +658,17 @@ async def _fetch_all(
             # None: unknown, every attribute is tried one at a time.
             supported_attribute_ids = supported_attribute_ids_to_cache = None
 
+    # The device's Epoch is read by the poll's first request: Home
+    # Assistant's clock is taken right before it, and the poll's duration
+    # bounds the error (see clock_drift below).
+    poll_started_at = time.time()
+    poll_started = time.monotonic()
     full_poll = await device.get_full_poll_batch(
         primitive=cached_primitive_type, model=cached_model, which=1, minute_of_day=minute_of_day, now=now,
         supported_attribute_ids=supported_attribute_ids, force_individual_reads=batch_disabled,
         cache=configuration_cache,
     )
+    poll_seconds = time.monotonic() - poll_started
     primitive, model = full_poll.primitive, full_poll.model
     used_batch = full_poll.used_batch
     if configuration_cache is not None and full_poll.configuration_read:
@@ -720,7 +726,14 @@ async def _fetch_all(
 
     # Device clock versus Home Assistant's (seconds; positive = device
     # behind) and its time zone, for _async_check_tank_time() in __init__.py.
-    info["clock_drift"] = int(now.timestamp()) - metadata.epoch if metadata.epoch is not None else None
+    # None when the poll took longer than CLOCK_DRIFT_MAX_POLL_SECONDS: the
+    # Epoch may have been read anywhere in that time, so the drift can't be
+    # told from the threshold (a slow relayed poll looked like a device
+    # clock running ahead).
+    info["clock_drift"] = (
+        int(poll_started_at) - metadata.epoch
+        if metadata.epoch is not None and poll_seconds <= CLOCK_DRIFT_MAX_POLL_SECONDS else None
+    )
     info["olson_tz"] = metadata.olson_tz
     info["firmware_versions"] = metadata.firmware_versions
     info["sw_version"] = metadata.firmware_version
@@ -801,6 +814,10 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if bluetooth_only:
             self._become_bluetooth_only()
         self._last_success: Optional[Any] = None
+        # False while self.data is the last good data kept through failed
+        # polls (MARK_UNAVAILABLE_AFTER): still shown, but not acted on
+        # (__init__.py's clock check).
+        self.data_is_current = False
         # Supported attribute ids, read once and again after the device's
         # attribute table changes (see _fetch_all()).
         self._supported_attribute_ids: Optional[set[int]] = None
@@ -831,10 +848,12 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self._fetch()
             self._last_success = dt_util.utcnow()
+            self.data_is_current = True
             self._sync_device_registry_info(data)
             return data
         except Exception as err:
             now = dt_util.utcnow()
+            self.data_is_current = False
             if self._last_success is not None and (now - self._last_success) < MARK_UNAVAILABLE_AFTER:
                 _LOGGER.debug(
                     "Read failed for %s (%s), within the %s grace period -- "
@@ -1084,6 +1103,20 @@ class MobiusDeviceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"No gateway currently available for pan_id {self.pan_id:#06x}"
             )
 
+        # One device of a tank polls at a time: a tank's polls take turns
+        # on the gateway's connection instead of all starting together
+        # (python-mobius already sends one request at a time per
+        # connection; this keeps each poll's requests together too).
+        async with group.poll_lock:
+            return await self._fetch_through_gateway(group)
+
+    async def _fetch_through_gateway(self, group: PanGroup) -> dict[str, Any]:
+        """_fetch() of a device on the tank's mesh: through the gateway
+        connection, as the gateway or relayed. Called with
+        group.poll_lock held."""
+        # The gateway may have changed, or gone, while this poll waited.
+        if group.gateway_serial is None or group.gateway_connection is None:
+            raise UpdateFailed(f"No gateway currently available for pan_id {self.pan_id:#06x}")
         is_gateway = group.gateway_serial == self.serial
         if not is_gateway and not group.gateway_connection.is_connected:
             # Only the gateway's own poll reconnects it: relayed polls

@@ -79,6 +79,9 @@ class MobiusRuntimeData:
     # Monotonic time of the tank check's last mesh peer list read
     # (MESH_PEER_REFRESH_INTERVAL).
     last_mesh_refresh: Optional[float] = None
+    # Whether a tank check (_async_revalidate_tank()) is running, so the
+    # next one isn't started on top of it.
+    tank_check_running: bool = False
     # Per-device entities of every platform (entity.py's
     # async_add_device_entities()): (add_entities, build) per platform, the
     # devices' DeviceInfo and the unique_ids created so far, for
@@ -336,6 +339,11 @@ def _clock_problems(hass: HomeAssistant, runtime: "MobiusRuntimeData"):
     worst = None
     mismatch = None
     for serial, coordinator in runtime.coordinators.items():
+        if getattr(coordinator, "data_is_current", True) is False:
+            # Last good data kept through failed polls: the drift it shows
+            # is from an old read, so it would trigger a sync on every
+            # check until the device answers again.
+            continue
         data = coordinator.data or {}
         drift = data.get("clock_drift")
         if drift is not None and abs(drift) > CLOCK_DRIFT_THRESHOLD:
@@ -508,6 +516,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     coordinators: dict[str, MobiusDeviceCoordinator] = {}
+    # Devices whose first refresh runs after setup (see
+    # _async_first_refresh_in_background()).
+    later: list[MobiusDeviceCoordinator] = []
     # The working device joins first: another member joining first would
     # start the RSSI election, and prefer_as_gateway would then be ignored.
     ordered_devices = sorted(mesh_devices, key=lambda d: d[CONF_SERIAL] != working_serial)
@@ -515,24 +526,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         serial = device[CONF_SERIAL]
         group = await registry.join(pan_id, serial, rssi_by_serial[serial], prefer_as_gateway=(serial == working_serial))
 
-        if group.members[serial].mesh_address is None:
-            address = addresses_by_serial.get(serial)
-            if address is None:
-                address = await discover_mesh_address(hass, serial, semaphore)
-            if address is not None:
-                registry.update_mesh_address(pan_id, serial, address)
-            else:
-                _LOGGER.debug(
-                    "Could not proactively discover mesh address for %s at setup -- "
-                    "will retry on the next poll cycle", serial,
-                )
+        if group.members[serial].mesh_address is None and serial in addresses_by_serial:
+            registry.update_mesh_address(pan_id, serial, addresses_by_serial[serial])
 
         coordinator = MobiusDeviceCoordinator(hass, entry, registry, serial, pan_id)
+        coordinators[serial] = coordinator
         if serial == working_serial:
+            await _async_discover_missing_mesh_address(hass, registry, pan_id, serial, semaphore)
             await coordinator.async_config_entry_first_refresh()
         else:
-            await _async_soft_first_refresh(coordinator, serial)
-        coordinators[serial] = coordinator
+            later.append(coordinator)
 
     for device in devices:
         serial = device[CONF_SERIAL]
@@ -544,7 +547,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # whether the entry is ready.
             await coordinator.async_config_entry_first_refresh()
         else:
-            await _async_soft_first_refresh(coordinator, serial)
+            later.append(coordinator)
         coordinators[serial] = coordinator
 
     entry.runtime_data = MobiusRuntimeData(coordinators=coordinators)
@@ -555,15 +558,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         len(coordinators), working_serial,
     )
 
-    # Periodic task, cancelled on unload. hass.create_task() (not
-    # async_create_task()) because the interval callback isn't guaranteed to
-    # run on the event loop thread.
-    entry.async_on_unload(
-        async_track_time_interval(
-            hass, lambda now: hass.create_task(_async_revalidate_tank(hass, entry, now)),
-            TANK_REVALIDATION_INTERVAL,
-        )
-    )
+    # Periodic tank check. The timer stops on unload, and a check that is
+    # still running then is cancelled with the entry's other background
+    # tasks; a check isn't started while the previous one is running.
+    @callback
+    def _schedule_tank_check(now) -> None:
+        runtime: MobiusRuntimeData | None = getattr(entry, "runtime_data", None)
+        if runtime is None or runtime.tank_check_running:
+            return
+        runtime.tank_check_running = True
+
+        async def run() -> None:
+            try:
+                await _async_revalidate_tank(hass, entry, now)
+            finally:
+                runtime.tank_check_running = False
+
+        entry.async_create_background_task(hass, run(), f"mobius tank check of {entry.title}")
+
+    entry.async_on_unload(async_track_time_interval(hass, _schedule_tank_check, TANK_REVALIDATION_INTERVAL))
     # An advertisement of an absent device gets it polled again right away
     # (MobiusDeviceCoordinator.async_seen_advertising()).
     _async_watch_advertisements(hass, entry, coordinators)
@@ -574,7 +587,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if later:
+        # Cancelled if the entry is unloaded first.
+        entry.async_create_background_task(
+            hass, _async_first_refresh_in_background(hass, entry, registry, pan_id, semaphore, later),
+            f"mobius first refresh of {entry.title}",
+        )
     return True
+
+
+async def _async_discover_missing_mesh_address(
+    hass: HomeAssistant, registry: GatewayRegistry, pan_id: int, serial: str, semaphore: asyncio.Semaphore,
+) -> None:
+    """Reads a member's mesh address through a brief direct connection when
+    the gateway's peer list didn't report it. A failure is left to the
+    device's polls (MobiusDeviceCoordinator._resolve_own_mesh_peer())."""
+    group = registry.group(pan_id)
+    member = group.members.get(serial) if group is not None else None
+    if member is None or member.mesh_address is not None:
+        return
+    address = await discover_mesh_address(hass, serial, semaphore)
+    if address is not None:
+        registry.update_mesh_address(pan_id, serial, address)
+    else:
+        _LOGGER.debug(
+            "Could not proactively discover mesh address for %s at setup -- "
+            "will retry on the next poll cycle", serial,
+        )
+
+
+async def _async_first_refresh_in_background(
+    hass: HomeAssistant, entry: ConfigEntry, registry: GatewayRegistry, pan_id: int,
+    semaphore: asyncio.Semaphore, coordinators: list[MobiusDeviceCoordinator],
+) -> None:
+    """
+    First refresh of every device but the one that decided setup, after
+    setup has returned: each is a soft refresh with retries (and, on the
+    mesh, a direct connection for a missing mesh address), which for an
+    unreachable device takes long enough to hold up Home Assistant's
+    startup. One device at a time, the same order as before. Each device's
+    entities are created as soon as it has been read, instead of at the
+    next tank check.
+    """
+    from .entity import async_add_missing_device_entities
+
+    for coordinator in coordinators:
+        if not coordinator.bluetooth_only:
+            await _async_discover_missing_mesh_address(hass, registry, pan_id, coordinator.serial, semaphore)
+        await _async_soft_first_refresh(coordinator, coordinator.serial)
+        async_add_missing_device_entities(entry)
 
 
 # The manufacturer IDs Mobius devices advertise with (manifest.json's

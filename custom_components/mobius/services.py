@@ -16,7 +16,7 @@ from homeassistant.helpers import config_validation as cv
 
 from mobius import (
     min_schedule_capacity, light_schedule_from_dict, pump_schedule_from_dict, primitive_type_from_name, support_tier,
-    SchedulePoint, LightPrimitive,
+    SchedulePoint, LightPrimitive, C2Attribute,
 )
 
 from .const import DOMAIN
@@ -146,11 +146,26 @@ async def _write_to_members(
             await write(serial, device)
         except Exception as e:
             errors.append(f"{serial}: {e}")
+    for _serial, coordinator, _device in members:
+        _after_write(coordinator)
     if errors:
         raise HomeAssistantError(
             f"{what} {len(members) - len(errors)}/{len(members)} device(s) "
             f"successfully; failed: {'; '.join(errors)}"
         )
+
+
+def _after_write(coordinator: MobiusDeviceCoordinator) -> None:
+    """After a write to a device (whether it succeeded or not): its cached
+    schedule is dropped, so the card's next read of it comes from the
+    device rather than from the last poll (websocket_api.py's
+    _cached_schedule1()), and a refresh is started so its entities show
+    the new values. The refresh runs in the background: a poll per member
+    would otherwise hold up the service call."""
+    coordinator.configuration_cache.entries.pop(int(C2Attribute.Schedule1), None)
+    coordinator.hass.async_create_background_task(
+        coordinator.async_request_refresh(), f"mobius refresh of {coordinator.serial} after a write",
+    )
 
 
 def _project_points_for(points, channels: set):
