@@ -960,15 +960,16 @@ class TestFullPollBatchWiring:
         )
 
     async def test_unsupported_device_keeps_its_support_note(self, hass):
-        """A device the library has no parser for (a dosing pump) polls
-        like any other and says so on every poll, not just the first."""
+        """A device the library has no parser for (HotSauceV1) polls like
+        any other and says so on every poll, not just the first. (Dosing
+        pumps have their own tier, "dose": see test_dose_container.py.)"""
         registry = _make_registry(hass)
         await registry.join(PAN_ID, PUMP_SERIAL, rssi=-50)
         coordinator = MobiusDeviceCoordinator(hass, MagicMock(), registry, PUMP_SERIAL, PAN_ID)
 
         fake_device = _make_fake_pump_device()
         fake_device.get_full_poll_batch.return_value = dataclasses.replace(
-            fake_device.get_full_poll_batch.return_value, primitive=PrimitiveType.DoseV1, model=None,
+            fake_device.get_full_poll_batch.return_value, primitive=PrimitiveType.HotSauceV1, model=None,
             pump_telemetry=None, pump_schedule_points=None, operation_state=None,
         )
         group = registry.group(PAN_ID)

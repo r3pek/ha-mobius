@@ -229,7 +229,28 @@ async def test_a_poll_fills_dose_and_drops_the_support_note():
     assert _build_dose_entities(MagicMock(data=info), SERIAL, {})
 
 
-async def test_a_poll_without_dose_info_keeps_the_support_note():
+async def test_a_poll_without_dose_info_says_why_there_is_no_dose_data():
+    """A dosing pump without a container level gets a note naming the
+    missing attribute, not "no parser implemented": the parser exists."""
     info, *_ = await coord._fetch_all(_fake_dosing_pump(None))
     assert info["dose"] is None
-    assert "no parser implemented" in info["support_note"]
+    assert "no parser implemented" not in info["support_note"]
+    assert "ContainerCurrentVolume" in info["support_note"]
+
+
+def test_dose_entities_use_home_assistant_units():
+    """Units come from Home Assistant's constants, and the container size
+    number is a volume, so it converts like the volume sensors."""
+    from homeassistant.components.number import NumberDeviceClass
+    from homeassistant.const import PERCENTAGE, UnitOfTime, UnitOfVolume
+
+    c = _coordinator({"container_volume_ul": 500_000, "container_current_volume_ul": 1})
+    number = ContainerSizeNumber(c, SERIAL, "container_size", "mdi:cup-outline", {})
+    assert number.native_unit_of_measurement == UnitOfVolume.MILLILITERS
+    assert number.device_class == NumberDeviceClass.VOLUME_STORAGE
+
+    units = {type(e): e.entity_description.native_unit_of_measurement for e in _build_dose_entities(c, SERIAL, {})}
+    assert units[ContainerRemainingSensor] == UnitOfVolume.MILLILITERS
+    assert units[DosedTodaySensor] == UnitOfVolume.MILLILITERS
+    assert units[ContainerLevelSensor] == PERCENTAGE
+    assert units[ContainerDaysLeftSensor] == UnitOfTime.DAYS

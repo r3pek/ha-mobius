@@ -700,7 +700,14 @@ async def _fetch_all(
         info["boosted_battery"] = asdict(full_poll.boosted_battery) if full_poll.boosted_battery else None
         # Vectra closed-loop mode (see VectraInfo); None for other pumps.
         info["closed_loop"] = full_poll.vectra_info.closed_loop if full_poll.vectra_info else None
-    elif primitive not in LIGHT_PRIMITIVES and full_poll.dose is None:
+    elif info["support"] == "dose":
+        if full_poll.dose is None:
+            # The dose parser exists; this pump just reports nothing for it.
+            info["support_note"] = (
+                "Dosing pump that doesn't report its container level (ContainerCurrentVolume, 2313), "
+                "so no dose data is available."
+            )
+    elif primitive not in LIGHT_PRIMITIVES:
         size = PRIMITIVE_SIZE.get(primitive) if primitive else None
         info["support_note"] = (
             f"PrimitiveType {info.get('primitive_type')!r} has no parser implemented"

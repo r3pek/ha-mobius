@@ -15,6 +15,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE, UnitOfTime, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -121,7 +122,7 @@ class MotorSpeedSensor(MobiusEntity):
             coordinator, serial, "motor_speed",
             SensorEntityDescription(
                 key="motor_speed", translation_key="motor_speed", icon="mdi:speedometer",
-                native_unit_of_measurement="%", state_class=SensorStateClass.MEASUREMENT,
+                native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
             ),
             device_info,
         )
@@ -239,7 +240,7 @@ class LightChannelIntensitySensor(MobiusEntity):
                 translation_key="channel_intensity",
                 translation_placeholders={"channel": display_name},
                 icon="mdi:brightness-percent",
-                native_unit_of_measurement="%",
+                native_unit_of_measurement=PERCENTAGE,
                 state_class="measurement",
                 suggested_display_precision=0,
             ),
@@ -265,7 +266,7 @@ class ScheduleIntensitySensor(MobiusEntity):
             coordinator, serial, "schedule_intensity",
             SensorEntityDescription(
                 key="schedule_intensity", translation_key="schedule_intensity",
-                icon="mdi:brightness-6", native_unit_of_measurement="%",
+                icon="mdi:brightness-6", native_unit_of_measurement=PERCENTAGE,
                 state_class="measurement", suggested_display_precision=0,
             ),
             device_info,
@@ -538,7 +539,7 @@ class ContainerRemainingSensor(_DoseSensor):
     _key = "container_remaining"
     _needs_container_monitor = True
     _icon = "mdi:cup-water"
-    _unit = "mL"
+    _unit = UnitOfVolume.MILLILITERS
     _device_class = SensorDeviceClass.VOLUME_STORAGE
     _state_class = SensorStateClass.MEASUREMENT
 
@@ -550,7 +551,7 @@ class ContainerRemainingSensor(_DoseSensor):
 class ContainerVolumeSensor(_DoseSensor):
     _key = "container_volume"
     _icon = "mdi:cup-outline"
-    _unit = "mL"
+    _unit = UnitOfVolume.MILLILITERS
     _device_class = SensorDeviceClass.VOLUME_STORAGE
     _diagnostic = True
 
@@ -563,7 +564,7 @@ class ContainerLevelSensor(_DoseSensor):
     _key = "container_level"
     _needs_container_monitor = True
     _icon = "mdi:gauge"
-    _unit = "%"
+    _unit = PERCENTAGE
     _state_class = SensorStateClass.MEASUREMENT
 
     @property
@@ -578,7 +579,7 @@ class ContainerLevelSensor(_DoseSensor):
 class DosedTodaySensor(_DoseSensor):
     _key = "dosed_today"
     _icon = "mdi:water-check"
-    _unit = "mL"
+    _unit = UnitOfVolume.MILLILITERS
     _device_class = SensorDeviceClass.VOLUME
     _state_class = SensorStateClass.TOTAL_INCREASING
 
@@ -591,7 +592,7 @@ class DoseDailyTargetSensor(_DoseSensor):
     """Daily volume of the dose schedule (the app's "Daily volume")."""
     _key = "dose_daily_target"
     _icon = "mdi:calendar-today"
-    _unit = "mL"
+    _unit = UnitOfVolume.MILLILITERS
     _device_class = SensorDeviceClass.VOLUME
     _state_class = None
 
@@ -604,7 +605,7 @@ class DoseExpectedSoFarSensor(_DoseSensor):
     """What the schedule should have dispensed since midnight."""
     _key = "dose_expected_so_far"
     _icon = "mdi:progress-clock"
-    _unit = "mL"
+    _unit = UnitOfVolume.MILLILITERS
     _device_class = SensorDeviceClass.VOLUME
     # Calculated from the schedule, not measured, and it drops when the
     # schedule changes, so no long-term sum statistics. MEASUREMENT isn't
@@ -621,7 +622,7 @@ class ContainerDaysLeftSensor(_DoseSensor):
     _key = "container_days_left"
     _needs_container_monitor = True
     _icon = "mdi:calendar-clock"
-    _unit = "d"
+    _unit = UnitOfTime.DAYS
     _state_class = SensorStateClass.MEASUREMENT
 
     @property

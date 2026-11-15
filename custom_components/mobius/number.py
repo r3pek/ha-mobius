@@ -14,7 +14,7 @@ from homeassistant.components.number import (
     NumberDeviceClass, NumberEntity, NumberEntityDescription, NumberMode, RestoreNumber,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfTime, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -245,7 +245,8 @@ class ContainerSizeNumber(_DeviceDataNumber):
     _attr_native_min_value = 1
     _attr_native_max_value = 100000
     _attr_native_step = 1
-    _attr_native_unit_of_measurement = "mL"
+    _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
+    _attr_device_class = NumberDeviceClass.VOLUME_STORAGE
 
     async def _async_write(self, device, value: float) -> None:
         await device.set_container_volume(int(round(value * 1000)))

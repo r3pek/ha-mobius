@@ -14,6 +14,10 @@
   of excluding `pump (experimental)` and `unsupported`), so dosing pumps,
   which python-mobius now reports as support tier `dose`, never get a pump
   schedule written.
+- A dosing pump that reports no container level says so in its support
+  note, instead of "no parser implemented".
+- The container size number has the volume storage device class, and the
+  dose entities' units use Home Assistant's constants.
 - Fixed: the `write_schedule_group` and `set_schedule_intensity` services
   did nothing (the schedule card's Save and intensity changes reported
   success without writing): their handlers were never awaited.
