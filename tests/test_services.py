@@ -27,7 +27,7 @@ from custom_components.mobius.gateway_registry import GatewayRegistry
 from custom_components.mobius.services import (
     async_handle_write_schedule_group, _live_group_members, _min_group_capacity,
     _support_from_primitive_type, _untranslate_parent_serial_to_master,
-    async_handle_set_schedule_intensity, SET_SCHEDULE_INTENSITY_SCHEMA,
+    async_handle_set_schedule_intensity, SET_SCHEDULE_INTENSITY_SCHEMA, async_register_services,
 )
 from custom_components.mobius.websocket_api import _member_device_id
 from mobius import SupportedAttribute, C2Attribute
@@ -560,3 +560,49 @@ async def test_same_channel_group_is_unchanged(hass):
     await async_handle_write_schedule_group(hass, _call(device_ids["SN1"], _mixed_points_dict()))
 
     assert "Green" in await _written_channels(c1)
+
+
+# --------------------------------------------------------------------------
+# The services as Home Assistant calls them (async_register_services())
+# --------------------------------------------------------------------------
+# The tests above call the handlers directly. These go through
+# hass.services.async_call(), which is how the schedule card reaches them:
+# a handler registered as anything but a coroutine function is run in an
+# executor and its coroutine is never awaited, which the direct calls
+# can't catch.
+
+async def test_set_schedule_intensity_service_reaches_the_device(hass):
+    entry, device_ids = _setup_tank(hass, {"SN1": (_light_cached("Left"), _light_live(None))})
+    c1 = entry.runtime_data.coordinators["SN1"]
+    async_register_services(hass)
+
+    await hass.services.async_call(
+        DOMAIN, "set_schedule_intensity", {"device_id": device_ids["SN1"], "intensity": 40}, blocking=True,
+    )
+
+    c1._test_fake_device.set_schedule_intensity.assert_awaited_once_with(pytest.approx(0.4), which=1)
+
+
+async def test_write_schedule_group_service_reaches_the_device(hass):
+    entry, device_ids = _setup_tank(hass, {"SN1": (_pump_cached("Pump"), _pump_live())})
+    c1 = entry.runtime_data.coordinators["SN1"]
+    async_register_services(hass)
+
+    await hass.services.async_call(
+        DOMAIN, "write_schedule_group", {"device_id": device_ids["SN1"], "points": _pump_points_dict()},
+        blocking=True,
+    )
+
+    c1._test_fake_device.set_pump_schedule.assert_awaited_once()
+
+
+async def test_service_errors_reach_the_caller(hass):
+    """A failure is raised to the caller (the card shows it) instead of
+    being lost in an executor."""
+    entry, device_ids = _setup_tank(hass, {"SN1": (_pump_cached("Pump"), _pump_live())})
+    async_register_services(hass)
+
+    with pytest.raises(HomeAssistantError, match="light-only"):
+        await hass.services.async_call(
+            DOMAIN, "set_schedule_intensity", {"device_id": device_ids["SN1"], "intensity": 50}, blocking=True,
+        )

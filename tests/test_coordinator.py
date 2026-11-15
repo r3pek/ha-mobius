@@ -400,6 +400,88 @@ async def test_is_connected_false_after_mark_disconnected(hass):
     assert manager.is_connected is False
 
 
+async def test_mark_disconnected_closes_the_dropped_connection(hass):
+    """A read failed while the link may still be up: the dropped device
+    must be disconnected, not just forgotten -- left open it holds an
+    adapter slot and, still connected, never advertises, so the reconnect
+    can't find it."""
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+    fake_device.disconnect = AsyncMock()
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ):
+        await manager.ensure_connected()
+    manager.mark_disconnected()
+    await hass.async_block_till_done()
+
+    fake_device.disconnect.assert_awaited_once()
+
+
+async def test_disconnect_waits_for_the_dropped_connection_to_close(hass):
+    """A Bluetooth-only poll calls mark_disconnected() on failure, then
+    disconnect() before releasing the connection semaphore: disconnect()
+    must not return before the dropped connection is closed, or the slot
+    is released while the connection is still open."""
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    closed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_disconnect():
+        await release.wait()
+        closed.set()
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+    fake_device.disconnect = slow_disconnect
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ):
+        await manager.ensure_connected()
+    manager.mark_disconnected()
+
+    disconnect_task = asyncio.ensure_future(manager.disconnect())
+    await asyncio.sleep(0)
+    assert not disconnect_task.done()
+    release.set()
+    await disconnect_task
+    assert closed.is_set()
+
+
+async def test_mark_disconnected_ignores_errors_closing_the_connection(hass):
+    semaphore = asyncio.Semaphore(2)
+    manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)
+
+    fake_device = MagicMock()
+    fake_device.is_connected = True
+    fake_device.connect = AsyncMock()
+    fake_device.disconnect = AsyncMock(side_effect=IOError("already gone"))
+
+    with patch(
+        "custom_components.mobius.coordinator.MobiusDevice", return_value=fake_device
+    ), patch.object(
+        manager, "_resolve_current_ble_device", AsyncMock(return_value=MagicMock())
+    ):
+        await manager.ensure_connected()
+    manager.mark_disconnected()
+    await manager.disconnect()  # doesn't raise
+
+    assert manager.is_connected is False
+
+
 async def test_ensure_connected_connects_once_and_reuses(hass):
     semaphore = asyncio.Semaphore(2)
     manager = MobiusConnectionManager(hass, PUMP_SERIAL, semaphore)

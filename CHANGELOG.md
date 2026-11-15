@@ -14,6 +14,13 @@
   of excluding `pump (experimental)` and `unsupported`), so dosing pumps,
   which python-mobius now reports as support tier `dose`, never get a pump
   schedule written.
+- Fixed: the `write_schedule_group` and `set_schedule_intensity` services
+  did nothing (the schedule card's Save and intensity changes reported
+  success without writing): their handlers were never awaited.
+- Fixed: a failed poll left the device's Bluetooth connection open. The
+  device then held an adapter slot and, still connected, didn't advertise,
+  so reconnecting couldn't find it and a working gateway could be replaced
+  as gone.
 
 ## 0.12.0
 

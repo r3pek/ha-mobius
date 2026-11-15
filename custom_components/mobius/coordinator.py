@@ -426,6 +426,9 @@ class MobiusConnectionManager:
         # connection yet, or a connection that was lost); None while
         # connected.
         self._lost_since: Optional[float] = time.monotonic()
+        # Closing of a connection dropped by mark_disconnected(), awaited by
+        # disconnect().
+        self._closing: Optional[asyncio.Task] = None
 
     def lost_for(self) -> float:
         """Seconds since the connection was lost (or since this manager was
@@ -451,10 +454,26 @@ class MobiusConnectionManager:
 
     def mark_disconnected(self) -> None:
         """Forces the next ensure_connected() to reconnect, for when a read
-        failed while the client may still report being connected."""
-        if self._device is not None and self._lost_since is None:
+        failed while the client may still report being connected.
+
+        The dropped connection is closed in the background: left open, it
+        would keep holding one of the adapter's connection slots, and the
+        device, still connected, wouldn't advertise, so the reconnect
+        couldn't find it."""
+        device = self._device
+        if device is not None and self._lost_since is None:
             self._lost_since = time.monotonic()
         self._device = None
+        if device is not None:
+            self._closing = self.hass.async_create_background_task(
+                self._async_close(device), f"mobius close dropped connection to {self.serial}",
+            )
+
+    async def _async_close(self, device: MobiusDevice) -> None:
+        try:
+            await device.disconnect()
+        except Exception as err:
+            _LOGGER.debug("Closing the dropped connection to %s raised (ignored): %s", self.serial, err)
 
     async def ensure_connected(self, acquire_semaphore: bool = True) -> MobiusDevice:
         """Returns the connected MobiusDevice, reconnecting first (address
@@ -520,6 +539,12 @@ class MobiusConnectionManager:
             self._device = None
             if self._lost_since is None:
                 self._lost_since = time.monotonic()
+        # A connection dropped by mark_disconnected() is closed before this
+        # returns, so a caller releasing the connection semaphore next (a
+        # Bluetooth-only poll) really frees the slot.
+        closing, self._closing = self._closing, None
+        if closing is not None:
+            await closing
 
 
 def _supports(supported_attribute_ids: Optional[set], attr_id: int) -> bool:

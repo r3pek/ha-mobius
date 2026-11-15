@@ -224,12 +224,22 @@ async def async_handle_set_schedule_intensity(hass: HomeAssistant, call: Service
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Registers the services (called from async_setup())."""
+    """Registers the services (called from async_setup()).
+
+    The handlers must be coroutine functions: Home Assistant runs any other
+    callable in an executor thread, so a lambda returning a coroutine would
+    hand back a coroutine that is never awaited and the service would
+    silently do nothing."""
+
+    async def write_schedule_group(call: ServiceCall) -> None:
+        await async_handle_write_schedule_group(hass, call)
+
+    async def set_schedule_intensity(call: ServiceCall) -> None:
+        await async_handle_set_schedule_intensity(hass, call)
+
     hass.services.async_register(
-        DOMAIN, SERVICE_WRITE_SCHEDULE_GROUP, lambda call: async_handle_write_schedule_group(hass, call),
-        schema=WRITE_SCHEDULE_GROUP_SCHEMA,
+        DOMAIN, SERVICE_WRITE_SCHEDULE_GROUP, write_schedule_group, schema=WRITE_SCHEDULE_GROUP_SCHEMA,
     )
     hass.services.async_register(
-        DOMAIN, SERVICE_SET_SCHEDULE_INTENSITY, lambda call: async_handle_set_schedule_intensity(hass, call),
-        schema=SET_SCHEDULE_INTENSITY_SCHEMA,
+        DOMAIN, SERVICE_SET_SCHEDULE_INTENSITY, set_schedule_intensity, schema=SET_SCHEDULE_INTENSITY_SCHEMA,
     )
