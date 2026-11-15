@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
+- Requires python-mobius 0.13.0.
 - Dosing pumps (Versa): container remaining, level and days left, dosed
   today, daily dose and expected dosed so far from the dose schedule,
   container size (sensor and number), container empty, a Refill container
   button, and the container monitoring and dosing halt state (enum
-  sensors). Requires a python-mobius release that reads `DoseInfo`.
+  sensors).
 - When a pump reports it doesn't monitor its container, the remaining,
   level, days left and container empty entities and the Refill button are
   unavailable.
