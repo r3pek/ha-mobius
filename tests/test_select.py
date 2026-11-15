@@ -352,3 +352,98 @@ async def test_selecting_an_unknown_scene_raises():
 
     with pytest.raises(HomeAssistantError):
         await select.async_select_option("Nonexistent")
+
+
+# --------------------------------------------------------------------------
+# Scene changes: shown at once, confirmed SCENE_RECHECK_DELAY later
+# --------------------------------------------------------------------------
+
+from datetime import timedelta
+
+from homeassistant.util import dt as dt_util
+from tests.common import async_fire_time_changed
+
+from custom_components.mobius.const import SCENE_RECHECK_DELAY
+
+_RUNNING = ActiveScene(id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode, duration_seconds=89)
+
+
+def _settable(coordinator):
+    """async_set_updated_data() replaces coordinator.data, as the real one
+    does."""
+    def set_data(data):
+        coordinator.data = data
+    coordinator.async_set_updated_data = MagicMock(side_effect=set_data)
+    return coordinator
+
+
+@pytest.mark.asyncio
+async def test_selecting_none_shows_no_scene_at_once_without_reading_too_early():
+    """Read right after the cancel, the devices still report the scene, so
+    the scene stayed shown until the next poll: it is cleared at once
+    instead, and not read straight away."""
+    light_coord = _settable(_fake_coordinator("light1", current_scene=_RUNNING))
+    pump_coord = _settable(_fake_coordinator("pump1", current_scene=_RUNNING))
+    pump_coord.data["current_scene_ends_at"] = "2026-11-11T21:27:29+00:00"
+    select = SceneSelectionSelect(_entry_with_coordinators(light_coord, pump_coord), ("mobius", "tank_1234"))
+
+    await select.async_select_option("None")
+
+    assert select.current_option == "None"
+    assert select.extra_state_attributes is None
+    assert pump_coord.data["current_scene_ends_at"] is None
+    light_coord.async_request_refresh.assert_not_awaited()
+    pump_coord.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_bluetooth_only_device_the_cancel_didnt_reach_keeps_its_scene():
+    pump_coord = _settable(_fake_coordinator("pump1", current_scene=_RUNNING))
+    blade_coord = _settable(_fake_coordinator("blade1", current_scene=_RUNNING, bluetooth_only=True))
+    blade_coord.async_get_connected_device.return_value.resume_schedule.side_effect = IOError("out of range")
+    select = SceneSelectionSelect(_entry_with_coordinators(pump_coord, blade_coord), ("mobius", "tank_1234"))
+
+    with pytest.raises(HomeAssistantError, match="out of range"):
+        await select.async_select_option("None")
+
+    assert pump_coord.data["current_scene"] is None
+    assert blade_coord.data["current_scene"] is _RUNNING
+
+
+async def test_a_scene_change_is_read_again_after_the_recheck_delay(hass):
+    scene = Scene(index=0, id=int(SceneID.FeedMode), scene_type=SceneID.FeedMode,
+                  name="Feed", timeout=30, light=None, pump=None)
+    light_coord = _settable(_fake_coordinator("light1", scenes=[scene], current_scene=_RUNNING))
+    pump_coord = _settable(_fake_coordinator("pump1", scenes=[scene]))
+    select = SceneSelectionSelect(_entry_with_coordinators(light_coord, pump_coord), ("mobius", "tank_1234"))
+    select.hass = hass
+
+    await select.async_select_option("None")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=SCENE_RECHECK_DELAY - 1))
+    await hass.async_block_till_done()
+    light_coord.async_request_refresh.assert_not_awaited()
+
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=SCENE_RECHECK_DELAY + 1))
+    await hass.async_block_till_done()
+    light_coord.async_request_refresh.assert_awaited_once()
+    pump_coord.async_request_refresh.assert_awaited_once()
+
+    # Starting a scene: read at once, and again after the delay.
+    await select.async_select_option("Feed")
+    assert pump_coord.async_request_refresh.await_count == 2
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2 * SCENE_RECHECK_DELAY + 2))
+    await hass.async_block_till_done()
+    assert pump_coord.async_request_refresh.await_count == 3
+
+
+async def test_removing_the_select_cancels_a_pending_recheck(hass):
+    light_coord = _settable(_fake_coordinator("light1", current_scene=_RUNNING))
+    select = SceneSelectionSelect(_entry_with_coordinators(light_coord), ("mobius", "tank_1234"))
+    select.hass = hass
+
+    await select.async_select_option("None")
+    await select.async_will_remove_from_hass()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=SCENE_RECHECK_DELAY + 1))
+    await hass.async_block_till_done()
+
+    light_coord.async_request_refresh.assert_not_awaited()

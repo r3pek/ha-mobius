@@ -130,6 +130,11 @@ FIRMWARE_RETRY_INTERVAL = timedelta(hours=1)
 # A tank's clock is set when any of its devices drifts more than this many
 # seconds from Home Assistant's clock, or reports a different time zone
 # (checked after every poll, see __init__.py's _async_check_tank_time()).
+# Seconds after a scene is started or cancelled until the tank is read again
+# to confirm it (select.py): read at once, the devices may not have applied
+# the change yet.
+SCENE_RECHECK_DELAY = 10
+
 # How recent a device's last successful poll must be for the schedule card
 # to be served the schedule that poll read (checked against the device's
 # own checksum) instead of reading it again (websocket_api.py).

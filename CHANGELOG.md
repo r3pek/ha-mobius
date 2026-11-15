@@ -33,6 +33,11 @@
 - The gateway election and the periodic tank check run as tracked
   background tasks; a tank check doesn't start while the previous one is
   still running, and is cancelled when the entry is unloaded.
+- Fixed: after choosing "None" in the scene selection, the scene (and the
+  cards' scene banner) stayed shown until the next poll: read right after
+  the cancel, the devices still report the scene. It is now cleared at
+  once on the devices the cancel reached, and every device is read again
+  10 seconds after starting or cancelling a scene.
 - Fixed: a tank could get a new gateway through the tank check only once;
   after an elected gateway was lost a second time, the tank stayed without
   one until the entry was reloaded.

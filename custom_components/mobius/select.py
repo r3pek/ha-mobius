@@ -10,8 +10,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from . import MobiusRuntimeData
+from .const import SCENE_RECHECK_DELAY
 from .coordinator import async_tank_broadcast, used_scenes
 from .entity import (
     MobiusAdvancedFeatureEntity, async_add_device_entities, build_advanced_feature_entities, entry_tank_identifier,
@@ -98,6 +100,8 @@ class SceneSelectionSelect(SelectEntity):
         self._attr_device_info = DeviceInfo(identifiers={tank_identifier})
         self._entry = entry
         self._unsub_callbacks: list = []
+        # The pending re-check after a scene change (_schedule_recheck()).
+        self._unsub_recheck = None
 
     @callback
     def async_entity_id_changed(self, old_entity_id: str) -> None:
@@ -116,6 +120,9 @@ class SceneSelectionSelect(SelectEntity):
         for unsub in self._unsub_callbacks:
             unsub()
         self._unsub_callbacks.clear()
+        if self._unsub_recheck is not None:
+            self._unsub_recheck()
+            self._unsub_recheck = None
         await super().async_will_remove_from_hass()
 
     @callback
@@ -170,7 +177,11 @@ class SceneSelectionSelect(SelectEntity):
                 runtime.coordinators.values(), lambda device: device.resume_schedule(broadcast=True),
             )
             if sent:
-                await self._refresh_all(runtime)
+                # Not refreshed now: read right after the cancel, the
+                # devices still report the scene (it reaches them over the
+                # mesh), which kept the scene shown until the next poll.
+                self._clear_running_scene(runtime, sent)
+                self._schedule_recheck(runtime)
             if errors:
                 raise HomeAssistantError(f"Failed to resume the normal schedule on: {'; '.join(errors)}")
             return
@@ -189,6 +200,9 @@ class SceneSelectionSelect(SelectEntity):
         )
         if sent:
             await self._refresh_all(runtime)
+            # Right after a start SceneTimer can still read 0 (no scene
+            # running yet): read again once it has started.
+            self._schedule_recheck(runtime)
         if errors:
             raise HomeAssistantError(f"Failed to activate scene {option!r} on: {'; '.join(errors)}")
         if not sent:
@@ -198,6 +212,39 @@ class SceneSelectionSelect(SelectEntity):
     async def _refresh_all(runtime: MobiusRuntimeData) -> None:
         for coordinator in runtime.coordinators.values():
             await coordinator.async_request_refresh()
+
+    @staticmethod
+    def _clear_running_scene(runtime: MobiusRuntimeData, sent: list[str]) -> None:
+        """Shows no running scene on the devices the cancel reached: every
+        mesh device when the group write went out through one of them
+        (async_tank_broadcast()), and each Bluetooth-only device it was
+        sent to. The re-check (_schedule_recheck()) reads the real state."""
+        sent_serials = set(sent)
+        mesh_reached = any(
+            not c.bluetooth_only and serial in sent_serials for serial, c in runtime.coordinators.items()
+        )
+        for serial, coordinator in runtime.coordinators.items():
+            reached = serial in sent_serials if coordinator.bluetooth_only else mesh_reached
+            data = coordinator.data
+            if reached and data and data.get("current_scene") is not None:
+                coordinator.async_set_updated_data({**data, "current_scene": None, "current_scene_ends_at": None})
+
+    def _schedule_recheck(self, runtime: MobiusRuntimeData) -> None:
+        """Refreshes every device of the tank SCENE_RECHECK_DELAY after a
+        scene change, once the devices have applied it. A later change
+        restarts the delay."""
+        if self.hass is None:
+            return
+        if self._unsub_recheck is not None:
+            self._unsub_recheck()
+
+        @callback
+        def recheck(_now) -> None:
+            self._unsub_recheck = None
+            for coordinator in runtime.coordinators.values():
+                self.hass.async_create_task(coordinator.async_request_refresh())
+
+        self._unsub_recheck = async_call_later(self.hass, SCENE_RECHECK_DELAY, recheck)
 
 
 async def async_setup_entry(
